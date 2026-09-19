@@ -114,9 +114,18 @@ export function componentFixRollups(groups: readonly ComponentFixGroup[]): Compo
   });
 }
 
-/** "7 links with generic text "download", "docs" (+2 more)". */
+/**
+ * "7 links with generic text "download" in one shared block".
+ *
+ * The count is DISTINCT ELEMENT SLOTS, i.e. the groups in the rollup, not the
+ * occurrence total. The real install block is 7 slots on 14 pages: reporting
+ * "98 links" described the observations rather than the fix, and the fix is
+ * seven links in one block. The occurrence total stays in JSON, where it is
+ * evidence rather than an instruction.
+ */
 export function describeRollupDefect(rollup: ComponentFixRollup): string {
-  const { representative, elementCount, distinctValues, additionalValues } = rollup;
+  const { representative, distinctValues, additionalValues } = rollup;
+  const elementCount = rollup.groups.length;
   const noun =
     representative.defect.kind === "stale-copyright"
       ? elementCount === 1
@@ -133,6 +142,6 @@ export function describeRollupDefect(rollup: ComponentFixRollup): string {
         : "with generic text";
   const values = distinctValues.map((value) => `"${value}"`).join(", ");
   const tail = additionalValues > 0 ? `${values} (+${additionalValues} more)` : values;
-  // A single element reads as the plain defect; the count only helps in bulk.
-  return values.length === 0 ? `${elementCount} ${noun} ${what}` : `${elementCount} ${noun} ${what} ${tail}`;
+  const defect = values.length === 0 ? `${elementCount} ${noun} ${what}` : `${elementCount} ${noun} ${what} ${tail}`;
+  return `${defect} in one shared block`;
 }

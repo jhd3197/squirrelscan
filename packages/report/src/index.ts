@@ -56,7 +56,9 @@ export type { ComponentFixGroup, ComponentFixAttribution } from "./component-fix
 // Human-facing presentation of those groups. Renderers share these so llm,
 // markdown, text and console cannot drift in wording or in what they suppress.
 export {
+  ROOT_LABEL_MAX,
   describeDefect,
+  describeRoot,
   describeRegion,
   describeSlot,
   fixGroupLine,

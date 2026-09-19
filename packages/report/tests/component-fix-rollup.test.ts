@@ -6,8 +6,8 @@
 
 import { describe, expect, test } from "bun:test";
 import type { AuditReport, CheckResult, ComponentOccurrence, ReportRuleResult } from "../src/types";
-import { componentFixRollups } from "../src/component-fix-rollup";
-import { fixRollupLine } from "../src/component-presentation";
+import { componentFixRollups, describeRollupDefect } from "../src/component-fix-rollup";
+import { ROOT_LABEL_MAX, describeRoot, fixRollupLine } from "../src/component-presentation";
 import type { ComponentFixGroup } from "../src/component-fix-groups";
 import { renderJson } from "../src/output/json";
 import { renderLlm } from "../src/output/llm";
@@ -129,6 +129,34 @@ describe("rendered output", () => {
     expect(rollup.distinctValues[0]).toBe("download");
   });
 
+  test("the count is distinct element slots, not occurrences", () => {
+    // 7 slots on 14 pages is 98 observations but SEVEN links to edit. Reporting
+    // 98 described the evidence; the fix is seven links in one block.
+    const [rollup] = componentFixRollups(groups);
+    expect(rollup!.elementCount).toBe(98);
+    expect(describeRollupDefect(rollup!)).toContain("7 links with generic text");
+    expect(describeRollupDefect(rollup!)).toContain("in one shared block");
+    expect(describeRollupDefect(rollup!)).not.toContain("98");
+  });
+
+  test("a long block label is truncated", () => {
+    const long = groups.map((g) => ({
+      ...g,
+      rootHint: { tag: "div", heading: "A".repeat(80) },
+    })) as ComponentFixGroup[];
+    const label = describeRoot(componentFixRollups(long)[0]!)!;
+    expect(label.length).toBeLessThanOrEqual(ROOT_LABEL_MAX + 2);
+  });
+
+  test("label precedence is heading, then aria-label, then id", () => {
+    const make = (hint: Record<string, string>) =>
+      describeRoot({ ...groups[0]!, rootHint: hint } as ComponentFixGroup);
+    expect(make({ heading: "H", ariaLabel: "A", id: "i" })).toBe('"H"');
+    expect(make({ ariaLabel: "A", id: "i" })).toBe('"A"');
+    expect(make({ id: "i" })).toBe("#i");
+    expect(describeRoot(groups[0]!)).toBeUndefined();
+  });
+
   test("a multi-element rollup drops the slot hint and uses the block anchor", () => {
     const withHint = groups.map((g) => ({
       ...g,
@@ -136,7 +164,7 @@ describe("rendered output", () => {
     })) as ComponentFixGroup[];
     const [rollup] = componentFixRollups(withHint);
     const line = fixRollupLine(rollup!, 3, (p) => new URL(p).pathname);
-    expect(line).toContain('in the main content in the "Download squirrel" block');
+    expect(line).toContain('Likely one shared block ("Download squirrel") in the main content:');
     // One element's slot describes none of the other six.
     expect(line).not.toContain("main:1>main>div:1>a:1");
   });

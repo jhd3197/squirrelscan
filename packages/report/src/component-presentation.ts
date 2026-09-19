@@ -144,22 +144,31 @@ function regionSlotIndex(semanticSlot: string): number {
   return Number.isFinite(index) && index > 0 ? index : 1;
 }
 
+/** Longest a block label may be before it is truncated. */
+export const ROOT_LABEL_MAX = 40;
+
 /**
- * A human anchor for the block a rollup covers: its heading or its id.
+ * ONE human label for the block a group or rollup sits in.
  *
- * Read optionally so this works before the grouping stage supplies it. A single
- * element locator is meaningless once a unit spans several elements, so this
- * replaces the slot hint there; when no hint is available nothing is printed
- * rather than a locator that points at one arbitrary member.
+ * Precedence is heading, then aria-label, then id; `undefined` when the group
+ * carries no hint, which keeps the wording byte-identical to a report without
+ * one. This lives here, and only here, so all five surfaces make the same
+ * choice and phrase it the same way; callers escape it for their own format.
+ *
+ * Read defensively: the field is additive and may not be present yet.
  */
-export function describeRootHint(group: ComponentFixGroup): string {
-  const hint = (group as { rootHint?: { tag?: string; id?: string; ariaLabel?: string; heading?: string } })
-    .rootHint;
-  if (!hint) return "";
-  if (hint.heading) return ` in the "${hint.heading}" block`;
-  if (hint.ariaLabel) return ` in the "${hint.ariaLabel}" block`;
-  if (hint.id) return ` in #${hint.id}`;
-  return "";
+export function describeRoot(unit: ComponentFixGroup | ComponentFixRollup): string | undefined {
+  const group = "representative" in unit ? unit.representative : unit;
+  const hint = (
+    group as { rootHint?: { tag?: string; id?: string; ariaLabel?: string; heading?: string } }
+  ).rootHint;
+  if (!hint) return undefined;
+  const truncate = (value: string) =>
+    value.length > ROOT_LABEL_MAX ? `${value.slice(0, ROOT_LABEL_MAX - 1)}\u2026` : value;
+  if (hint.heading) return `"${truncate(hint.heading)}"`;
+  if (hint.ariaLabel) return `"${truncate(hint.ariaLabel)}"`;
+  if (hint.id) return `#${truncate(hint.id)}`;
+  return undefined;
 }
 
 /**
@@ -272,13 +281,11 @@ export function fixRollupLine(
   // still locates the fix. Several groups are several distinct elements, where
   // any one slot describes none of the others.
   if (rollup.groups.length === 1) return fixGroupLine(group, limit, format, includeSlot);
-  const where = `${describeRegion(group)}${describeRootHint(group)}`;
   const sample = fixGroupPages(group, limit, format);
   const pages = formatPageSample(sample);
-  if (group.attribution === "repeated-subtree") {
-    return `Likely one shared block in the ${where}: ${describeRollupDefect(rollup)}, seen on ${pages}`;
-  }
-  return `Fix once in the ${where}: ${describeRollupDefect(rollup)}, ${pages}`;
+  return `${fixPrefix(group, undefined)}: ${describeRollupDefect(rollup)}, ${
+    group.attribution === "repeated-subtree" ? "seen on " : ""
+  }${pages}`;
 }
 
 /**
@@ -295,12 +302,28 @@ export function fixGroupLine(
   format: (page: string) => string,
   includeSlot = true,
 ): string {
-  const where = includeSlot
-    ? `${describeRegion(group)} (${describeSlot(group)})`
-    : describeRegion(group);
   const sample = fixGroupPages(group, limit, format);
+  return `${fixPrefix(group, includeSlot ? describeSlot(group) : undefined)}: ${describeDefect(group)}, ${
+    group.attribution === "repeated-subtree" ? "seen on " : ""
+  }${formatPageSample(sample)}`;
+}
+
+/**
+ * "Fix once in the site footer ("Company links")" or
+ * "Likely one shared block ("Install squirrel") in the main content".
+ *
+ * A block label, when there is one, is the parenthetical; the element slot is
+ * the fallback for a single element with no label, and neither appears when a
+ * unit spans several elements (no single slot describes them).
+ */
+function fixPrefix(group: ComponentFixGroup, slot: string | undefined): string {
+  const label = describeRoot(group);
+  const region = describeRegion(group);
   if (group.attribution === "repeated-subtree") {
-    return `Likely one shared block in the ${where}: ${describeDefect(group)}, seen on ${formatPageSample(sample)}`;
+    const anchor = label ? ` (${label})` : "";
+    const tail = !label && slot ? ` (${slot})` : "";
+    return `Likely one shared block${anchor} in the ${region}${tail}`;
   }
-  return `Fix once in the ${where}: ${describeDefect(group)}, ${formatPageSample(sample)}`;
+  const anchor = label ? ` (${label})` : slot ? ` (${slot})` : "";
+  return `Fix once in the ${region}${anchor}`;
 }
