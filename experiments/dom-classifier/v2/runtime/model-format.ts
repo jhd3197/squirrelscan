@@ -163,13 +163,14 @@ export function loadModel(json: unknown): Model {
 
 /**
  * Raw class scores for one row. `values` is the FULL featurizer vector
- * (numeric features followed by the token buckets); `featureColumns` selects
- * the subset this head was trained on, so the caller never has to know which.
+ * (numeric features followed by the token buckets). A head trained on a subset
+ * of columns has that mapping baked into its packed feature indices by the
+ * exporter, so this walk never needs to know about it; `featureColumns` is
+ * retained only as metadata describing which columns the head actually uses.
  */
 export function scoreRow(head: Head, values: Float32Array, out: Float32Array): void {
   out.fill(0);
   const { feature, threshold, left, right, leaf, treeStart, leafStart, perInternal } = head;
-  const columns = head.featureColumns;
   for (let tree = 0; tree < head.numTrees; tree++) {
     const cls = tree % head.numClass;
     const internal = perInternal[tree]!;
@@ -181,10 +182,11 @@ export function scoreRow(head: Head, values: Float32Array, out: Float32Array): v
     }
     let node = treeStart[tree]!;
     for (;;) {
-      const column = feature[node]!;
-      const value = columns === null ? values[column]! : values[columns[column]!]!;
-      // float32 on both sides, exactly as the exporter's reference does.
-      const next = Math.fround(value) <= threshold[node]! ? left[node]! : right[node]!;
+      // `values` is a Float32Array, so reading it already yields the float32
+      // value: an explicit Math.fround here was a no-op called ~3,850 times per
+      // row. The exporter bakes the full-vector feature index into the tree, so
+      // there is no column indirection either.
+      const next = values[feature[node]!]! <= threshold[node]! ? left[node]! : right[node]!;
       if (next < 0) {
         // The exporter re-bases child pointers into the CONCATENATED arrays, so
         // -next-1 is already the global leaf index. Adding leafStart here as

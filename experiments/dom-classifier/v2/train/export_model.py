@@ -43,8 +43,14 @@ MAGIC = b"SQDC"
 VERSION = 1
 
 
-def flatten_tree(node: dict) -> tuple[list[dict], list[float]]:
-    """LightGBM's nested tree -> flat internal nodes + leaf values."""
+def flatten_tree(node: dict, columns: list[int] | None) -> tuple[list[dict], list[float]]:
+    """LightGBM's nested tree -> flat internal nodes + leaf values.
+
+    `columns` maps this head's training-matrix column back to its index in the
+    FULL featurizer vector, and the mapping is baked in here. The runtime then
+    indexes the feature row directly, with no per-node indirection and no
+    branch on whether the head was trained on a subset.
+    """
     internal: list[dict] = []
     leaves: list[float] = []
 
@@ -63,8 +69,9 @@ def flatten_tree(node: dict) -> tuple[list[dict], list[float]]:
         internal.append({})
         left = walk(n["left_child"])
         right = walk(n["right_child"])
+        split = int(n["split_feature"])
         internal[index] = {
-            "feature": int(n["split_feature"]),
+            "feature": columns[split] if columns is not None else split,
             "threshold": float(n["threshold"]),
             "left": left,
             "right": right,
@@ -75,7 +82,7 @@ def flatten_tree(node: dict) -> tuple[list[dict], list[float]]:
     return internal, leaves
 
 
-def pack(trees: list[dict], num_class: int) -> tuple[bytes, dict]:
+def pack(trees: list[dict], num_class: int, columns: list[int] | None) -> tuple[bytes, dict]:
     per_internal: list[int] = []
     per_leaves: list[int] = []
     features: list[int] = []
@@ -85,7 +92,7 @@ def pack(trees: list[dict], num_class: int) -> tuple[bytes, dict]:
     leaf_values: list[float] = []
 
     for tree in trees:
-        internal, leaves = flatten_tree(tree["tree_structure"])
+        internal, leaves = flatten_tree(tree["tree_structure"], columns)
         offset_internal = len(features)
         offset_leaf = len(leaf_values)
         for node in internal:
@@ -175,10 +182,10 @@ def head(model_path: Path, columns_path: Path | None, classes: list[str], thresh
 
     booster = lgb.Booster(model_file=str(model_path))
     dumped = booster.dump_model()
-    blob, reference = pack(dumped["tree_info"], len(classes))
     columns = (
         np.load(columns_path).astype(np.int64).tolist() if columns_path is not None else None
     )
+    blob, reference = pack(dumped["tree_info"], len(classes), columns)
     return booster, {
         "classes": classes,
         "featureColumns": columns,
@@ -255,20 +262,24 @@ def main() -> None:
 
     x_hold = sp.load_npz(models / "region-sample" / "X-holdout.npz").tocsr()
     columns = np.load(models / "region" / "columns-model.npy")
-    subset = np.asarray(x_hold[: args.parity_rows][:, columns].todense(), dtype=np.float32)
-    reference_probs = evaluate(region_ref, subset)
-    lgb_probs = region_booster.predict(subset)
+    full = np.asarray(x_hold[: args.parity_rows].todense(), dtype=np.float32)
+    # The packed trees index the FULL vector; LightGBM still wants the subset
+    # it was trained on, so the two are fed differently on purpose.
+    reference_probs = evaluate(region_ref, full)
+    lgb_probs = region_booster.predict(full[:, columns])
     max_diff = float(np.abs(reference_probs - lgb_probs).max())
     argmax_agreement = float(
         np.mean(reference_probs.argmax(axis=1) == lgb_probs.argmax(axis=1))
     )
     print(f"float32 reference vs LightGBM: maxAbsProbDiff {max_diff:.3e}, "
           f"argmax agreement {argmax_agreement:.6f}", flush=True)
+    if argmax_agreement < 1.0:
+        raise SystemExit("float32 packing changed an argmax; refusing to ship this artifact")
 
     # Sparse rows: the matrix is ~10% dense, and a dense JSON fixture was 30 MB
     # of mostly the character "0".
     sparse_rows = []
-    for row in subset:
+    for row in full:
         nz = np.flatnonzero(row)
         # NOT rounded. A float32 written with 7 decimal places is a DIFFERENT
         # number, and a feature value that lands next to a split threshold then
@@ -278,10 +289,10 @@ def main() -> None:
         sparse_rows.append({"i": nz.tolist(), "v": [float(row[j]) for j in nz]})
     fixture = {
         "featurizerVersion": schema["featurizerVersion"],
-        "rows": int(subset.shape[0]),
-        "width": int(subset.shape[1]),
+        "rows": int(full.shape[0]),
+        "width": int(full.shape[1]),
         "featureColumns": columns.tolist(),
-        "note": "sparse rows over the region head's OWN columns, already subset",
+        "note": "sparse rows over the FULL featurizer vector; the packed trees index it directly",
         "x": sparse_rows,
         "probs": [[float(v) for v in row] for row in reference_probs],
     }
@@ -298,7 +309,7 @@ def main() -> None:
                 "float32VsLightGBM": {
                     "maxAbsProbDiff": max_diff,
                     "argmaxAgreement": argmax_agreement,
-                    "rows": int(subset.shape[0]),
+                    "rows": int(full.shape[0]),
                 },
             },
             indent=2,

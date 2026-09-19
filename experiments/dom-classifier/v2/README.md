@@ -43,14 +43,22 @@ a training row.
 `featureSchema()` is the single source of truth and is written to
 `feature-schema.json` beside every dataset. At `FEATURIZER_VERSION = v2.0.0`:
 
-- **187 node features**: structure (depth, document-order position of the
+- **197 node features**: structure (depth, document-order position of the
   subtree's start and end, subtree size, sibling shape runs), link statistics
   (count, density, internal/external share, social, `tel:`/`mailto:`), text
   shape (headings, list items, paragraphs, average paragraph length), media and
   controls, accessibility hints, eleven text-pattern flags, four categoricals
   (tag, role, parent tag, grandparent tag, each from a fixed vocabulary where 0
   is out-of-vocabulary), and the 65-word curated class/id vocabulary as explicit
-  binaries for the node and for its parent.
+  binaries for the node and for its parent, and (v2.1.0) ten ancestor/sibling
+  context features: distance to and text/element share of the nearest
+  `<article>`/`<section>` ancestor, first/last child of it, sibling section
+  count, the node's body-level block size ratio and position, list-item text
+  share, and whether its own first child is a heading. Those ten were added
+  because the confusion matrix showed article_chrome losing 55% of its nodes to
+  content_block and sidebar losing 33%, neither of which is separable from a
+  node's own statistics. None of them reads a landmark tag or role, so the mask
+  is unaffected — `<article>` and `<section>` are not landmarks.
 - **137 page features**: URL shape (path depth, date in path, numeric id, eleven
   slug flags), document shape (title/h1, text length, heading histogram, link
   density, forms, media, code blocks, tables), landmark counts, page-level

@@ -512,3 +512,92 @@ describe("maskAll", () => {
     expect(odd.nodes.map((n) => n.features)).toEqual(plain.nodes.map((n) => n.features));
   });
 });
+
+describe("ancestor and sibling context (v2.1.0)", () => {
+  // These ten features exist because the confusion matrix said article_chrome
+  // loses 55% of its nodes to content_block and sidebar loses 33%, and neither
+  // pair is separable from a node's own statistics.
+  const page = `<!doctype html><html><head><title>T</title></head><body>
+    <header id="chrome"><nav><a href="/">Home</a></nav></header>
+    <main id="main"><article id="post">
+      <header id="ahead"><h1>Title</h1><p>By Ada Lovelace</p></header>
+      <p>Body prose that runs for a while and is clearly the bulk of this article.</p>
+      <p>A second paragraph, also prose, making the article the biggest block here.</p>
+      <p>A third paragraph, because a real article outweighs its sidebar by a lot.</p>
+      <p>A fourth paragraph, for the same reason.</p>
+      <p>A fifth paragraph, still prose.</p>
+      <footer id="afoot"><p>Filed under testing today.</p></footer>
+    </article></main>
+    <aside id="side"><ul><li><a href="/a">One</a></li><li><a href="/b">Two</a></li></ul></aside>
+  </body></html>`;
+  const out = featurizePage(page, URL);
+  const get = (elementId: string, name: string): number => {
+    const node = out.nodes.find((n) => n.elementId === elementId)!;
+    return node.features[NODE_FEATURE_NAMES.indexOf(name)]!;
+  };
+
+  test("the section ancestor is article/section only, never a landmark", () => {
+    // <article> is the nearest section ancestor of its own header.
+    expect(get("ahead", "sectionAncestorDistance")).toBe(1);
+    expect(get("ahead", "isFirstChildOfSection")).toBe(1);
+    expect(get("afoot", "isLastChildOfSection")).toBe(1);
+    expect(get("afoot", "isFirstChildOfSection")).toBe(0);
+    // The site header sits outside any article/section, so it has none — and
+    // <header> itself must never count as one, or masking would leak.
+    expect(get("chrome", "sectionAncestorDistance")).toBe(0);
+    expect(get("chrome", "sectionAncestorTextShare")).toBe(0);
+  });
+
+  test("the article's own chrome is a small share of its article", () => {
+    const headShare = get("ahead", "sectionAncestorTextShare");
+    expect(headShare).toBeGreaterThan(0);
+    expect(headShare).toBeLessThan(0.5);
+    expect(get("ahead", "sectionAncestorElementShare")).toBeLessThan(0.6);
+  });
+
+  test("a sidebar is a small body-level block beside a much larger one", () => {
+    // The exact ratio is fixture arithmetic (6 elements against 12); the
+    // property is that the sidebar is the smaller block and main is the largest.
+    expect(get("side", "bodyBlockSizeRatio")).toBeLessThanOrEqual(0.5);
+    expect(get("side", "bodyBlockSizeRatio")).toBeLessThan(get("main", "bodyBlockSizeRatio"));
+    expect(get("main", "bodyBlockSizeRatio")).toBe(1);
+    expect(get("side", "bodyBlockIndexShare")).toBe(1);
+    expect(get("chrome", "bodyBlockIndexShare")).toBe(0);
+  });
+
+  test("list-item text share separates a link list from prose", () => {
+    expect(get("side", "listItemTextShare")).toBe(1);
+    expect(get("post", "listItemTextShare")).toBe(0);
+  });
+
+  test("a heading as the first child is visible", () => {
+    expect(get("ahead", "firstChildIsHeading")).toBe(1);
+    expect(get("post", "firstChildIsHeading")).toBe(0);
+  });
+
+  test("the new features survive masking unchanged", () => {
+    // None of them reads a landmark tag or role, so a masked <header> and a
+    // masked <div> must still agree on every one.
+    const asHeader = featurizePage(page, URL, { mask: true });
+    const asDiv = featurizePage(
+      page
+        .replace('<header id="ahead">', '<div id="ahead">')
+        .replace("</header>\n      <p>Body", "</div>\n      <p>Body"),
+      URL,
+      { mask: true },
+    );
+    for (const name of [
+      "sectionAncestorDistance",
+      "sectionAncestorTextShare",
+      "isFirstChildOfSection",
+      "bodyBlockSizeRatio",
+      "listItemTextShare",
+      "firstChildIsHeading",
+    ]) {
+      const index = NODE_FEATURE_NAMES.indexOf(name);
+      const a = asHeader.nodes.find((n) => n.elementId === "ahead")!.features[index];
+      const b = asDiv.nodes.find((n) => n.elementId === "ahead")!.features[index];
+      expect([name, a]).toEqual([name, b]);
+    }
+  });
+});

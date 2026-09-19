@@ -171,9 +171,7 @@ describe.if(HAS_ARTIFACT && HAS_PARITY)("G4 parity with the Python evaluator", (
       values.fill(0);
       const sparse = fixture.x[row]!;
       for (let k = 0; k < sparse.i.length; k++) values[sparse.i[k]!] = sparse.v[k]!;
-      // The fixture is already subset to this head's own columns, so the
-      // column indirection is bypassed here on purpose.
-      scoreRowDirect(head, values, scores);
+      scoreRow(head, values, scores);
       const { index } = softmax(scores);
       const expected = fixture.probs[row]!;
       let expectedArgmax = 0;
@@ -190,17 +188,6 @@ describe.if(HAS_ARTIFACT && HAS_PARITY)("G4 parity with the Python evaluator", (
     expect(maxDiff).toBeLessThan(1e-5);
   });
 });
-
-/** scoreRow with the column indirection disabled: the parity fixture already
- *  holds the head's own columns. */
-function scoreRowDirect(
-  head: ReturnType<typeof loadModel>["region"],
-  values: Float32Array,
-  out: Float32Array,
-): void {
-  const direct = { ...head, featureColumns: null };
-  scoreRow(direct, values, out);
-}
 
 describe("page-type rules", () => {
   const withJson = (json: string): string =>

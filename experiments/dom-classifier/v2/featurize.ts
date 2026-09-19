@@ -29,7 +29,7 @@ import { parseHTML } from "../../../packages/parser/src/dom.ts";
 // measuring nothing.
 // ---------------------------------------------------------------------------
 
-export const FEATURIZER_VERSION = "v2.0.0";
+export const FEATURIZER_VERSION = "v2.1.0";
 
 /** Hashed class/id token buckets. Fixed forever at this version. */
 export const TOKEN_BUCKETS = 512;
@@ -559,9 +559,20 @@ interface Walk {
   ownText: string[];
   /** Tag plus the first six child tags: the shape a card grid repeats. */
   shapeKey: string[];
-  classTokens: string[][];
-  idTokens: string[][];
+  /** Raw class/id attributes. Tokenised LAZILY, at emit time, for the <= 400
+   *  candidates and their parents rather than for every element on the page:
+   *  tokenising all 22k elements of a large page was the largest single cost
+   *  in the walk, and at most 800 of them are ever read. */
+  classAttr: Array<string | null>;
+  idAttr: Array<string | null>;
   siblingIndex: Int32Array;
+  /** Nearest <article>/<section> ancestor index, or -1. */
+  sectionAncestor: Int32Array;
+  /** The ancestor that is a direct element child of <body>, or -1. */
+  bodyBlock: Int32Array;
+  /** Text inside <li> descendants: a list-heavy block is a menu or a sidebar,
+   *  not prose, and link density alone does not separate them. */
+  listItemTextLen: Int32Array;
   isLink: Uint8Array;
 
   // Subtree accumulators, folded child -> parent in the reverse pass.
@@ -630,9 +641,12 @@ function allocate(capacity: number): Walk {
     children: [],
     shapeKey: [],
     ownText: [],
-    classTokens: [],
-    idTokens: [],
+    classAttr: [],
+    idAttr: [],
     siblingIndex: new Int32Array(capacity),
+    sectionAncestor: new Int32Array(capacity).fill(-1),
+    bodyBlock: new Int32Array(capacity).fill(-1),
+    listItemTextLen: new Int32Array(capacity),
     isLink: new Uint8Array(capacity),
     elements: new Int32Array(capacity),
     textLen: new Int32Array(capacity),
@@ -721,6 +735,9 @@ function walkDocument(body: ElementLike, host: string): Walk {
       "parent",
       "depth",
       "siblingIndex",
+      "sectionAncestor",
+      "bodyBlock",
+      "listItemTextLen",
       "elements",
       "textLen",
       "linkTextLen",
@@ -765,6 +782,7 @@ function walkDocument(body: ElementLike, host: string): Walk {
       // Positions from `unwritten` up have not been filled yet; minHeading's
       // "no heading here" sentinel is 7, not 0.
       if (key === "minHeading") grown.fill(7, unwritten);
+      if (key === "sectionAncestor" || key === "bodyBlock") grown.fill(-1, unwritten);
       (walk as unknown as Record<string, Int32Array>)[key] = grown;
     }
     const links = new Uint8Array(next);
@@ -775,9 +793,18 @@ function walkDocument(body: ElementLike, host: string): Walk {
 
   // Explicit stack: recursion blows up on deep CMS markup and this has to hold
   // for any page in the corpus.
-  const stack: Array<{ node: ElementLike; parent: number; depth: number; sibling: number }> = [
-    { node: body, parent: -1, depth: 0, sibling: 0 },
-  ];
+  const stack: Array<{
+    node: ElementLike;
+    parent: number;
+    depth: number;
+    sibling: number;
+    /** Nearest ancestor <article>/<section>, or -1. NOT aside/nav: those are
+     *  landmark tags, and a feature reading them would leak the region label
+     *  past the mask. article and section are not landmarks, so they are free. */
+    section: number;
+    /** The ancestor that is a direct element child of <body>, or -1. */
+    bodyBlock: number;
+  }> = [{ node: body, parent: -1, depth: 0, sibling: 0, section: -1, bodyBlock: -1 }];
 
   while (stack.length > 0) {
     const frame = stack.pop()!;
@@ -791,13 +818,15 @@ function walkDocument(body: ElementLike, host: string): Walk {
     walk.parent[index] = frame.parent;
     walk.depth[index] = frame.depth;
     walk.siblingIndex[index] = frame.sibling;
+    walk.sectionAncestor[index] = frame.section;
+    walk.bodyBlock[index] = frame.parent === 0 ? index : frame.bodyBlock;
     walk.elements[index] = 1;
 
     const role = (el.getAttribute("role") ?? "").trim().toLowerCase();
     walk.role.push(role);
-    walk.classTokens.push(tokenize(el.getAttribute("class")));
+    walk.classAttr.push(el.getAttribute("class"));
     const rawId = el.getAttribute("id");
-    walk.idTokens.push(tokenize(rawId));
+    walk.idAttr.push(rawId);
     walk.elementId.push(rawId ?? "");
 
     // Own text and the element children, in one pass over the child nodes.
@@ -823,8 +852,17 @@ function walkDocument(body: ElementLike, host: string): Walk {
     // Children are pushed in reverse so they pop in document order. That makes
     // the walk a strict preorder DFS, which is what lets `subtreeEnd` be
     // computed as i + subtreeElements - 1 rather than tracked per node.
+    const childSection = tag === "article" || tag === "section" ? index : frame.section;
+    const childBodyBlock = frame.parent === 0 ? index : frame.bodyBlock;
     for (let i = children.length - 1; i >= 0; i--) {
-      stack.push({ node: children[i]!, parent: index, depth: frame.depth + 1, sibling: i });
+      stack.push({
+        node: children[i]!,
+        parent: index,
+        depth: frame.depth + 1,
+        sibling: i,
+        section: childSection,
+        bodyBlock: childBodyBlock,
+      });
     }
   }
 
@@ -1086,6 +1124,8 @@ function foldSubtrees(walk: Walk): void {
     // avgParagraphLength is right when the candidate IS the paragraph.
     if (walk.tag[i] === "p") walk.paragraphTextLen[i]! += walk.textLen[i]!;
     walk.paragraphTextLen[parent]! += walk.paragraphTextLen[i]!;
+    if (walk.tag[i] === "li") walk.listItemTextLen[i]! += walk.textLen[i]!;
+    walk.listItemTextLen[parent]! += walk.listItemTextLen[i]!;
   }
   if (walk.count > 0 && walk.isLink[0]) walk.linkTextLen[0] = walk.textLen[0]!;
 }
@@ -1170,6 +1210,22 @@ export const NODE_FEATURE_NAMES: string[] = [
   "isBodyChild",
   "isFirstBodyChild",
   "isLastBodyChild",
+  // Ancestor and sibling context (v2.1.0). Added because the confusion matrix
+  // said article_chrome loses 55% of its nodes to content_block and sidebar
+  // loses 33%, and neither pair is separable from a node's own statistics:
+  // both are about WHERE the node sits relative to the section it belongs to
+  // and to the page's other top-level blocks. None of these reads a landmark
+  // tag or role, so the mask is unaffected.
+  "sectionAncestorDistance",
+  "sectionAncestorTextShare",
+  "sectionAncestorElementShare",
+  "isFirstChildOfSection",
+  "isLastChildOfSection",
+  "siblingSectionCount",
+  "bodyBlockSizeRatio",
+  "bodyBlockIndexShare",
+  "listItemTextShare",
+  "firstChildIsHeading",
   // links
   "linkCount",
   "linkDensity",
@@ -1305,14 +1361,50 @@ function ratio(part: number, whole: number): number {
   return whole > 0 ? part / whole : 0;
 }
 
+/** Hops from a node up to its nearest <article>/<section> ancestor; 0 when it
+ *  has none, which is also the value for a node sitting directly in one's
+ *  place, so the two are told apart by sectionAncestorTextShare being 0. */
+function sectionDistance(walk: Walk, i: number): number {
+  const target = walk.sectionAncestor[i]!;
+  if (target < 0) return 0;
+  let hops = 0;
+  let current = walk.parent[i]!;
+  while (current >= 0 && hops < 64) {
+    hops++;
+    if (current === target) return hops;
+    current = walk.parent[current]!;
+  }
+  return hops;
+}
+
 interface EmitContext {
   walk: Walk;
   childCounts: Int32Array;
   distinctChildTags: Int32Array;
   maxRepeatedRun: Int32Array;
   subtreeEnd: Int32Array;
+  /** article/section children per element, for the sibling-section count. */
+  sectionChildCount: Int32Array;
+  /** 1 when an element's first element child is a heading. */
+  firstChildHeading: Uint8Array;
+  /** Subtree elements of the largest direct element child of <body>. */
+  largestBodyBlock: number;
+  /** Number of direct element children of <body>. */
+  bodyChildCount: number;
+  /** Lazily built class+id tokens, keyed by element index. */
+  tokenCache: Array<string[] | undefined>;
   pageElements: number;
   pageText: number;
+}
+
+/** Tokens for one element, computed once and cached. Only candidates and their
+ *  parents ever ask, which is <= 800 elements rather than every element. */
+function tokensOf(ctx: EmitContext, i: number): string[] {
+  const cached = ctx.tokenCache[i];
+  if (cached !== undefined) return cached;
+  const built = tokenize(ctx.walk.classAttr[i]!).concat(tokenize(ctx.walk.idAttr[i]!));
+  ctx.tokenCache[i] = built;
+  return built;
 }
 
 function emitNodeVector(ctx: EmitContext, i: number, mask: boolean, maskAll = false): number[] {
@@ -1323,6 +1415,8 @@ function emitNodeVector(ctx: EmitContext, i: number, mask: boolean, maskAll = fa
   const grandparentTag = grandparent >= 0 ? walk.tag[grandparent]! : "";
   const siblings = parent >= 0 ? ctx.childCounts[parent]! : 1;
   const textLen = walk.textLen[i]!;
+  const section = walk.sectionAncestor[i]!;
+  const block = walk.bodyBlock[i]!;
 
   // Masking: the node's own landmark tag and role, and any landmark ancestor
   // tag, become an ordinary div with no role. Nothing else in the vector is
@@ -1353,6 +1447,22 @@ function emitNodeVector(ctx: EmitContext, i: number, mask: boolean, maskAll = fa
     isBodyChild: parentTag === "body" ? 1 : 0,
     isFirstBodyChild: parentTag === "body" && walk.siblingIndex[i]! === 0 ? 1 : 0,
     isLastBodyChild: parentTag === "body" && walk.siblingIndex[i]! === siblings - 1 ? 1 : 0,
+    sectionAncestorDistance: sectionDistance(walk, i),
+    sectionAncestorTextShare: section >= 0 ? ratio(textLen, walk.textLen[section]!) : 0,
+    sectionAncestorElementShare:
+      section >= 0 ? ratio(walk.elements[i]!, walk.elements[section]!) : 0,
+    isFirstChildOfSection:
+      section >= 0 && parent === section && walk.siblingIndex[i]! === 0 ? 1 : 0,
+    isLastChildOfSection:
+      section >= 0 && parent === section && walk.siblingIndex[i]! === ctx.childCounts[section]! - 1
+        ? 1
+        : 0,
+    siblingSectionCount: parent >= 0 ? ctx.sectionChildCount[parent]! : 0,
+    bodyBlockSizeRatio: block >= 0 ? ratio(walk.elements[block]!, ctx.largestBodyBlock) : 0,
+    bodyBlockIndexShare:
+      block >= 0 ? ratio(walk.siblingIndex[block]!, Math.max(1, ctx.bodyChildCount - 1)) : 0,
+    listItemTextShare: ratio(walk.listItemTextLen[i]!, textLen),
+    firstChildIsHeading: ctx.firstChildHeading[i]!,
     linkCount: walk.links[i]!,
     linkDensity: ratio(walk.linkTextLen[i]!, textLen),
     internalLinkShare: ratio(walk.internalLinks[i]!, walk.links[i]!),
@@ -1397,17 +1507,11 @@ function emitNodeVector(ctx: EmitContext, i: number, mask: boolean, maskAll = fa
   const out: number[] = Array.from({ length: NODE_FEATURE_NAMES.length }, () => 0);
   for (let f = 0; f < SELF_VOCAB_BASE; f++) out[f] = values[NODE_FEATURE_NAMES[f]!] ?? 0;
 
-  for (const token of walk.classTokens[i]!) {
-    setVocabBit(out, token, SELF_VOCAB_BASE, mask, i, "", maskAll);
-  }
-  for (const token of walk.idTokens[i]!) {
+  for (const token of tokensOf(ctx, i)) {
     setVocabBit(out, token, SELF_VOCAB_BASE, mask, i, "", maskAll);
   }
   if (parent >= 0) {
-    for (const token of walk.classTokens[parent]!) {
-      setVocabBit(out, token, PARENT_VOCAB_BASE, mask, i, "p:", maskAll);
-    }
-    for (const token of walk.idTokens[parent]!) {
+    for (const token of tokensOf(ctx, parent)) {
       setVocabBit(out, token, PARENT_VOCAB_BASE, mask, i, "p:", maskAll);
     }
   }
@@ -1432,19 +1536,17 @@ function setVocabBit(
   if (slot !== undefined) out[base + slot] = 1;
 }
 
-function emitNodeTokens(walk: Walk, i: number, mask: boolean, maskAll = false): number[] {
-  const parent = walk.parent[i]!;
+function emitNodeTokens(ctx: EmitContext, i: number, mask: boolean, maskAll = false): number[] {
+  const parent = ctx.walk.parent[i]!;
   const buckets = new Set<number>();
   const add = (token: string, prefix: "s:" | "p:"): void => {
     const seed = prefix === "s:" ? token : `p:${token}`;
     if (mask && LABEL_WORDS.has(token) && dropsUnderMask(i, seed, maskAll)) return;
     buckets.add(tokenBucket(`${prefix}${token}`));
   };
-  for (const token of walk.classTokens[i]!) add(token, "s:");
-  for (const token of walk.idTokens[i]!) add(token, "s:");
+  for (const token of tokensOf(ctx, i)) add(token, "s:");
   if (parent >= 0) {
-    for (const token of walk.classTokens[parent]!) add(token, "p:");
-    for (const token of walk.idTokens[parent]!) add(token, "p:");
+    for (const token of tokensOf(ctx, parent)) add(token, "p:");
   }
   return [...buckets].sort((a, b) => a - b);
 }
@@ -1575,7 +1677,8 @@ function emitPageVector(
 
   // Body class/id tokens: WordPress and Shopify both stamp the page template
   // there, which is the strongest page-type signal that is not schema.
-  const bodyTokens = walk.count > 0 ? walk.classTokens[0]!.concat(walk.idTokens[0]!) : [];
+  const bodyTokens =
+    walk.count > 0 ? tokenize(walk.classAttr[0]!).concat(tokenize(walk.idAttr[0]!)) : [];
   for (const word of CURATED_VOCAB) values[`body_${word}`] = 0;
   const buckets = new Set<number>();
   for (const token of bodyTokens) {
@@ -1656,10 +1759,25 @@ export function featurizeDocument(
   const distinctChildTags = new Int32Array(walk.count);
   const maxRepeatedRun = new Int32Array(walk.count);
   const subtreeEnd = new Int32Array(walk.count);
+  const sectionChildCount = new Int32Array(walk.count);
+  const firstChildHeading = new Uint8Array(walk.count);
   const tags = new Set<string>();
   for (let i = 0; i < walk.count; i++) {
     const kids = walk.children[i]!;
     childCounts[i] = kids.length;
+    const firstKid = kids[0];
+    if (firstKid !== undefined) {
+      const kidTag = walk.tag[firstKid]!;
+      if (kidTag.length === 2 && kidTag[0] === "h" && kidTag[1]! >= "1" && kidTag[1]! <= "6") {
+        firstChildHeading[i] = 1;
+      }
+    }
+    let sections = 0;
+    for (const kid of kids) {
+      const kidTag = walk.tag[kid]!;
+      if (kidTag === "article" || kidTag === "section") sections++;
+    }
+    sectionChildCount[i] = sections;
     subtreeEnd[i] = i + walk.elements[i]! - 1;
     tags.clear();
     let run = kids.length > 0 ? 1 : 0;
@@ -1681,12 +1799,26 @@ export function featurizeDocument(
 
   const pageElements = walk.count;
   const pageText = walk.textLen[0]!;
+  // Body-level block statistics: a sidebar is a small block sitting beside a
+  // much larger one, which is measurable without knowing either one's tag.
+  let largestBodyBlock = 0;
+  let bodyChildCount = 0;
+  for (const child of walk.children[0] ?? []) {
+    bodyChildCount++;
+    if (walk.elements[child]! > largestBodyBlock) largestBodyBlock = walk.elements[child]!;
+  }
+
   const ctx: EmitContext = {
     walk,
     childCounts,
     distinctChildTags,
     maxRepeatedRun,
     subtreeEnd,
+    sectionChildCount,
+    firstChildHeading,
+    largestBodyBlock,
+    bodyChildCount,
+    tokenCache: Array.from({ length: walk.count }),
     pageElements,
     pageText,
   };
@@ -1713,12 +1845,12 @@ export function featurizeDocument(
       parentId: walk.parent[i]!,
       depth: walk.depth[i]!,
       features: emitNodeVector(ctx, i, options.mask === true, options.maskAll === true),
-      tokens: emitNodeTokens(walk, i, options.mask === true, options.maskAll === true),
+      tokens: emitNodeTokens(ctx, i, options.mask === true, options.maskAll === true),
       masked: options.mask === true,
     };
     if (options.emitMasked && !options.mask) {
       node.maskedFeatures = emitNodeVector(ctx, i, true, options.maskAll === true);
-      node.maskedTokens = emitNodeTokens(walk, i, true, options.maskAll === true);
+      node.maskedTokens = emitNodeTokens(ctx, i, true, options.maskAll === true);
     }
     return node;
   });

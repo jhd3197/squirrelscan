@@ -141,6 +141,7 @@ export function classifyDocument(
   const nodes: NodePrediction[] = [];
   const scores = usable ? new Float32Array(usable.region.numClass) : null;
   let values: Float32Array | null = null;
+  let previousTokens: number[] | null = null;
   let budgetSpent = false;
 
   for (const node of featurized.nodes) {
@@ -157,7 +158,8 @@ export function classifyDocument(
       nodes.push({ nodeRef, ...withRules(node, byId) });
       continue;
     }
-    values = toVector(node.features, node.tokens, usable.nodeFeatureCount, values);
+    values = toVector(node.features, node.tokens, usable.nodeFeatureCount, values, previousTokens);
+    previousTokens = node.tokens;
     scoreRow(usable.region, values, scores);
     const { index, probability } = softmax(scores);
     const threshold = options.threshold ?? usable.region.confidenceThreshold;
@@ -184,16 +186,29 @@ function withRules(
   return { label, confidence: label === "unknown" ? 0 : 1, source: "rules" };
 }
 
-/** Numeric features followed by the one-hot token buckets, as one float32 row. */
+/**
+ * Numeric features followed by the one-hot token buckets, as one float32 row.
+ *
+ * The buffer is reused across nodes, and the token half is cleared by UNSETTING
+ * the handful of buckets the previous node set rather than zeroing all 512 of
+ * them. A page's 400 nodes set about 8 buckets each, so the naive `fill(0)`
+ * was doing ~200k redundant writes per page for ~3k useful ones. The numeric
+ * half needs no clearing: every one of its slots is written every time.
+ */
 function toVector(
   features: number[],
   tokens: number[],
   numericCount: number,
-  reuse?: Float32Array | null,
+  reuse: Float32Array | null,
+  previousTokens: number[] | null,
 ): Float32Array {
   const width = numericCount + TOKEN_BUCKETS;
   const out = reuse && reuse.length === width ? reuse : new Float32Array(width);
-  out.fill(0);
+  if (previousTokens && out === reuse) {
+    for (const bucket of previousTokens) out[numericCount + bucket] = 0;
+  } else {
+    out.fill(0);
+  }
   for (let i = 0; i < numericCount; i++) out[i] = features[i] ?? 0;
   for (const bucket of tokens) out[numericCount + bucket] = 1;
   return out;
@@ -202,7 +217,7 @@ function toVector(
 /** The region head's raw class probabilities for one node, for evaluation and
  *  for the parity fixture. Returns a copy, not the reused buffer. */
 export function regionProbabilities(model: Model, node: NodeFeatures): Float32Array {
-  const values = toVector(node.features, node.tokens, model.nodeFeatureCount);
+  const values = toVector(node.features, node.tokens, model.nodeFeatureCount, null, null);
   const scores = new Float32Array(model.region.numClass);
   scoreRow(model.region, values, scores);
   softmax(scores);
