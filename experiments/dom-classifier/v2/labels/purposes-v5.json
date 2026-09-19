@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Purpose vocabulary reduction, dom-taxonomy-v2 to dom-purposes-v5",
+  "mappingRevision": "dom-purposes-v5",
+  "sourceTaxonomyRevision": "dom-taxonomy-v2",
+  "rationale": "Support is the union of the two v4 annotators' positive observations over the 375 pilot-pool nodes (Luna label sets, Jev Noul probability >= 0.75). Everything at or above 10 is retained; everything below is dropped, because a label neither annotator used ten times in 375 nodes cannot be measured, and each retained label costs one Noul question per node per request. Dropping is reversible: restore a label here and bump the prompt revision.",
+  "supportWindow": {
+    "pool": "diverse-500-v1 validation + train-QA nodes with both v4 annotators present",
+    "nodes": 375,
+    "threshold": 10
+  },
+  "retained": {
+    "navigation": 228,
+    "information": 90,
+    "editorial": 57,
+    "support": 47,
+    "product_information": 30,
+    "promotion": 28,
+    "search": 28,
+    "share": 17,
+    "purchase": 15,
+    "instruction": 11,
+    "announcement": 11,
+    "consent": 11
+  },
+  "dropped": {
+    "social_proof": 8,
+    "comparison": 8,
+    "filter": 7,
+    "account": 7,
+    "subscription": 7,
+    "submit": 6,
+    "feedback": 5,
+    "authentication": 5,
+    "advertising": 4,
+    "toggle": 3,
+    "review": 3,
+    "dismiss": 3,
+    "media_playback": 2,
+    "download": 1,
+    "unknown": 1
+  },
+  "unknownHandling": "The purposes `unknown` singleton is dropped as a label. Abstention on this axis is an omitted observation, and ruling every purpose out is a complete observation with an empty label list. Section 5 of policy-v5.md states the same rule to both annotators.",
+  "scoringNote": "A v4 label set is projected onto v5 by discarding dropped labels before comparison. That is generous to v4 on rows whose only disagreement was a dropped label; the pilot reports v4 agreement both on the raw v4 vocabulary and on the projected vocabulary so the effect of the reduction is separable from the effect of the definitions."
+}
