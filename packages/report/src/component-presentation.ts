@@ -145,6 +145,24 @@ function regionSlotIndex(semanticSlot: string): number {
 }
 
 /**
+ * A human anchor for the block a rollup covers: its heading or its id.
+ *
+ * Read optionally so this works before the grouping stage supplies it. A single
+ * element locator is meaningless once a unit spans several elements, so this
+ * replaces the slot hint there; when no hint is available nothing is printed
+ * rather than a locator that points at one arbitrary member.
+ */
+export function describeRootHint(group: ComponentFixGroup): string {
+  const hint = (group as { rootHint?: { tag?: string; id?: string; ariaLabel?: string; heading?: string } })
+    .rootHint;
+  if (!hint) return "";
+  if (hint.heading) return ` in the "${hint.heading}" block`;
+  if (hint.ariaLabel) return ` in the "${hint.ariaLabel}" block`;
+  if (hint.id) return ` in #${hint.id}`;
+  return "";
+}
+
+/**
  * The element's position inside its region, as a short trailing hint. The raw
  * locator stays in JSON; here it is a breadcrumb, not an identifier.
  */
@@ -250,10 +268,11 @@ export function fixRollupLine(
   includeSlot = true,
 ): string {
   const group = rollup.representative;
+  // One group is ONE element, however many pages it repeats on, so its slot
+  // still locates the fix. Several groups are several distinct elements, where
+  // any one slot describes none of the others.
   if (rollup.groups.length === 1) return fixGroupLine(group, limit, format, includeSlot);
-  const where = includeSlot
-    ? `${describeRegion(group)} (${describeSlot(group)})`
-    : describeRegion(group);
+  const where = `${describeRegion(group)}${describeRootHint(group)}`;
   const sample = fixGroupPages(group, limit, format);
   const pages = formatPageSample(sample);
   if (group.attribution === "repeated-subtree") {

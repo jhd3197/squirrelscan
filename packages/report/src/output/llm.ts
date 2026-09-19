@@ -27,7 +27,7 @@ import { describeSlot, fixRollupLine, fixUnits, ruleFixCoverage } from "../compo
 import { uncoveredItems } from "../component-presentation";
 
 /** Bounded page sample per fix group in LLM output. */
-const LLM_FIX_GROUP_PAGES = 5;
+const LLM_FIX_GROUP_PAGES = 3;
 import { LLM_REPORT } from "@squirrelscan/core-contracts/limits";
 import { formatSiteWideItem, siteWideContext, siteWideItem } from "../site-wide-items";
 import { stripControlChars } from "@squirrelscan/core-contracts/control-chars";
@@ -395,7 +395,11 @@ export function renderLlm(report: AuditReport, options?: LlmRenderOptions): stri
             // serialize exactly as it did before rollups existed.
             rollup.groups.length > 1 ? ` elements="${rollup.elementCount}"` : ""
           }>${escapeXml(
-            `${fixRollupLine(rollup, LLM_FIX_GROUP_PAGES, (page) => compressUrl(page, baseOrigin), false)} [${describeSlot(rollup.representative)}]`,
+            `${fixRollupLine(rollup, LLM_FIX_GROUP_PAGES, (page) => compressUrl(page, baseOrigin), false)}${
+              // One group is one element; its slot still locates the fix. For a
+              // unit spanning several, the block anchor inside the line replaces it.
+              rollup.groups.length === 1 ? ` [${describeSlot(rollup.representative)}]` : ""
+            }`,
           )}</${tag}>`,
         );
       }

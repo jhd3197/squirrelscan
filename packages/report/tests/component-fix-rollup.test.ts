@@ -7,6 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import type { AuditReport, CheckResult, ComponentOccurrence, ReportRuleResult } from "../src/types";
 import { componentFixRollups } from "../src/component-fix-rollup";
+import { fixRollupLine } from "../src/component-presentation";
 import type { ComponentFixGroup } from "../src/component-fix-groups";
 import { renderJson } from "../src/output/json";
 import { renderLlm } from "../src/output/llm";
@@ -126,6 +127,30 @@ describe("rendered output", () => {
     const rollup = rollups[0]!;
     expect(rollup.elementCount).toBe(98);
     expect(rollup.distinctValues[0]).toBe("download");
+  });
+
+  test("a multi-element rollup drops the slot hint and uses the block anchor", () => {
+    const withHint = groups.map((g) => ({
+      ...g,
+      rootHint: { tag: "div", id: "install", heading: "Download squirrel" },
+    })) as ComponentFixGroup[];
+    const [rollup] = componentFixRollups(withHint);
+    const line = fixRollupLine(rollup!, 3, (p) => new URL(p).pathname);
+    expect(line).toContain('in the main content in the "Download squirrel" block');
+    // One element's slot describes none of the other six.
+    expect(line).not.toContain("main:1>main>div:1>a:1");
+  });
+
+  test("a single-group rollup keeps its slot: one element, however many pages", () => {
+    const [rollup] = componentFixRollups([group({ root: "install-block", value: "download" })]);
+    const line = fixRollupLine(rollup!, 3, (p) => new URL(p).pathname);
+    expect(line).toContain("(div:1 > a:1)");
+  });
+
+  test("no root hint prints no anchor rather than an arbitrary locator", () => {
+    const [rollup] = componentFixRollups(groups);
+    const line = fixRollupLine(rollup!, 3, (p) => new URL(p).pathname);
+    expect(line).toContain("Likely one shared block in the main content:");
   });
 
   test("an empty group list renders nothing and changes nothing", () => {
