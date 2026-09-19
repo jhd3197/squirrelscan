@@ -124,7 +124,10 @@ function resolveContent(prefix: string): { hash: string; html: string } | null {
 
 const pending = queue.filter((row) => !done.has(row.pageId));
 const work = limit > 0 ? pending.slice(0, limit) : pending;
-const transport = createHttpTransport();
+const requestTimeoutMs = Number(argument("--request-timeout-ms", "45000"));
+if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1000 || requestTimeoutMs > 120_000)
+  throw new Error("--request-timeout-ms must be 1000..120000");
+const transport = createHttpTransport({ timeoutMs: requestTimeoutMs });
 const totals = { labelled: 0, missingHtml: 0, failed: 0, inputTokens: 0, retries: 0 };
 const latencies: number[] = [];
 const failures: Array<{ pageId: string; error: string }> = [];
@@ -136,15 +139,20 @@ async function worker(): Promise<void> {
     const index = cursor++;
     if (index >= work.length) return;
     const row = work[index];
-    const resolved = resolveContent(row.contentHash);
-    if (!resolved) {
-      totals.missingHtml++;
-      continue;
-    }
-    const html = resolved.html;
-    const evidence = pageEvidenceFromHtml(html, row.url, row.pageId);
-    const built = buildPageTypeRequest(evidence, policy);
+    // Everything for this row is inside the try, including reading the store
+    // and building the evidence. When those sat outside it, one page that threw
+    // — a malformed blob, a document linkedom refuses — rejected the worker's
+    // promise and killed that worker silently. With four workers, four such
+    // pages stopped the run dead at `Promise.all` with no error and no exit:
+    // 1,606 rows in one burst and then nothing, which reads as a stall.
     try {
+      const resolved = resolveContent(row.contentHash);
+      if (!resolved) {
+        totals.missingHtml++;
+        continue;
+      }
+      const evidence = pageEvidenceFromHtml(resolved.html, row.url, row.pageId);
+      const built = buildPageTypeRequest(evidence, policy);
       const { response, latencyMs, retries } = await evaluateWithBackoff(transport, built.request);
       const answer = response.answers.page_type as {
         choice?: string;
@@ -190,7 +198,7 @@ async function worker(): Promise<void> {
           error: error instanceof Error ? error.message : String(error),
         });
     }
-    if ((totals.labelled + totals.failed) % 250 === 0)
+    if ((totals.labelled + totals.failed) % 500 === 0)
       console.log(
         JSON.stringify({
           stage: "progress",

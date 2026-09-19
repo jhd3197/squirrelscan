@@ -161,7 +161,25 @@ class Revision:
             self.module.validate_packet(packet)
 
 
-def run_cli(prompt: str, log_path: Path) -> tuple[str, float, int]:
+def truncate_packet(text: str, budget: int) -> tuple[str, bool]:
+    """Bound a packet's text deterministically, keeping every structural line.
+
+    Only the `text=` line is cut, and always at the same character count, so a
+    truncated packet is reproducible. The structural lines — tag, role,
+    ancestors, attributes — are what most judgments turn on and are never
+    dropped. A truncated row is marked rather than silently shortened, and a row
+    is truncated rather than dropped: a missing row biases the audit toward
+    whatever is short.
+    """
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        if line.startswith("text=") and len(line) > budget + 5:
+            lines[index] = line[: budget + 5]
+            return "\n".join(lines), True
+    return text, False
+
+
+def run_cli(prompt: str, log_path: Path, timeout_s: float) -> tuple[str, float, int]:
     command = [
         "claude",
         "-p",
@@ -174,15 +192,22 @@ def run_cli(prompt: str, log_path: Path) -> tuple[str, float, int]:
         DENIED_TOOLS,
     ]
     started = time.monotonic()
-    completed = subprocess.run(
-        command,
-        input=prompt,
-        text=True,
-        cwd=WORKING_DIR,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            input=prompt,
+            text=True,
+            cwd=WORKING_DIR,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired as error:
+        # A hung call is the failure mode that cost this run an hour: the CLI
+        # produced nothing and never returned. Bound it so the batch is recorded
+        # as rejected and the rest of the queue continues.
+        raise RuntimeError(f"reviewer call exceeded {timeout_s:.0f}s") from error
     latency_ms = int((time.monotonic() - started) * 1000)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(completed.stdout)
@@ -208,6 +233,13 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=20)
     parser.add_argument("--concurrency", type=int, default=2)
     parser.add_argument("--max-batches", type=int, default=0)
+    parser.add_argument("--timeout-s", type=float, default=120.0)
+    parser.add_argument(
+        "--max-packet-chars",
+        type=int,
+        default=0,
+        help="bound each packet's text= line; 0 leaves packets untouched",
+    )
     args = parser.parse_args()
     if not 1 <= args.batch_size <= 40:
         raise ValueError("batch-size must be 1..40")
@@ -216,6 +248,16 @@ def main() -> None:
 
     revision = Revision(args.revision)
     packets = read_jsonl(args.packets)
+    truncated_ids: set[str] = set()
+    if args.max_packet_chars:
+        bounded = []
+        for packet in packets:
+            text, was_cut = truncate_packet(packet["input"], args.max_packet_chars)
+            if was_cut:
+                truncated_ids.add(f"{packet['pageId']}\0{packet.get('nodeId') or ''}")
+                packet = {**packet, "input": text, "inputSha256": sha256_text(text)}
+            bounded.append(packet)
+        packets = bounded
     for packet in packets:
         revision.validate_packet(packet)
     if len({revision.key(packet) for packet in packets}) != len(packets):
@@ -252,7 +294,9 @@ def main() -> None:
         batch_dir.mkdir(parents=True, exist_ok=True)
         (batch_dir / "prompt.txt").write_text(prompt)
         try:
-            reply, cost, latency_ms = run_cli(prompt, batch_dir / "cli-envelope.json")
+            reply, cost, latency_ms = run_cli(
+                prompt, batch_dir / "cli-envelope.json", args.timeout_s
+            )
         except Exception as error:  # noqa: BLE001 - recorded, never silently dropped
             with lock:
                 rejected.append({"batch": number, "reason": str(error), "packets": len(batch)})
@@ -275,6 +319,9 @@ def main() -> None:
                 row["promptRevision"] = revision.revision_id
                 row["packetRevision"] = packet.get("packetRevision", revision.revision_id)
                 row["stratum"] = packet.get("stratum")
+                row["truncated"] = (
+                    f"{packet['pageId']}\0{packet.get('nodeId') or ''}" in truncated_ids
+                )
                 if revision.policy_sha256:
                     row["policySha256"] = revision.policy_sha256
                 row["reviewerRun"] = {

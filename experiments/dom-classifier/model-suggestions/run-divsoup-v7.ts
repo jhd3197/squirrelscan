@@ -210,7 +210,7 @@ if (existsSync(outputPath))
     }
   }
 const work = prepared.filter((item) => !done.has(item.page.pageId));
-const transport = createHttpTransport();
+const transport = createHttpTransport({ timeoutMs: 45_000 });
 const totals = { requests: 0, rows: 0, inputTokens: 0, failed: 0, retries: 0 };
 const failures: Array<{ pageId: string; error: string }> = [];
 const latencies: number[] = [];
@@ -222,13 +222,15 @@ async function worker(): Promise<void> {
     const index = cursor++;
     if (index >= work.length) return;
     const item = work[index];
-    const evidences = item.candidates.map((candidate, position) =>
-      nodeEvidenceFromHtml(candidate, `${item.page.pageId}#${item.nodeIds[position]}`),
-    );
-    const built = buildRequestFromEvidence(item.pageEvidence, evidences, policy, {
-      includePage: true,
-    });
+    // Inside the try for the same reason as the page-type runner: evidence
+    // building that throws outside it kills the worker without a message.
     try {
+      const evidences = item.candidates.map((candidate, position) =>
+        nodeEvidenceFromHtml(candidate, `${item.page.pageId}#${item.nodeIds[position]}`),
+      );
+      const built = buildRequestFromEvidence(item.pageEvidence, evidences, policy, {
+        includePage: true,
+      });
       const { response, latencyMs, retries } = await evaluateWithBackoff(transport, built.request);
       const answers = response.answers as Record<string, Record<string, unknown>>;
       const snapshot = snapshotHash(built.request.state);
