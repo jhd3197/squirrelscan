@@ -330,7 +330,11 @@ const cases: Case[] = [
   {
     // A region past the structural budget is still observed, but it cannot be
     // matched structurally, so it abstains and records why.
-    id: "oversized-region-structure-abstain",
+    // A region far larger than the old 256-node skeleton budget. It used to
+    // abstain as `structure-truncated`, which cost exactly the big shared
+    // components their identity; the structure is now streamed and signed
+    // whole, so size alone no longer degrades an observation.
+    id: "oversized-region-is-still-identified",
     rule: "link",
     pages: [
       {
@@ -338,8 +342,8 @@ const cases: Case[] = [
         html: `<footer>${Array.from({ length: 400 }, (_, i) => `<span>${i}</span>`).join("")}<a href='/pricing'>Read more</a></footer>`,
       },
     ],
-    expectedGroups: [],
-    expectedUncertain: ["/huge#footer:1>footer>a:1:link-text-generic"],
+    expectedGroups: [["/huge#footer:1>footer>a:1:link-text-generic"]],
+    expectedUncertain: [],
   },
   {
     id: "nested-article-header-not-site-header",

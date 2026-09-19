@@ -153,18 +153,40 @@ function semanticAncestorContext(element: Element): string {
   return roles.length > 0 ? roles.join(">") : "none";
 }
 
-function childSkeleton(element: Element): { value: string; truncated: boolean } {
-  let remaining = 256;
-  let truncated = false;
-  const visit = (current: Element): string => {
-    if (remaining-- <= 0) {
-      truncated = true;
-      return "…";
+/**
+ * A structural digest of `element`'s whole subtree, hashed as it is walked.
+ *
+ * Replaces a 256-node skeleton STRING. The cap was there to bound the string,
+ * but it also set `structure-truncated`, which made the region ungroupable —
+ * and the regions it hit were the big shared ones. On one WordPress theme it
+ * silenced 102 of 235 link-text occurrences, all of them the same mega menu:
+ * the budget removed exactly the component the feature exists to find.
+ *
+ * Streaming removes the cap without ever materialising the string, so cost is
+ * one O(nodes) pass. It is iterative because the walk is now unbounded and a
+ * deep DOM would otherwise overflow the stack. The token sequence is identical
+ * to the old skeleton's, so this is the same identity, just not truncated.
+ */
+function structuralDigest(element: Element): string {
+  const hash = createHash("sha256");
+  // A string entry is a literal token; an element entry is expanded in place.
+  const stack: (Element | string)[] = [element];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    if (typeof current === "string") {
+      hash.update(current);
+      continue;
     }
+    hash.update(`${tag(current)}${stableAttributes(current)}(`);
     const children = [...current.children] as Element[];
-    return `${tag(current)}${stableAttributes(current)}(${children.map(visit).join(",")})`;
-  };
-  return { value: visit(element), truncated };
+    // Pushed in reverse so the stack yields `child , child , child )`.
+    stack.push(")");
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      stack.push(children[index]!);
+      if (index > 0) stack.push(",");
+    }
+  }
+  return `s128:${hash.digest("hex").slice(0, 32)}`;
 }
 
 function elementPath(root: Element, element: Element, cache: ComponentOccurrenceCache): string {
@@ -188,7 +210,7 @@ function documentRoot(element: Element): Element {
 }
 
 type RegionEvidence = {
-  skeleton: { value: string; truncated: boolean };
+  skeleton: string;
   contentHash: string;
   slot: string;
 };
@@ -223,7 +245,7 @@ export class ComponentOccurrenceCache {
   subtreeSignature(element: Element): string {
     const cached = this.subtreeSignatures.get(element);
     if (cached !== undefined) return cached;
-    const skeleton = childSkeleton(element).value;
+    const skeleton = structuralDigest(element);
     let value = this.signatureBySkeleton.get(skeleton);
     if (value === undefined) {
       value = componentHash(skeleton);
@@ -298,7 +320,7 @@ export class ComponentOccurrenceCache {
       this.slots.set(slotKey, slots);
     }
     const evidence = {
-      skeleton: childSkeleton(region),
+      skeleton: structuralDigest(region),
       contentHash: componentHash(region.textContent?.replace(/\s+/g, " ").trim() ?? ""),
       slot: slots.get(region) ?? `${role}:unknown`,
     };
@@ -310,6 +332,23 @@ export class ComponentOccurrenceCache {
 
 /** Deepest-first, so the report stage can pick the highest level that recurs. */
 const MAX_SUBTREE_LEVELS = 8;
+
+/**
+ * The ladder's root when there is no landmark at all.
+ *
+ * A theme with no header/nav/main/footer gives every element `no-region`, which
+ * is most of a WooCommerce page: one real site produced 323 occurrences on 40
+ * pages, every one of them unjudgeable. `<body>` is the honest outer bound
+ * there, and the text share is measured against it for the same reason.
+ */
+function ladderRoot(element: Element): Element {
+  let last = element;
+  for (let current: Element | null = element; current; current = current.parentElement) {
+    if (tag(current) === "body") return current;
+    last = current;
+  }
+  return last;
+}
 
 /**
  * Describe each ancestor between the faulty element and its region root.
@@ -386,11 +425,8 @@ export function componentOccurrence(
   const regionEvidence = region
     ? cache.getRegionEvidence(region, role, nesting, ancestorContext)
     : undefined;
-  const regionSkeleton = regionEvidence?.skeleton ?? {
-    value: tag(input.element),
-    truncated: false,
-  };
-  const elementSkeleton = childSkeleton(input.element);
+  const regionSkeleton = regionEvidence?.skeleton ?? tag(input.element);
+  const elementSkeleton = structuralDigest(input.element);
   // Ordered most-specific first, so the recorded reason names the actual cause
   // rather than whichever test happened to run first.
   const contentNested =
@@ -402,12 +438,10 @@ export function componentOccurrence(
       ? "content-nested"
       : role === "main"
         ? "region-main"
-        : regionSkeleton.truncated || elementSkeleton.truncated
-          ? "structure-truncated"
-          : undefined;
+        : undefined;
   const groupable = uncertainReason === undefined;
-  const regionStructure = regionSkeleton.value;
-  const elementStructure = elementSkeleton.value;
+  const regionStructure = regionSkeleton;
+  const elementStructure = elementSkeleton;
   const contentHash = regionEvidence?.contentHash ?? componentHash("");
   const pageHash = componentHash(input.pageUrl);
   // Derived ONCE, here, and recorded on the occurrence below; every consumer
@@ -432,12 +466,16 @@ export function componentOccurrence(
     ]),
   );
 
-  // Only the region-main case: a landmark occurrence keeps exactly the evidence
-  // it has today, and an unknown or article-nested one stays page-scoped.
+  // Two cases the rule genuinely cannot judge from one page: an element inside
+  // `main`, and a page with no landmarks at all. Both get a ladder so the
+  // report stage can decide. A landmark occurrence keeps exactly the evidence
+  // it has today, and an article-nested one stays page-scoped.
   const candidates =
     uncertainReason === "region-main" && region
       ? subtreeCandidates(input.element, region, cache)
-      : [];
+      : uncertainReason === "no-region"
+        ? subtreeCandidates(input.element, ladderRoot(input.element), cache)
+        : [];
 
   return {
     version: 1,

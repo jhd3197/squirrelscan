@@ -255,7 +255,8 @@ export function componentFixGroups(ruleId: string, checks: CheckResult[]): Compo
         // …except a main-region occurrence carrying an ancestor ladder, which
         // the pass below may still promote on cross-page evidence.
         if (
-          occurrence.uncertainReason === "region-main" &&
+          (occurrence.uncertainReason === "region-main" ||
+            occurrence.uncertainReason === "no-region") &&
           (occurrence.subtreeCandidates?.length ?? 0) > 0
         )
           promotable.push({

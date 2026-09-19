@@ -55,15 +55,25 @@ describe("linkTextRule component occurrences", () => {
       uncertainReason: "no-region",
     });
 
-    // A region larger than the skeleton budget is still a real observation; it
-    // just cannot be matched structurally, and it has to say so.
+    // A big region is signed by streaming its structure, so size alone no
+    // longer costs an observation its identity. The 256-node skeleton budget
+    // used to report `structure-truncated` here and make the region
+    // ungroupable, which silenced exactly the large shared components (one
+    // theme's mega menu accounted for 102 of 235 occurrences).
     const huge = Array.from({ length: 400 }, (_, i) => `<span>${i}</span>`).join("");
-    const truncated = run(`<footer>${huge}<a href="/docs">Learn more</a></footer>`)[0]!;
-    expect(truncated.componentOccurrences?.[0]).toMatchObject({
-      groupable: false,
-      confidence: "uncertain",
-      uncertainReason: "structure-truncated",
+    const big = run(`<footer>${huge}<a href="/docs">Learn more</a></footer>`)[0]!;
+    expect(big.componentOccurrences?.[0]).toMatchObject({
+      groupable: true,
+      confidence: "observed",
     });
+    expect(big.componentOccurrences?.[0]?.uncertainReason).toBeUndefined();
+
+    // Size does not flatten identity either: two regions that differ only
+    // beyond the old budget must still sign differently.
+    const tail = (marker: string) =>
+      run(`<footer>${huge}<${marker}></${marker}><a href="/docs">Learn more</a></footer>`)[0]!
+        .componentOccurrences?.[0]?.region.structuralSignature;
+    expect(tail("aside")).not.toBe(tail("section"));
 
     const clean = run('<footer><a href="/docs">Learn more</a></footer>')[0]!;
     expect(clean.componentOccurrences?.[0]?.confidence).toBe("observed");
