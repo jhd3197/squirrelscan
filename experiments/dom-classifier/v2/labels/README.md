@@ -36,7 +36,7 @@ axes, so v4 and v5 outputs stay comparable. Only page types and purposes change
 vocabulary, and both changes are recorded as explicit maps rather than applied
 silently.
 
-## Pilot result, 2026-09-19: G1 fails at 72.0% after a +38 point gain
+## Pilot result, 2026-09-19: G1 passes at v6, 84.5%
 
 200 nodes and 125 pages, stratified to oversample the measured failure
 boundaries, drawn from validation and train-QA only. Aggregates are public;
@@ -50,8 +50,21 @@ over quota and could not be re-run under v5.
 | componentType, 200 nodes | agreement |
 |---|---:|
 | Jev v4 vs Reviewer B v4 | 34.0% |
-| **Jev v5 vs Reviewer B v5** | **72.0%** |
+| Jev v5 vs Reviewer B v5 | 72.0% |
+| **Jev v6 vs Reviewer B v6** | **84.5%** |
 | threshold | 75% |
+
+v6 deleted the link-menu escape hatch and gated the no-attributes abstention.
+Those two clauses are exactly the two strata that moved: `header` 48.6% → 97.1%,
+`footer` 75.0% → 100%, `empty_media` 80.0% → 96.0%. The 31 remaining
+disagreements are led by the `<main>` container-versus-section ambiguity that v6
+deliberately left alone.
+
+**Known v6 regression, fix in v7:** `purposes` micro-F1 fell 0.698 → 0.361
+because Jev generalised the componentType chrome rule into the purposes axis. On
+`header` nodes its `navigation` purpose went 27 → 0 and on `footer` 20 → 0, while
+the reviewer went the other way. Section 1 needs one sentence saying the chrome
+rule decides shape, not what the node does for a user.
 
 Other axes, within reviewer B, as micro-F1 over positive claims (exact-set
 identity is reported too, but reviewer B declares `purposes` complete on only 22
