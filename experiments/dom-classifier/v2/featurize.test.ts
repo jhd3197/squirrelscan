@@ -601,3 +601,77 @@ describe("ancestor and sibling context (v2.1.0)", () => {
     }
   });
 });
+
+describe("degenerate documents", () => {
+  // A crawler meets all of these. None may throw: the featurizer returning an
+  // empty result is a page with no candidates, which is a true statement.
+  const cases: Array<[string, string]> = [
+    ["empty string", ""],
+    ["whitespace only", "   \n\t "],
+    ["not html at all", "%PDF-1.4\n%âãÏÓ\n1 0 obj"],
+    ["a bare text node", "hello"],
+    ["head with no body", "<!doctype html><html><head><title>T</title></head></html>"],
+    ["unclosed everything", "<!doctype html><html><body><div><p>text"],
+    ["xml declaration", '<?xml version="1.0"?><rss><channel><title>x</title></channel></rss>'],
+  ];
+
+  for (const [name, html] of cases) {
+    test(`does not throw on ${name}`, () => {
+      const out = featurizePage(html, URL);
+      expect(Array.isArray(out.nodes)).toBe(true);
+      expect(out.page.features.length).toBe(PAGE_FEATURE_NAMES.length);
+      for (const value of out.page.features) expect(Number.isFinite(value)).toBe(true);
+    });
+  }
+
+  test("a document with no documentElement yields an empty result, not an exception", () => {
+    // linkedom's `body` getter throws here rather than returning null, which is
+    // what crashed the G3 run over stored crawls.
+    const out = featurizePage("", URL);
+    expect(out.nodes).toEqual([]);
+    expect(out.page.elementCount).toBe(0);
+    expect(out.page.divSoup).toBe(true);
+  });
+});
+
+describe("listItemTextShare with nested lists", () => {
+  // Lists nest, and a mega menu nests them three deep. Accumulating each level
+  // counted the same characters repeatedly and produced shares above 1.
+  const share = (html: string, elementId: string): number => {
+    const out = featurizePage(html, URL);
+    const node = out.nodes.find((n) => n.elementId === elementId)!;
+    return node.features[NODE_FEATURE_NAMES.indexOf("listItemTextShare")]!;
+  };
+
+  test("a share is never above 1, however deeply the lists nest", () => {
+    const page = `<!doctype html><html><head><title>T</title></head><body>
+      <nav id="mega"><ul>
+        <li>Products<ul>
+          <li>Alpha<ul><li><a href="/a">Alpha one</a></li><li><a href="/b">Alpha two</a></li></ul></li>
+          <li>Beta<ul><li><a href="/c">Beta one</a></li><li><a href="/d">Beta two</a></li></ul></li>
+        </ul></li>
+        <li>Company<ul><li><a href="/e">About</a></li><li><a href="/f">Careers</a></li></ul></li>
+      </ul></nav>
+    </body></html>`;
+    const value = share(page, "mega");
+    expect(value).toBeGreaterThan(0.9);
+    expect(value).toBeLessThanOrEqual(1);
+  });
+
+  test("a flat list is still fully counted", () => {
+    const page = `<!doctype html><html><head><title>T</title></head><body>
+      <nav id="flat"><ul><li><a href="/a">One</a></li><li><a href="/b">Two</a></li></ul></nav>
+    </body></html>`;
+    expect(share(page, "flat")).toBe(1);
+  });
+
+  test("prose beside a list gets a share below 1", () => {
+    const page = `<!doctype html><html><head><title>T</title></head><body>
+      <section id="mixed"><p>A paragraph of prose that is clearly longer than the list below it.</p>
+      <ul><li>one</li><li>two</li></ul></section>
+    </body></html>`;
+    const value = share(page, "mixed");
+    expect(value).toBeGreaterThan(0);
+    expect(value).toBeLessThan(0.5);
+  });
+});

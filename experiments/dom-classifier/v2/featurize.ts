@@ -51,7 +51,7 @@ const MAX_LOCAL_TEXT = 400;
 /** Subtrees never walked: no user-visible structure, and script/style text
  *  would otherwise contaminate every text statistic (see the contamination
  *  table in diverse-corpus/ERROR-ANALYSIS-2026-09-19.md). */
-const SKIP_SUBTREE = new Set([
+export const SKIP_SUBTREE = new Set([
   "script",
   "style",
   "template",
@@ -1124,7 +1124,13 @@ function foldSubtrees(walk: Walk): void {
     // avgParagraphLength is right when the candidate IS the paragraph.
     if (walk.tag[i] === "p") walk.paragraphTextLen[i]! += walk.textLen[i]!;
     walk.paragraphTextLen[parent]! += walk.paragraphTextLen[i]!;
-    if (walk.tag[i] === "li") walk.listItemTextLen[i]! += walk.textLen[i]!;
+    // OVERWRITE, not add: a list item's text is its whole subtree, and lists
+    // nest. A mega menu is <li> inside <li> inside <li>, and adding at each
+    // level counted the same characters once per level -- which produced a
+    // "share" of 1.79 on exactly the nav elements this feature was meant to
+    // identify. Assigning absorbs the nested items into the outermost one, the
+    // same way linkTextLen absorbs a nested link.
+    if (walk.tag[i] === "li") walk.listItemTextLen[i] = walk.textLen[i]!;
     walk.listItemTextLen[parent]! += walk.listItemTextLen[i]!;
   }
   if (walk.count > 0 && walk.isLink[0]) walk.linkTextLen[0] = walk.textLen[0]!;
@@ -1730,12 +1736,28 @@ interface ParsedDocument {
   querySelector(selector: string): ElementLike | null;
 }
 
+/**
+ * The document's body, or its root element, or null.
+ *
+ * linkedom's `body` getter destructures `documentElement.firstElementChild`,
+ * so on a document that has no documentElement at all -- an empty response, a
+ * PDF served as text/html, a truncated blob -- it THROWS rather than returning
+ * null. A crawler meets those, so reading it defensively is not paranoia.
+ */
+function safeRoot(document: ParsedDocument): ElementLike | null {
+  try {
+    return document.body ?? document.documentElement ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export function featurizeDocument(
   document: ParsedDocument,
   url: string,
   options: FeaturizeOptions = {},
 ): FeaturizedPage {
-  const root = document.body ?? document.documentElement;
+  const root = safeRoot(document);
   const host = hostOf(url);
   const empty: FeaturizedPage = {
     page: {

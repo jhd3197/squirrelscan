@@ -121,6 +121,8 @@ export function classifyDocument(
       featurized.page.features,
       featurized.page.tokens,
       usable.pageFeatureCount,
+      null,
+      null,
     );
     const scores = new Float32Array(usable.pageType.numClass);
     scoreRow(usable.pageType, values, scores);

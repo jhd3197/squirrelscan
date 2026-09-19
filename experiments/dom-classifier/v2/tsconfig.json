@@ -10,7 +10,15 @@
     "noEmit": true,
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
-    "types": ["bun", "node"]
+    "types": [
+      "bun",
+      "node"
+    ]
   },
-  "include": ["*.ts"]
+  "include": [
+    "*.ts",
+    "runtime/*.ts",
+    "train/*.ts",
+    "experiments/*.ts"
+  ]
 }
