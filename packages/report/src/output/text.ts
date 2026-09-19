@@ -7,8 +7,8 @@ import { cacheReasonsLabel, cacheStatsSummaryLine } from "../cache-stats";
 import { reportFailureReasonCode } from "../failure-notice";
 import { getScoreGrade } from "../scoring";
 import { REPORT_TEXT_WRAP_WIDTH } from "../constants";
-import { fixRollupLine, ruleFixCoverage } from "../component-presentation";
-import { componentFixRollups } from "../component-fix-rollup";
+import { fixRollupLine, fixUnits, ruleFixCoverage } from "../component-presentation";
+
 import { uncoveredItems } from "../component-presentation";
 import { formatSiteWideItem, siteWideContext, siteWideItem } from "../site-wide-items";
 import { groupIssuesByCategory, flattenIssuesBySeverity } from "../grouping";
@@ -38,6 +38,8 @@ import { lockedRulesMessage } from "../locked-rules";
 import { stripControlChars } from "@squirrelscan/core-contracts/control-chars";
 
 export interface TextRenderOptions {
+  /** Roll up groups that are one repair (default true). */
+  componentRollup?: boolean;
   /** Collapse site-wide items into one line (default true). */
   siteWideCollapse?: boolean;
   version?: string;
@@ -318,7 +320,7 @@ export function renderText(report: AuditReport, options?: TextRenderOptions): st
         for (const line of wrapped.slice(1)) write(`            ${line}`);
       }
       const coverage = ruleFixCoverage(rule);
-      for (const rollup of componentFixRollups(coverage.groups)) {
+      for (const rollup of fixUnits(coverage.groups, options?.componentRollup !== false)) {
         // One actionable line per REPAIR, not per faulty element in a block.
         write(`    ${fixRollupLine(rollup, 5, pathOnly)}`);
       }

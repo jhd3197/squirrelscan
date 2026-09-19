@@ -7,8 +7,8 @@ import { cacheReasonsLabel, cacheStatsSummaryLine } from "../cache-stats";
 import { reportFailureReasonCode } from "../failure-notice";
 import { getScoreGrade } from "../scoring";
 import { REPORT_SOURCE_PAGES_PREVIEW, REPORT_PAGES_HARD_CAP } from "../constants";
-import { fixRollupLine, ruleFixCoverage } from "../component-presentation";
-import { componentFixRollups } from "../component-fix-rollup";
+import { fixRollupLine, fixUnits, ruleFixCoverage } from "../component-presentation";
+
 import { uncoveredItems } from "../component-presentation";
 import { formatSiteWideItem, siteWideContext, siteWideItem } from "../site-wide-items";
 import { groupIssuesByCategory, flattenIssuesBySeverity } from "../grouping";
@@ -37,6 +37,8 @@ import { getPathname } from "../url";
 import { lockedRulesMessage } from "../locked-rules";
 
 export interface MarkdownRenderOptions {
+  /** Roll up groups that are one repair (default true). */
+  componentRollup?: boolean;
   /** Collapse site-wide items into one line (default true). */
   siteWideCollapse?: boolean;
   version?: string;
@@ -385,7 +387,7 @@ export function renderMarkdown(report: AuditReport, options?: MarkdownRenderOpti
       }
 
       const coverage = ruleFixCoverage(rule);
-      for (const rollup of componentFixRollups(coverage.groups)) {
+      for (const rollup of fixUnits(coverage.groups, options?.componentRollup !== false)) {
         // One actionable line per REPAIR, not per faulty element in a block.
         lines.push(
           `**${fixRollupLine(rollup, REPORT_SOURCE_PAGES_PREVIEW, (page) => getPathname(page) || "/")}**`,

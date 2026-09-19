@@ -22,8 +22,8 @@ import {
   stableIdPercent,
 } from "../entities";
 import { seedRedirect } from "../coverage";
-import { describeSlot, fixRollupLine, ruleFixCoverage } from "../component-presentation";
-import { componentFixRollups } from "../component-fix-rollup";
+import { describeSlot, fixRollupLine, fixUnits, ruleFixCoverage } from "../component-presentation";
+
 import { uncoveredItems } from "../component-presentation";
 
 /** Bounded page sample per fix group in LLM output. */
@@ -35,6 +35,8 @@ import { AUDIT_FAILURE_NEXT_STEP_THIRD } from "@squirrelscan/core-contracts/fail
 import { reportFailureReasonCode } from "../failure-notice";
 
 export interface LlmRenderOptions {
+  /** Roll up groups that are one repair (default true). */
+  componentRollup?: boolean;
   /** Collapse site-wide items into one line (default true). */
   siteWideCollapse?: boolean;
   version?: string;
@@ -382,7 +384,7 @@ export function renderLlm(report: AuditReport, options?: LlmRenderOptions): stri
       const messages = rule.checks.map((c) => c.message).filter((m) => m);
       if (messages.length > 0) lines.push(`${indent(2)}${escapeXml(messages.join("; "))}`);
       const coverage = ruleFixCoverage(rule);
-      for (const rollup of componentFixRollups(coverage.groups)) {
+      for (const rollup of fixUnits(coverage.groups, options?.componentRollup !== false)) {
         // One actionable line per REPAIR. No hashes, no signatures, no internal
         // keys: an agent cannot act on grouping mechanics.
         const repeated = rollup.representative.attribution === "repeated-subtree";

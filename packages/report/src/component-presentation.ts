@@ -15,7 +15,7 @@
 import type { CheckItem } from "./types";
 import type { ComponentFixGroup } from "./component-fix-groups";
 import type { ComponentFixRollup } from "./component-fix-rollup";
-import { describeRollupDefect } from "./component-fix-rollup";
+import { componentFixRollups, describeRollupDefect } from "./component-fix-rollup";
 import type { GroupedRule } from "./grouping";
 import { ruleAffectedPages } from "./affected-pages";
 
@@ -209,6 +209,32 @@ export function formatPageSample(sample: PageSample, noun = "pages"): string {
   return sample.hasMore
     ? `${sample.total} ${noun}: ${list} (+${sample.total - sample.shown.length} more)`
     : `${sample.total} ${noun}: ${list}`;
+}
+
+/**
+ * The units a renderer prints: rolled up, or one per group.
+ *
+ * Wrapping each group as a one-member rollup rather than calling
+ * `componentFixRollups` is what `componentRollup: false` does, so the two
+ * columns of a before/after comparison differ in exactly one behaviour. It
+ * builds the units here instead of adding a parameter to `componentFixRollups`,
+ * whose exported signature other renderers depend on.
+ */
+export function fixUnits(
+  groups: readonly ComponentFixGroup[],
+  rollupEnabled = true,
+): ComponentFixRollup[] {
+  if (rollupEnabled) return componentFixRollups(groups);
+  return groups.map((group) => ({
+    groups: [group],
+    groupIds: [group.id],
+    representative: group,
+    affectedPages: group.affectedPages,
+    affectedPageCount: group.affectedPageCount,
+    elementCount: group.occurrences.length,
+    distinctValues: [],
+    additionalValues: 0,
+  }));
 }
 
 /**

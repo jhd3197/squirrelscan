@@ -62,6 +62,7 @@ export {
   fixGroupLine,
   fixGroupPages,
   fixRollupLine,
+  fixUnits,
   formatPageSample,
   ruleFixCoverage,
   uncoveredItems,
