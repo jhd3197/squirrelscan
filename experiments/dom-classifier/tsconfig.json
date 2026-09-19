@@ -8,7 +8,20 @@
     "skipLibCheck": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
-    "types": ["bun", "node"]
+    "types": ["bun", "node"],
+    // linkedom is a dependency of @squirrelscan/parser, not of this experiment,
+    // so node resolution from here walks past it. extract-dom.ts imports only
+    // its `Element` type; mapping the one specifier avoids adding a dependency
+    // and re-resolving the whole workspace lockfile for a type-only import.
+    "paths": { "linkedom": ["../../packages/parser/node_modules/linkedom"] }
   },
-  "include": ["labeler/**/*.ts", "model-suggestions/**/*.ts"]
+  // extract-dom.ts and its test were outside the program until a
+  // model-suggestions module imported them, which is how a resolution error in
+  // an unchanged file appeared in an unrelated change. They are in scope now.
+  "include": [
+    "labeler/**/*.ts",
+    "model-suggestions/**/*.ts",
+    "extract-dom.ts",
+    "extract-dom.test.ts"
+  ]
 }

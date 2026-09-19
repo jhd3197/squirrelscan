@@ -9,30 +9,181 @@ import { getAttrCI, hasAttrCI } from "../../packages/utils/src/dom.ts";
 import { getDomain } from "../../packages/crawler/node_modules/tldts";
 import { parseHTML } from "../../packages/parser/src/dom.ts";
 import { isInSiteChrome } from "../../packages/parser/src/extractors/chrome.ts";
-import { getCleanTextContent, getMainContent } from "../../packages/parser/src/extractors/content.ts";
+import {
+  getCleanTextContent,
+  getMainContent,
+} from "../../packages/parser/src/extractors/content.ts";
 import { collectTextExcluding } from "../../packages/parser/src/extractors/dom-text.ts";
 import type { Element } from "linkedom";
 
-const skipTags = new Set(["script", "style", "template", "noscript", "svg", "canvas", "iframe", "object", "embed"]);
+const skipTags = new Set([
+  "script",
+  "style",
+  "template",
+  "noscript",
+  "svg",
+  "canvas",
+  "iframe",
+  "object",
+  "embed",
+]);
 // Text-only exclusions. Kept separate from skipTags so candidate selection is
 // unchanged: these tags carry markup that is never visible prose.
-const textSkipTags = new Set([...skipTags, "head", "title", "link", "meta", "base", "math", "map", "area", "track", "source", "param"]);
-const allowedRoles = new Set(["banner", "complementary", "contentinfo", "form", "main", "navigation", "region", "search", "dialog", "alertdialog", "article", "list", "listitem", "tablist", "menu", "menubar", "toolbar", "feed"]);
-const containerTags = new Set(["article", "aside", "dialog", "footer", "form", "header", "main", "nav", "section", "figure", "table", "ul", "ol", "div", "details", "fieldset"]);
+const textSkipTags = new Set([
+  ...skipTags,
+  "head",
+  "title",
+  "link",
+  "meta",
+  "base",
+  "math",
+  "map",
+  "area",
+  "track",
+  "source",
+  "param",
+]);
+/**
+ * Never a component, whatever else changes. This is deliberately narrower than
+ * `skipTags`: an `<iframe>` carries no prose, so it stays out of the text walk,
+ * but it is the only node a video embed or an ad slot can be labelled on.
+ */
+const candidateSkipTags = new Set([
+  "script",
+  "style",
+  "template",
+  "noscript",
+  "head",
+  "title",
+  "link",
+  "meta",
+  "base",
+]);
+const allowedRoles = new Set([
+  "banner",
+  "complementary",
+  "contentinfo",
+  "form",
+  "main",
+  "navigation",
+  "region",
+  "search",
+  "dialog",
+  "alertdialog",
+  "article",
+  "list",
+  "listitem",
+  "tablist",
+  "menu",
+  "menubar",
+  "toolbar",
+  "feed",
+]);
+const containerTags = new Set([
+  "article",
+  "aside",
+  "dialog",
+  "footer",
+  "form",
+  "header",
+  "main",
+  "nav",
+  "section",
+  "figure",
+  "table",
+  "ul",
+  "ol",
+  "div",
+  "details",
+  "fieldset",
+]);
+/**
+ * Leaf elements that are components in their own right.
+ *
+ * Without these the extractor emits container tags only, and the taxonomy's
+ * `image`, `card`, `link`, `button`, `video_player`, `ad_unit` and form-control
+ * classes are unreachable at any sample size: on a shop page with a logo, a
+ * three-card grid and a video embed, the old filter returned zero `li`, `img`,
+ * `a`, `button` and `iframe` candidates. Those are exactly the classes with no
+ * support in the 2026-09-19 test split.
+ */
+const leafTags = new Set([
+  "li",
+  "a",
+  "button",
+  "img",
+  "picture",
+  "video",
+  "audio",
+  "iframe",
+  "input",
+  "select",
+  "textarea",
+  "label",
+  "blockquote",
+  "dl",
+]);
+/**
+ * Leaf candidates kept per parent, in document order.
+ *
+ * A footer link list or a 200-item category grid would otherwise supply most of
+ * a page's candidates and drown the containers. Capping per parent rather than
+ * per page keeps one bounded sample of every repeated group on the page, which
+ * is what a `card`-versus-`list` judgment needs, and it is deterministic: the
+ * first N in document order, never a sample.
+ */
+export const MAX_LEAF_CANDIDATES_PER_PARENT = 8;
 // Elements that legitimately carry no text, so their meaning lives in attributes.
-const mediaTags = new Set(["img", "iframe", "video", "audio", "svg", "input", "embed", "object", "canvas", "picture", "source"]);
+const mediaTags = new Set([
+  "img",
+  "iframe",
+  "video",
+  "audio",
+  "svg",
+  "input",
+  "embed",
+  "object",
+  "canvas",
+  "picture",
+  "source",
+]);
 // Attributes that describe an element a user cannot read as text. `src` is
 // deliberately absent: only a non-identifying category is emitted, by srcCategory.
-const semanticAttributeNames = ["title", "aria-label", "role", "alt", "type", "name", "placeholder"] as const;
+const semanticAttributeNames = [
+  "title",
+  "aria-label",
+  "role",
+  "alt",
+  "type",
+  "name",
+  "placeholder",
+] as const;
 
-type Input = { kind?: "page"; pageId: string; siteId: string; pageProvenance: unknown; url: string; html: string } | { kind: "domain"; host: string };
+type Input =
+  | {
+      kind?: "page";
+      pageId: string;
+      siteId: string;
+      pageProvenance: unknown;
+      url: string;
+      html: string;
+    }
+  | { kind: "domain"; host: string };
 
-function tag(element: Element): string { return element.tagName.toLowerCase(); }
+function tag(element: Element): string {
+  return element.tagName.toLowerCase();
+}
 
 function hidden(element: Element): boolean {
   for (let current: Element | null = element; current; current = current.parentElement) {
     const style = (getAttrCI(current, "style") ?? "").replaceAll(" ", "").toLowerCase();
-    if (hasAttrCI(current, "hidden") || getAttrCI(current, "aria-hidden")?.toLowerCase() === "true" || style.includes("display:none") || style.includes("visibility:hidden")) return true;
+    if (
+      hasAttrCI(current, "hidden") ||
+      getAttrCI(current, "aria-hidden")?.toLowerCase() === "true" ||
+      style.includes("display:none") ||
+      style.includes("visibility:hidden")
+    )
+      return true;
   }
   return false;
 }
@@ -57,19 +208,26 @@ function hrefCategory(raw: string | null, pageUrl: string): string {
   try {
     const target = new URL(raw, pageUrl);
     return target.hostname === new URL(pageUrl).hostname ? "same_site" : "external";
-  } catch { return "other"; }
+  } catch {
+    return "other";
+  }
 }
 
 function ancestors(element: Element): Element[] {
   const result: Element[] = [];
-  for (let current = element.parentElement; current; current = current.parentElement) result.push(current);
+  for (let current = element.parentElement; current; current = current.parentElement)
+    result.push(current);
   return result;
 }
 
 function locator(element: Element): string {
   const parts: string[] = [];
   for (let current: Element | null = element; current; current = current.parentElement) {
-    const siblings = current.parentElement ? Array.from(current.parentElement.children).filter((item) => tag(item as Element) === tag(current)) : [current];
+    const siblings = current.parentElement
+      ? Array.from(current.parentElement.children).filter(
+          (item) => tag(item as Element) === tag(current),
+        )
+      : [current];
     parts.push(`${tag(current)}[${Math.max(0, siblings.indexOf(current))}]`);
   }
   return parts.reverse().join("/");
@@ -77,7 +235,15 @@ function locator(element: Element): string {
 
 function curatedTokens(element: Element, attribute: "class" | "id"): string[] {
   const value = getAttrCI(element, attribute) ?? "";
-  return value.toLowerCase().split(/[^a-z0-9_-]+/).filter((token) => /^[a-z][a-z0-9_-]{1,40}$/.test(token) && !/(token|secret|password|passwd|auth|key)/.test(token)).slice(0, 12);
+  return value
+    .toLowerCase()
+    .split(/[^a-z0-9_-]+/)
+    .filter(
+      (token) =>
+        /^[a-z][a-z0-9_-]{1,40}$/.test(token) &&
+        !/(token|secret|password|passwd|auth|key)/.test(token),
+    )
+    .slice(0, 12);
 }
 
 function context(element: Element, role: string | null): string {
@@ -96,13 +262,86 @@ const BLOCK_MARK = "\u0000css\u0000";
 // Element names a CSS type selector may use. A bare word that is not one of
 // these is prose, which is what stops the selector scan from eating a sentence.
 const selectorTypeTags = new Set([
-  "a", "abbr", "address", "article", "aside", "audio", "b", "blockquote", "body", "button", "canvas",
-  "caption", "cite", "code", "col", "dd", "details", "dialog", "div", "dl", "dt", "em", "embed",
-  "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header",
-  "hr", "html", "i", "iframe", "img", "input", "label", "legend", "li", "main", "mark", "menu", "nav",
-  "object", "ol", "optgroup", "option", "output", "p", "picture", "pre", "progress", "q", "s",
-  "section", "select", "small", "span", "strong", "sub", "summary", "sup", "svg", "table", "tbody",
-  "td", "textarea", "tfoot", "th", "thead", "time", "tr", "u", "ul", "video",
+  "a",
+  "abbr",
+  "address",
+  "article",
+  "aside",
+  "audio",
+  "b",
+  "blockquote",
+  "body",
+  "button",
+  "canvas",
+  "caption",
+  "cite",
+  "code",
+  "col",
+  "dd",
+  "details",
+  "dialog",
+  "div",
+  "dl",
+  "dt",
+  "em",
+  "embed",
+  "fieldset",
+  "figcaption",
+  "figure",
+  "footer",
+  "form",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "header",
+  "hr",
+  "html",
+  "i",
+  "iframe",
+  "img",
+  "input",
+  "label",
+  "legend",
+  "li",
+  "main",
+  "mark",
+  "menu",
+  "nav",
+  "object",
+  "ol",
+  "optgroup",
+  "option",
+  "output",
+  "p",
+  "picture",
+  "pre",
+  "progress",
+  "q",
+  "s",
+  "section",
+  "select",
+  "small",
+  "span",
+  "strong",
+  "sub",
+  "summary",
+  "sup",
+  "svg",
+  "table",
+  "tbody",
+  "td",
+  "textarea",
+  "tfoot",
+  "th",
+  "thead",
+  "time",
+  "tr",
+  "u",
+  "ul",
+  "video",
 ]);
 
 /**
@@ -131,7 +370,10 @@ function dropSelectorSuffix(prelude: string): string {
   const tokens = prelude.split(/(\s+)/);
   while (tokens.length > 0) {
     const last = tokens[tokens.length - 1] ?? "";
-    if (last.trim() === "") { tokens.pop(); continue; }
+    if (last.trim() === "") {
+      tokens.pop();
+      continue;
+    }
     if (!isSelectorToken(last.trim())) break;
     tokens.pop();
   }
@@ -161,7 +403,9 @@ function isSelectorToken(token: string): boolean {
 function stripStyleResidue(value: string): string {
   let result = value;
   for (let pass = 0; pass < 4; pass += 1) {
-    const next = result.replace(/\{([^{}]{0,4000})\}/g, (match, body: string) => (isDeclarationBody(body) ? BLOCK_MARK : match));
+    const next = result.replace(/\{([^{}]{0,4000})\}/g, (match, body: string) =>
+      isDeclarationBody(body) ? BLOCK_MARK : match,
+    );
     if (next === result) break;
     result = next;
   }
@@ -179,54 +423,121 @@ function stripStyleResidue(value: string): string {
   const unterminated = result.indexOf("{");
   if (unterminated >= 0 && !result.includes("}", unterminated)) {
     const tail = result.slice(unterminated + 1);
-    if (tail.trim() !== "" && isDeclarationBody(tail)) result = dropSelectorSuffix(result.slice(0, unterminated));
+    if (tail.trim() !== "" && isDeclarationBody(tail))
+      result = dropSelectorSuffix(result.slice(0, unterminated));
   }
   // The at-rules that carry no block of their own, so nothing above sees them.
   return result.replace(/@(?:import|charset|namespace)\b[^;{}\n]{0,200};?/gi, " ");
 }
 
 function text(element: Element): string {
-  const raw = collectTextExcluding(element, (item) => textSkipTags.has(tag(item)) || hidden(item), " ");
+  const raw = collectTextExcluding(
+    element,
+    (item) => textSkipTags.has(tag(item)) || hidden(item),
+    " ",
+  );
   return stripStyleResidue(raw).replace(/\s+/g, " ").trim();
 }
 
 // Known embed providers, matched on the registrable domain of a src. Knowing
 // that a frame is a YouTube player or a reCAPTCHA widget is the whole signal;
 // the host itself is never emitted.
-const embedProviders = new Map<string, string>(Object.entries({
-  "youtube.com": "youtube", "youtu.be": "youtube", "youtube-nocookie.com": "youtube",
-  "ytimg.com": "youtube", "vimeo.com": "vimeo", "vimeocdn.com": "vimeo",
-  "wistia.com": "wistia", "wistia.net": "wistia", "loom.com": "loom",
-  "dailymotion.com": "dailymotion", "brightcove.net": "brightcove", "jwplayer.com": "jwplayer",
-  "spotify.com": "spotify", "scdn.co": "spotify", "soundcloud.com": "soundcloud",
-  "sndcdn.com": "soundcloud", "twitter.com": "twitter", "x.com": "twitter",
-  "twimg.com": "twitter", "facebook.com": "facebook", "fbcdn.net": "facebook",
-  "instagram.com": "instagram", "cdninstagram.com": "instagram", "tiktok.com": "tiktok",
-  "linkedin.com": "linkedin", "licdn.com": "linkedin", "pinterest.com": "pinterest",
-  "reddit.com": "reddit", "redditmedia.com": "reddit",
-  "google.com": "google", "gstatic.com": "google", "googleapis.com": "google",
-  "googleusercontent.com": "google", "ggpht.com": "google",
-  "google-analytics.com": "google-analytics", "googletagmanager.com": "google-tag-manager",
-  "doubleclick.net": "google-ads", "googlesyndication.com": "google-ads",
-  "stripe.com": "stripe", "stripecdn.com": "stripe", "paypal.com": "paypal",
-  "paypalobjects.com": "paypal", "recaptcha.net": "recaptcha", "hcaptcha.com": "hcaptcha",
-  "cloudflare.com": "cloudflare", "cloudflareinsights.com": "cloudflare",
-  "typeform.com": "typeform", "calendly.com": "calendly", "hubspot.com": "hubspot",
-  "hs-scripts.com": "hubspot", "hsforms.net": "hubspot", "hubspotusercontent.com": "hubspot",
-  "intercom.io": "intercom", "intercomcdn.com": "intercom", "disqus.com": "disqus",
-  "zendesk.com": "zendesk", "zdassets.com": "zendesk", "drift.com": "drift",
-  "mailchimp.com": "mailchimp", "list-manage.com": "mailchimp", "klaviyo.com": "klaviyo",
-  "shopify.com": "shopify", "shopifycdn.com": "shopify", "squarespace.com": "squarespace",
-  "wix.com": "wix", "wixstatic.com": "wix", "wp.com": "wordpress", "gravatar.com": "gravatar",
-  "github.com": "github", "githubusercontent.com": "github", "codepen.io": "codepen",
-  "jsfiddle.net": "jsfiddle", "codesandbox.io": "codesandbox", "figma.com": "figma",
-  "canva.com": "canva", "airtable.com": "airtable", "notion.so": "notion",
-  "cloudinary.com": "cloudinary", "imgix.net": "imgix", "unsplash.com": "unsplash",
-  "giphy.com": "giphy", "imgur.com": "imgur", "amazonaws.com": "aws",
-  "openstreetmap.org": "openstreetmap", "mapbox.com": "mapbox", "trustpilot.com": "trustpilot",
-  "algolia.net": "algolia", "onetrust.com": "onetrust", "cookielaw.org": "onetrust",
-  "cookiebot.com": "cookiebot", "usercentrics.eu": "usercentrics", "vidyard.com": "vidyard",
-}));
+const embedProviders = new Map<string, string>(
+  Object.entries({
+    "youtube.com": "youtube",
+    "youtu.be": "youtube",
+    "youtube-nocookie.com": "youtube",
+    "ytimg.com": "youtube",
+    "vimeo.com": "vimeo",
+    "vimeocdn.com": "vimeo",
+    "wistia.com": "wistia",
+    "wistia.net": "wistia",
+    "loom.com": "loom",
+    "dailymotion.com": "dailymotion",
+    "brightcove.net": "brightcove",
+    "jwplayer.com": "jwplayer",
+    "spotify.com": "spotify",
+    "scdn.co": "spotify",
+    "soundcloud.com": "soundcloud",
+    "sndcdn.com": "soundcloud",
+    "twitter.com": "twitter",
+    "x.com": "twitter",
+    "twimg.com": "twitter",
+    "facebook.com": "facebook",
+    "fbcdn.net": "facebook",
+    "instagram.com": "instagram",
+    "cdninstagram.com": "instagram",
+    "tiktok.com": "tiktok",
+    "linkedin.com": "linkedin",
+    "licdn.com": "linkedin",
+    "pinterest.com": "pinterest",
+    "reddit.com": "reddit",
+    "redditmedia.com": "reddit",
+    "google.com": "google",
+    "gstatic.com": "google",
+    "googleapis.com": "google",
+    "googleusercontent.com": "google",
+    "ggpht.com": "google",
+    "google-analytics.com": "google-analytics",
+    "googletagmanager.com": "google-tag-manager",
+    "doubleclick.net": "google-ads",
+    "googlesyndication.com": "google-ads",
+    "stripe.com": "stripe",
+    "stripecdn.com": "stripe",
+    "paypal.com": "paypal",
+    "paypalobjects.com": "paypal",
+    "recaptcha.net": "recaptcha",
+    "hcaptcha.com": "hcaptcha",
+    "cloudflare.com": "cloudflare",
+    "cloudflareinsights.com": "cloudflare",
+    "typeform.com": "typeform",
+    "calendly.com": "calendly",
+    "hubspot.com": "hubspot",
+    "hs-scripts.com": "hubspot",
+    "hsforms.net": "hubspot",
+    "hubspotusercontent.com": "hubspot",
+    "intercom.io": "intercom",
+    "intercomcdn.com": "intercom",
+    "disqus.com": "disqus",
+    "zendesk.com": "zendesk",
+    "zdassets.com": "zendesk",
+    "drift.com": "drift",
+    "mailchimp.com": "mailchimp",
+    "list-manage.com": "mailchimp",
+    "klaviyo.com": "klaviyo",
+    "shopify.com": "shopify",
+    "shopifycdn.com": "shopify",
+    "squarespace.com": "squarespace",
+    "wix.com": "wix",
+    "wixstatic.com": "wix",
+    "wp.com": "wordpress",
+    "gravatar.com": "gravatar",
+    "github.com": "github",
+    "githubusercontent.com": "github",
+    "codepen.io": "codepen",
+    "jsfiddle.net": "jsfiddle",
+    "codesandbox.io": "codesandbox",
+    "figma.com": "figma",
+    "canva.com": "canva",
+    "airtable.com": "airtable",
+    "notion.so": "notion",
+    "cloudinary.com": "cloudinary",
+    "imgix.net": "imgix",
+    "unsplash.com": "unsplash",
+    "giphy.com": "giphy",
+    "imgur.com": "imgur",
+    "amazonaws.com": "aws",
+    "openstreetmap.org": "openstreetmap",
+    "mapbox.com": "mapbox",
+    "trustpilot.com": "trustpilot",
+    "algolia.net": "algolia",
+    "onetrust.com": "onetrust",
+    "cookielaw.org": "onetrust",
+    "cookiebot.com": "cookiebot",
+    "usercentrics.eu": "usercentrics",
+    "vidyard.com": "vidyard",
+  }),
+);
 /** Every value srcCategory can take, besides a provider slug. */
 const SAME_SITE = "same-site";
 const OTHER_THIRD_PARTY = "other-third-party";
@@ -278,22 +589,28 @@ function semanticAttributes(element: Element): Record<string, string> {
 function structureSummary(counts: Record<string, number>, ownTag: string): string {
   return Object.entries(counts)
     .filter(([name]) => name !== ownTag)
-    .sort(([leftName, leftCount], [rightName, rightCount]) => rightCount - leftCount || leftName.localeCompare(rightName))
+    .sort(
+      ([leftName, leftCount], [rightName, rightCount]) =>
+        rightCount - leftCount || leftName.localeCompare(rightName),
+    )
     .slice(0, 8)
     .map(([name, count]) => (count > 1 ? `${name}*${count}` : name))
     .join(",");
 }
 
 function shape(element: Element, pageUrl: string): Record<string, unknown> {
-  const all = [element, ...Array.from(element.querySelectorAll("*")) as Element[]];
+  const all = [element, ...(Array.from(element.querySelectorAll("*")) as Element[])];
   const subtreeTagCounts: Record<string, number> = {};
   for (const item of all) subtreeTagCounts[tag(item)] = (subtreeTagCounts[tag(item)] ?? 0) + 1;
   const parent = element.parentElement;
-  const siblings = parent ? Array.from(parent.children) as Element[] : [];
+  const siblings = parent ? (Array.from(parent.children) as Element[]) : [];
   const children = Array.from(element.children) as Element[];
   const previous = siblings[siblings.indexOf(element) - 1];
   const next = siblings[siblings.indexOf(element) + 1];
-  const siblingPattern = JSON.stringify({ tag: tag(element), children: children.slice(0, 6).map(tag) });
+  const siblingPattern = JSON.stringify({
+    tag: tag(element),
+    children: children.slice(0, 6).map(tag),
+  });
   // Hoisted: collectTextExcluding walks the whole subtree, and this value is
   // read four times below.
   const ownText = text(element);
@@ -304,7 +621,12 @@ function shape(element: Element, pageUrl: string): Record<string, unknown> {
   }
   return {
     tag: tag(element),
-    roles: [getAttrCI(element, "role")?.toLowerCase(), ...ancestors(element).slice(0, 3).map((item) => getAttrCI(item, "role")?.toLowerCase())].filter((value): value is string => !!value && allowedRoles.has(value)),
+    roles: [
+      getAttrCI(element, "role")?.toLowerCase(),
+      ...ancestors(element)
+        .slice(0, 3)
+        .map((item) => getAttrCI(item, "role")?.toLowerCase()),
+    ].filter((value): value is string => !!value && allowedRoles.has(value)),
     context: context(element, getAttrCI(element, "role")?.toLowerCase() ?? null),
     ancestorTags: ancestors(element).slice(0, 4).reverse().map(tag),
     siblingPosition: Math.max(0, siblings.indexOf(element)),
@@ -314,9 +636,14 @@ function shape(element: Element, pageUrl: string): Record<string, unknown> {
     subtreeTagCounts,
     linkCategories,
     text: ownText,
-    contextText: [previous, next].filter((item): item is Element => !!item).map(text).join(" "),
+    contextText: [previous, next]
+      .filter((item): item is Element => !!item)
+      .map(text)
+      .join(" "),
     locator: locator(element),
-    semanticAncestorChain: [element, ...ancestors(element)].slice(0, 6).map((item) => ({ tag: tag(item), role: getAttrCI(item, "role")?.toLowerCase() ?? null })),
+    semanticAncestorChain: [element, ...ancestors(element)]
+      .slice(0, 6)
+      .map((item) => ({ tag: tag(item), role: getAttrCI(item, "role")?.toLowerCase() ?? null })),
     classTokens: curatedTokens(element, "class"),
     idTokens: curatedTokens(element, "id"),
     textWordCount: ownText.split(/\s+/).filter(Boolean).length,
@@ -329,24 +656,72 @@ function shape(element: Element, pageUrl: string): Record<string, unknown> {
     mediaDescendants: all
       .filter((item) => item !== element && mediaTags.has(tag(item)))
       .slice(0, 6)
-      .map((item) => ({ tag: tag(item), attributes: semanticAttributes(item), srcCategory: srcCategory(item, pageUrl) })),
+      .map((item) => ({
+        tag: tag(item),
+        attributes: semanticAttributes(item),
+        srcCategory: srcCategory(item, pageUrl),
+      })),
     linkCount: all.filter((item) => tag(item) === "a").length,
-    repeatedSiblingPatternCount: siblings.filter((item) => JSON.stringify({ tag: tag(item), children: Array.from(item.children).slice(0, 6).map((child) => tag(child as Element)) }) === siblingPattern).length,
-    weakSignals: { inSiteChrome: isInSiteChrome(element), semanticLandmark: ["header", "footer", "nav", "main", "aside", "form"].includes(tag(element)) },
+    repeatedSiblingPatternCount: siblings.filter(
+      (item) =>
+        JSON.stringify({
+          tag: tag(item),
+          children: Array.from(item.children)
+            .slice(0, 6)
+            .map((child) => tag(child as Element)),
+        }) === siblingPattern,
+    ).length,
+    weakSignals: {
+      inSiteChrome: isInSiteChrome(element),
+      semanticLandmark: ["header", "footer", "nav", "main", "aside", "form"].includes(tag(element)),
+    },
   };
 }
 
-export function extractPage(html: string, pageUrl: string): { candidates: Record<string, unknown>[]; pageSignals: Record<string, number> } {
+export function extractPage(
+  html: string,
+  pageUrl: string,
+): { candidates: Record<string, unknown>[]; pageSignals: Record<string, number> } {
   const { document } = parseHTML(html);
   const all = Array.from(document.querySelectorAll("*")) as Element[];
-  const candidates = all.filter((element) => {
+  // Containers keep the original rule exactly, so every candidate the previous
+  // extractor produced is still produced, with the same fields and in the same
+  // relative order. Leaves are additive.
+  const isContainerCandidate = (element: Element): boolean => {
     const elementTag = tag(element);
-    if (skipTags.has(elementTag) || hidden(element)) return false;
+    if (skipTags.has(elementTag)) return false;
     const nodeText = text(element);
     const role = getAttrCI(element, "role")?.toLowerCase();
-    return containerTags.has(elementTag) || allowedRoles.has(role ?? "") || (nodeText.length >= 40 && element.children.length >= 2);
-  }).map((element) => shape(element, pageUrl));
-  return { candidates, pageSignals: { cleanTextLength: getCleanTextContent(document).length, mainTextLength: getMainContent(document).length } };
+    return (
+      containerTags.has(elementTag) ||
+      allowedRoles.has(role ?? "") ||
+      (nodeText.length >= 40 && element.children.length >= 2)
+    );
+  };
+  const leafBudget = new Map<Element | null, number>();
+  const isLeafCandidate = (element: Element): boolean => {
+    if (!leafTags.has(tag(element))) return false;
+    const parent = element.parentElement;
+    const used = leafBudget.get(parent) ?? 0;
+    if (used >= MAX_LEAF_CANDIDATES_PER_PARENT) return false;
+    leafBudget.set(parent, used + 1);
+    return true;
+  };
+  const candidates = all
+    .filter((element) => {
+      if (candidateSkipTags.has(tag(element)) || hidden(element)) return false;
+      // Order matters: a container that also matches a leaf tag (`li`, `dl`) must
+      // not spend that parent's leaf budget.
+      return isContainerCandidate(element) || isLeafCandidate(element);
+    })
+    .map((element) => shape(element, pageUrl));
+  return {
+    candidates,
+    pageSignals: {
+      cleanTextLength: getCleanTextContent(document).length,
+      mainTextLength: getMainContent(document).length,
+    },
+  };
 }
 
 export { stripStyleResidue, semanticAttributes, srcCategory, structureSummary, text };

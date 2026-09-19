@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { extractPage, semanticAttributes, srcCategory, stripStyleResidue, structureSummary, text } from "./extract-dom.ts";
+import {
+  extractPage,
+  MAX_LEAF_CANDIDATES_PER_PARENT,
+  semanticAttributes,
+  srcCategory,
+  stripStyleResidue,
+  structureSummary,
+  text,
+} from "./extract-dom.ts";
 import { parseHTML } from "../../packages/parser/src/dom.ts";
 import type { Element } from "linkedom";
 
@@ -21,17 +29,24 @@ function candidate(html: string, locatorEnd: string) {
 
 describe("stripStyleResidue", () => {
   test("drops a rule block together with its selector", () => {
-    expect(stripStyleResidue(".menu__link{color:red;padding:0}Real prose").trim()).toBe("Real prose");
-    expect(stripStyleResidue("#header .nav > li:first-child{display:none}Kept").trim()).toBe("Kept");
+    expect(stripStyleResidue(".menu__link{color:red;padding:0}Real prose").trim()).toBe(
+      "Real prose",
+    );
+    expect(stripStyleResidue("#header .nav > li:first-child{display:none}Kept").trim()).toBe(
+      "Kept",
+    );
   });
 
   test("drops a nested at-rule, prelude included", () => {
-    const residue = "@media (min-width:767px){.menu__submenu>.menu__item:before{content:''}}Visible copy";
+    const residue =
+      "@media (min-width:767px){.menu__submenu>.menu__item:before{content:''}}Visible copy";
     expect(stripStyleResidue(residue).replace(/\s+/g, " ").trim()).toBe("Visible copy");
   });
 
   test("drops an at-rule whose block was truncated mid-capture", () => {
-    expect(stripStyleResidue("@import url(other.css); Body text").replace(/\s+/g, " ").trim()).toBe("Body text");
+    expect(stripStyleResidue("@import url(other.css); Body text").replace(/\s+/g, " ").trim()).toBe(
+      "Body text",
+    );
   });
 
   test("leaves prose that merely looks like a selector", () => {
@@ -40,17 +55,21 @@ describe("stripStyleResidue", () => {
   });
 
   test("drops a rule truncated mid-declaration by a text cap", () => {
-    const residue = "Add to cart #zoid-paypal-buttons-uid_768 { position: relative; display: inline-";
+    const residue =
+      "Add to cart #zoid-paypal-buttons-uid_768 { position: relative; display: inline-";
     expect(stripStyleResidue(residue).trim()).toBe("Add to cart");
   });
 
   test("keeps a JSON object shown as visible page content", () => {
-    const sample = 'A CI job can branch on the cause: {"status":"failed","statusReasonCode":"dns"} and retry.';
+    const sample =
+      'A CI job can branch on the cause: {"status":"failed","statusReasonCode":"dns"} and retry.';
     expect(stripStyleResidue(sample)).toBe(sample);
   });
 
   test("keeps prose in front of a rule and drops only the selector", () => {
-    expect(stripStyleResidue("Read our guide .promo{color:red}").replace(/\s+/g, " ").trim()).toBe("Read our guide");
+    expect(stripStyleResidue("Read our guide .promo{color:red}").replace(/\s+/g, " ").trim()).toBe(
+      "Read our guide",
+    );
   });
 
   test("leaves ordinary prose untouched", () => {
@@ -126,12 +145,18 @@ describe("semantic attributes for elements without text", () => {
 
   test("every category is a fixed token, never a hostname", () => {
     const hosts = [
-      "https://maps.google.com/maps?q=1", "https://js.stripe.com/v3/",
-      "https://player.vimeo.com/video/1", "https://www.google.com/recaptcha/api.js",
-      "https://tracker.unknown-vendor.test/p.gif", "/local.png",
+      "https://maps.google.com/maps?q=1",
+      "https://js.stripe.com/v3/",
+      "https://player.vimeo.com/video/1",
+      "https://www.google.com/recaptcha/api.js",
+      "https://tracker.unknown-vendor.test/p.gif",
+      "/local.png",
     ];
     for (const src of hosts) {
-      const category = srcCategory(first(`<body><iframe src="${src}"></iframe></body>`, "iframe"), PAGE_URL);
+      const category = srcCategory(
+        first(`<body><iframe src="${src}"></iframe></body>`, "iframe"),
+        PAGE_URL,
+      );
       expect(category).toMatch(/^[a-z][a-z0-9-]*$/);
       expect(category).not.toContain(".");
     }
@@ -212,10 +237,26 @@ describe("extractPage output", () => {
     const html = `<body><main><section class="promo" id="lead"><h2>Setup</h2><p>${"Enough visible prose to pass the candidate threshold. ".repeat(3)}</p><a href="/docs">Docs</a></section></main></body>`;
     const section = candidate(html, "section[0]");
     for (const field of [
-      "tag", "roles", "context", "ancestorTags", "siblingPosition", "siblingCount",
-      "childCount", "childTags", "subtreeTagCounts", "linkCategories", "text",
-      "contextText", "locator", "semanticAncestorChain", "classTokens", "idTokens",
-      "textWordCount", "linkCount", "repeatedSiblingPatternCount", "weakSignals",
+      "tag",
+      "roles",
+      "context",
+      "ancestorTags",
+      "siblingPosition",
+      "siblingCount",
+      "childCount",
+      "childTags",
+      "subtreeTagCounts",
+      "linkCategories",
+      "text",
+      "contextText",
+      "locator",
+      "semanticAncestorChain",
+      "classTokens",
+      "idTokens",
+      "textWordCount",
+      "linkCount",
+      "repeatedSiblingPatternCount",
+      "weakSignals",
     ]) {
       expect(section).toHaveProperty(field);
     }
@@ -239,5 +280,185 @@ describe("extractPage output", () => {
     expect(extractPage(styled, PAGE_URL).pageSignals.cleanTextLength).toBe(
       extractPage(plain, PAGE_URL).pageSignals.cleanTextLength,
     );
+  });
+});
+
+describe("leaf candidates", () => {
+  const shop = `<body>
+<header class="site-header"><a href="/"><img src="/logo.svg" alt="Northwind Coffee"></a>
+<nav><ul><li><a href="/shop">Shop</a></li><li><a href="/about">About</a></li></ul></nav></header>
+<main>
+  <ul class="grid">
+    <li><a href="/p/kenya"><img src="/img/kenya.jpg" alt="Kenya AA"><h3>Kenya AA</h3></a></li>
+    <li><a href="/p/brazil"><img src="/img/brazil.jpg" alt="Brazil"><h3>Brazil</h3></a></li>
+  </ul>
+  <figure><iframe src="https://www.youtube.com/embed/abc" title="How we roast"></iframe></figure>
+  <form><label for="q">Search</label><input id="q" name="q" placeholder="Find a roast"><button>Go</button></form>
+</main></body>`;
+
+  function tagsOf(html: string): Record<string, number> {
+    const counts: Record<string, number> = {};
+    for (const item of extractPage(html, PAGE_URL).candidates)
+      counts[String(item.tag)] = (counts[String(item.tag)] ?? 0) + 1;
+    return counts;
+  }
+
+  test("the classes with no taxonomy support are now reachable at all", () => {
+    const counts = tagsOf(shop);
+    // Before the widening every one of these was zero, so no sample size could
+    // produce an image, card, link, button, video_player or form-control label.
+    for (const tag of ["li", "a", "img", "iframe", "input", "button", "label"])
+      expect(counts[tag] ?? 0).toBeGreaterThan(0);
+  });
+
+  test("every element the old container rule selected is still a candidate", () => {
+    // The old predicate, restated here rather than imported, so a change to the
+    // extractor that quietly drops a container fails this test instead of
+    // moving with it. Widening is only safe if it is purely additive.
+    const OLD_CONTAINERS = new Set([
+      "article",
+      "aside",
+      "dialog",
+      "footer",
+      "form",
+      "header",
+      "main",
+      "nav",
+      "section",
+      "figure",
+      "table",
+      "ul",
+      "ol",
+      "div",
+      "details",
+      "fieldset",
+    ]);
+    const OLD_ROLES = new Set([
+      "banner",
+      "complementary",
+      "contentinfo",
+      "form",
+      "main",
+      "navigation",
+      "region",
+      "search",
+      "dialog",
+      "alertdialog",
+      "article",
+      "list",
+      "listitem",
+      "tablist",
+      "menu",
+      "menubar",
+      "toolbar",
+      "feed",
+    ]);
+    const OLD_SKIP = new Set([
+      "script",
+      "style",
+      "template",
+      "noscript",
+      "svg",
+      "canvas",
+      "iframe",
+      "object",
+      "embed",
+    ]);
+    for (const html of [
+      shop,
+      `<body><main><section><h2>Setup</h2><p>${"Long enough prose to qualify. ".repeat(3)}</p><a href="/d">D</a></section><div><p>a</p><p>b</p></div></main></body>`,
+    ]) {
+      const { document } = parseHTML(html);
+      const expected = (Array.from(document.querySelectorAll("*")) as unknown as Element[]).filter(
+        (element) => {
+          const name = element.tagName.toLowerCase();
+          if (OLD_SKIP.has(name)) return false;
+          const role = element.getAttribute("role")?.toLowerCase() ?? "";
+          return (
+            OLD_CONTAINERS.has(name) ||
+            OLD_ROLES.has(role) ||
+            (text(element).length >= 40 && element.children.length >= 2)
+          );
+        },
+      );
+      const produced = new Set(
+        extractPage(html, PAGE_URL).candidates.map((item) => String(item.locator)),
+      );
+      expect(expected.length).toBeGreaterThan(0);
+      for (const element of expected) {
+        const locator = `${element.tagName.toLowerCase()}[`;
+        expect([...produced].some((value) => value.includes(locator))).toBe(true);
+      }
+      // Additive, never subtractive.
+      expect(produced.size).toBeGreaterThanOrEqual(expected.length);
+    }
+  });
+
+  test("an iframe is a candidate but still contributes no text", () => {
+    const frame = candidate(shop, "iframe[0]");
+    expect(frame.tag).toBe("iframe");
+    expect(frame.text).toBe("");
+    expect(frame.semanticAttributes).toMatchObject({ title: "How we roast" });
+    expect(frame.srcCategory).toBe("youtube");
+    // The figure's own text is unchanged: iframes stay out of the text walk.
+    expect(candidate(shop, "figure[0]").text).toBe("");
+  });
+
+  test("leaf candidates are capped per parent, in document order", () => {
+    const links = Array.from(
+      { length: 30 },
+      (_, index) => `<a href="/p/${index}">Link ${index}</a>`,
+    ).join("");
+    const html = `<body><footer><div>${links}</div></footer></body>`;
+    const anchors = extractPage(html, PAGE_URL).candidates.filter((item) => item.tag === "a");
+    expect(anchors.length).toBe(MAX_LEAF_CANDIDATES_PER_PARENT);
+    // Document order, never a sample: the first N, and the first is the first.
+    expect(anchors.map((item) => String(item.text))).toEqual(
+      Array.from({ length: MAX_LEAF_CANDIDATES_PER_PARENT }, (_, index) => `Link ${index}`),
+    );
+  });
+
+  test("the cap is per parent, so each repeated group still contributes", () => {
+    const group = (name: string) =>
+      `<ul>${Array.from({ length: 12 }, (_, index) => `<li>${name}-${index}</li>`).join("")}</ul>`;
+    const html = `<body><main>${group("a")}${group("b")}</main></body>`;
+    const items = extractPage(html, PAGE_URL).candidates.filter((item) => item.tag === "li");
+    expect(items.length).toBe(MAX_LEAF_CANDIDATES_PER_PARENT * 2);
+    expect(items.filter((item) => String(item.text).startsWith("b-")).length).toBe(
+      MAX_LEAF_CANDIDATES_PER_PARENT,
+    );
+  });
+
+  test("a container that is also a leaf tag does not spend the leaf budget", () => {
+    // Twelve prose `li`, each long enough to qualify as a container. If the
+    // container branch did not run first, the cap would silently drop four.
+    const long = "Enough visible prose to pass the candidate threshold here. ";
+    const html = `<body><main><ul>${Array.from(
+      { length: 12 },
+      (_, index) => `<li><h3>Item ${index}</h3><p>${long}</p></li>`,
+    ).join("")}</ul></main></body>`;
+    expect(extractPage(html, PAGE_URL).candidates.filter((item) => item.tag === "li").length).toBe(
+      12,
+    );
+  });
+
+  test("a hidden leaf is still excluded", () => {
+    const html = `<body><main><div hidden><a href="/x">Hidden link</a></div><a href="/y">Shown</a></main></body>`;
+    const anchors = extractPage(html, PAGE_URL).candidates.filter((item) => item.tag === "a");
+    expect(anchors.map((item) => String(item.text))).toEqual(["Shown"]);
+  });
+
+  test("an input's value never reaches a candidate, only its describing attributes", () => {
+    const html = `<body><main><form><input type="hidden" name="csrf" value="super-secret-value"><input name="email" placeholder="Your email"></form></main></body>`;
+    const serialized = JSON.stringify(extractPage(html, PAGE_URL).candidates);
+    expect(serialized).not.toContain("super-secret-value");
+    expect(serialized).toContain("Your email");
+  });
+
+  test("script and style are never candidates", () => {
+    const html = `<body><main><script>var a=1</script><style>.a{color:red}</style><p>Visible</p></main></body>`;
+    const tags = extractPage(html, PAGE_URL).candidates.map((item) => item.tag);
+    expect(tags).not.toContain("script");
+    expect(tags).not.toContain("style");
   });
 });
