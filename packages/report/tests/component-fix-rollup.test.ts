@@ -135,7 +135,8 @@ describe("rendered output", () => {
     const [rollup] = componentFixRollups(groups);
     expect(rollup!.elementCount).toBe(98);
     expect(describeRollupDefect(rollup!)).toContain("7 links with generic text");
-    expect(describeRollupDefect(rollup!)).toContain("in one shared block");
+    // No "in one shared block" suffix: the prefix on every surface says it.
+    expect(describeRollupDefect(rollup!)).not.toContain("in one shared block");
     expect(describeRollupDefect(rollup!)).not.toContain("98");
   });
 

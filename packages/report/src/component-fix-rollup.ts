@@ -115,13 +115,16 @@ export function componentFixRollups(groups: readonly ComponentFixGroup[]): Compo
 }
 
 /**
- * "7 links with generic text "download" in one shared block".
+ * "7 links with generic text "download"".
  *
  * The count is DISTINCT ELEMENT SLOTS, i.e. the groups in the rollup, not the
  * occurrence total. The real install block is 7 slots on 14 pages: reporting
  * "98 links" described the observations rather than the fix, and the fix is
  * seven links in one block. The occurrence total stays in JSON, where it is
  * evidence rather than an instruction.
+ *
+ * No "in one shared block" suffix: every surface already prints that in the
+ * prefix around this phrase, so saying it here made the line say it twice.
  */
 export function describeRollupDefect(rollup: ComponentFixRollup): string {
   const { representative, distinctValues, additionalValues } = rollup;
@@ -142,6 +145,7 @@ export function describeRollupDefect(rollup: ComponentFixRollup): string {
         : "with generic text";
   const values = distinctValues.map((value) => `"${value}"`).join(", ");
   const tail = additionalValues > 0 ? `${values} (+${additionalValues} more)` : values;
-  const defect = values.length === 0 ? `${elementCount} ${noun} ${what}` : `${elementCount} ${noun} ${what} ${tail}`;
-  return `${defect} in one shared block`;
+  return values.length === 0
+    ? `${elementCount} ${noun} ${what}`
+    : `${elementCount} ${noun} ${what} ${tail}`;
 }

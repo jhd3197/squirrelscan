@@ -276,10 +276,13 @@ describe("a rollup is one card, however many faulty elements the block holds", (
   test("seven groups collapse into one card naming the block, not the buttons", () => {
     expect(countOccurrences(markup, "<li class=")).toBe(1);
     // The defect clause is `describeRollupDefect`, the same one markdown, text,
-    // llm and the console print, so the four surfaces cannot drift. It counts
-    // faulty ELEMENTS (7 slots x 14 pages = 98), not slots.
+    // llm and the console print, so the five surfaces cannot drift. It counts
+    // distinct element SLOTS (7), not the 98 occurrences those slots produced
+    // across 14 pages: 98 describes the evidence, 7 is the number of links to
+    // edit. The "in one shared block" suffix is gone because this prefix
+    // already says it.
     expect(markup).toContain(
-      "Likely one shared block in the main content: 98 links with generic text " +
+      "Likely one shared block in the main content: 7 links with generic text " +
         "&quot;download&quot;, &quot;get it&quot;, &quot;install&quot; (+4 more), seen on 14 pages",
     );
   });
