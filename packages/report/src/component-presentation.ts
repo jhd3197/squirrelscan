@@ -12,6 +12,7 @@
 // human and LLM surface. They exist to make grouping decisions reproducible,
 // not to be read. JSON keeps them; it is the machine format.
 
+import type { CheckItem } from "./types";
 import type { ComponentFixGroup } from "./component-fix-groups";
 import type { ComponentFixRollup } from "./component-fix-rollup";
 import { describeRollupDefect } from "./component-fix-rollup";
@@ -80,6 +81,37 @@ export function ruleFixCoverage(rule: GroupedRule): FixCoverage {
   // silently swallowing the legacy lines.
   if (affected.size === 0) return { mode: "partial", groups, uncoveredPages: [] };
   return { mode: uncoveredPages.length === 0 ? "full" : "partial", groups, uncoveredPages };
+}
+
+/**
+ * The items still worth listing after the printed groups have spoken, with
+ * their source pages narrowed to the ones no group accounted for.
+ *
+ * In partial coverage the groups already state where the shared defect lives,
+ * so repeating an item's full page list re-reports those pages a second time.
+ * An item whose every source page is covered is dropped outright; an item with
+ * no source pages at all is kept unchanged, because nothing establishes that a
+ * group accounted for it.
+ */
+export function uncoveredItems(
+  items: readonly CheckItem[] | undefined,
+  coverage: FixCoverage,
+): CheckItem[] {
+  if (!items || items.length === 0) return [];
+  if (coverage.mode === "none") return [...items];
+  if (coverage.mode === "full") return [];
+  const uncovered = new Set(coverage.uncoveredPages);
+  const out: CheckItem[] = [];
+  for (const item of items) {
+    if (!item.sourcePages || item.sourcePages.length === 0) {
+      out.push(item);
+      continue;
+    }
+    const remaining = item.sourcePages.filter((page) => uncovered.has(page));
+    if (remaining.length === 0) continue;
+    out.push({ ...item, sourcePages: remaining });
+  }
+  return out;
 }
 
 /** Short words for a repair target: "site footer", "navigation in the header". */

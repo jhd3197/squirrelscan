@@ -9,6 +9,7 @@ import { getScoreGrade } from "../scoring";
 import { REPORT_SOURCE_PAGES_PREVIEW, REPORT_PAGES_HARD_CAP } from "../constants";
 import { fixRollupLine, ruleFixCoverage } from "../component-presentation";
 import { componentFixRollups } from "../component-fix-rollup";
+import { uncoveredItems } from "../component-presentation";
 import { formatSiteWideItem, siteWideContext, siteWideItem } from "../site-wide-items";
 import { groupIssuesByCategory, flattenIssuesBySeverity } from "../grouping";
 import { entityMarkdownSection } from "../entities";
@@ -473,7 +474,9 @@ export function renderMarkdown(report: AuditReport, options?: MarkdownRenderOpti
         // page-URL id with no sourcePages) are dropped here so the same
         // URL isn't listed twice; items with sourcePages or a non-URL id
         // (a resource's own identity) keep their row.
-        const visibleItems = check.items?.filter((item) => !isRedundantPageItem(item));
+        const visibleItems = uncoveredItems(check.items, coverage).filter(
+          (item) => !isRedundantPageItem(item),
+        );
         if (visibleItems && visibleItems.length > 0) {
           lines.push(
             `<details><summary><strong>${check.name}:</strong> ${visibleItems.length} item(s)</summary>`,

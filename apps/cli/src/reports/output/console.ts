@@ -9,6 +9,7 @@ import {
   componentFixRollups,
   fixRollupLine,
   ruleFixCoverage,
+  uncoveredItems,
 } from "@squirrelscan/report";
 import {
   carriedTag,
@@ -312,14 +313,12 @@ export function generateConsoleReport(
               );
             }
           }
-          // Show structured items (preferred)
-          if (
-            check.items &&
-            check.items.length > 0 &&
-            coverage.mode !== "full"
-          ) {
+          // Show structured items (preferred), narrowed to what the printed
+          // groups did not already account for.
+          const listedItems = uncoveredItems(check.items, coverage);
+          if (listedItems.length > 0) {
             const maxItems = 5;
-            const itemsToShow = check.items.slice(0, maxItems);
+            const itemsToShow = listedItems.slice(0, maxItems);
             for (const item of itemsToShow) {
               const label = item.label ?? item.id;
               log(box.line(`     ${fmt.dim(`→ ${label}`)}`));
@@ -341,10 +340,10 @@ export function generateConsoleReport(
                 }
               }
             }
-            if (check.items.length > maxItems) {
+            if (listedItems.length > maxItems) {
               log(
                 box.line(
-                  `     ${fmt.dim(`... +${check.items.length - maxItems} more`)}`
+                  `     ${fmt.dim(`... +${listedItems.length - maxItems} more`)}`
                 )
               );
             }

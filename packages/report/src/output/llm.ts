@@ -24,6 +24,7 @@ import {
 import { seedRedirect } from "../coverage";
 import { describeSlot, fixRollupLine, ruleFixCoverage } from "../component-presentation";
 import { componentFixRollups } from "../component-fix-rollup";
+import { uncoveredItems } from "../component-presentation";
 
 /** Bounded page sample per fix group in LLM output. */
 const LLM_FIX_GROUP_PAGES = 5;
@@ -441,7 +442,9 @@ export function renderLlm(report: AuditReport, options?: LlmRenderOptions): stri
   
       const allItems: CheckItem[] = [];
       for (const check of rule.checks) {
-        if (check.items && check.items.length > 0) allItems.push(...check.items);
+        // Narrowed to what the printed groups did NOT account for, so a
+        // partially covered rule does not report the same pages twice.
+        allItems.push(...uncoveredItems(check.items, coverage));
       }
   
       if (allItems.length > 0 && coverage.mode !== "full") {

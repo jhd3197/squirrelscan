@@ -64,6 +64,7 @@ export {
   fixRollupLine,
   formatPageSample,
   ruleFixCoverage,
+  uncoveredItems,
 } from "./component-presentation";
 export type { FixCoverage, FixCoverageMode, PageSample } from "./component-presentation";
 // One block, one line: roll up groups that are demonstrably the same repair.

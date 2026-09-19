@@ -9,6 +9,7 @@ import { getScoreGrade } from "../scoring";
 import { REPORT_TEXT_WRAP_WIDTH } from "../constants";
 import { fixRollupLine, ruleFixCoverage } from "../component-presentation";
 import { componentFixRollups } from "../component-fix-rollup";
+import { uncoveredItems } from "../component-presentation";
 import { formatSiteWideItem, siteWideContext, siteWideItem } from "../site-wide-items";
 import { groupIssuesByCategory, flattenIssuesBySeverity } from "../grouping";
 import { affectedPages } from "../affected-pages";
@@ -353,8 +354,9 @@ export function renderText(report: AuditReport, options?: TextRenderOptions): st
           }
         }
 
-        if (check.items && check.items.length > 0 && coverage.mode !== "full") {
-          for (const item of check.items) {
+        const listedItems = uncoveredItems(check.items, coverage);
+        if (listedItems.length > 0) {
+          for (const item of listedItems) {
             const label = item.label ?? item.id;
             // One line, no page list: the list IS the noise for an item that is
             // the same resource on effectively every page.

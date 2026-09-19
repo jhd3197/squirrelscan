@@ -109,6 +109,45 @@ describe("partial coverage: groups first, remainder explicitly labelled", () => 
     expect(out).not.toContain("Pages (4)");
   });
 
+  test("the remainder block is minimal: only uncovered items, only uncovered pages", () => {
+    // /legal is the only uncovered page. The item that appears on all four
+    // pages must still be listed (it has an uncovered source page) but with
+    // ONLY /legal under it: the other three are already stated by the group.
+    const shared = report([
+      ...PAGES.map((page) => ({
+        ...check(page, [occurrence(page)]),
+        items: [{ id: "website", sourcePages: [...PAGES, "https://example.test/legal"] }],
+      })),
+      { ...check("https://example.test/legal"), items: [{ id: "website", sourcePages: ["https://example.test/legal"] }] },
+    ]);
+    const out = renderLlm(shared);
+    expect(out).toContain("Pages not attributed to a shared component (1): /legal");
+    expect(out).toContain("(from: /legal)");
+    // The covered pages are not repeated under the item.
+    expect(out).not.toContain("from: /, /api, /guides");
+  });
+
+  test("an item fully accounted for by a group is dropped from the remainder", () => {
+    const covered = report([
+      ...PAGES.map((page) => ({
+        ...check(page, [occurrence(page)]),
+        items: [{ id: "website", sourcePages: [...PAGES] }],
+      })),
+      // No items of its own: grouping back-fills a check's pageUrl as a source
+      // page, so an item here would legitimately survive as uncovered.
+      { ...check("https://example.test/legal"), items: undefined },
+    ]);
+    const out = renderLlm(covered);
+    expect(out).toContain("Pages not attributed to a shared component (1): /legal");
+    // The "website" item's every source page is covered, so it is dropped
+    // rather than re-reporting the same pages under a second heading.
+    expect(out).not.toContain("- website");
+    // What survives is grouping's page-URL placeholder for the itemless check.
+    // It carries no sourcePages, so nothing establishes that a group accounted
+    // for it and it is deliberately left alone.
+    expect(out).toContain("- /legal");
+  });
+
   test("text labels the remainder too", () => {
     const out = renderText(partial);
     expect(out).toContain("Fix once in the site header");
