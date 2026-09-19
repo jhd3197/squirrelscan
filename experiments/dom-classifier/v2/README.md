@@ -123,3 +123,65 @@ bun test featurize.test.ts silver-labels.test.ts
 `fixtures/` holds eight hand-written pages (landmark site, the same site as div
 soup, article with nested chrome, product, product listing, docs, homepage,
 microdata-only about page) and `expected.json`, their hand-checked labels.
+
+## Training and the runtime
+
+```sh
+export DOM_CLASSIFIER_DATA_ROOT=/path/to/private/root
+export SQUIRREL_STORE=/path/to/squirrel-store
+V=$DOM_CLASSIFIER_DATA_ROOT/.venv/bin/python          # uv venv + lightgbm numpy scipy scikit-learn
+
+$V train/sample.py --data-root $DOM_CLASSIFIER_DATA_ROOT --out $.../models/region-sample
+$V train/train_region.py   --sample $.../models/region-sample --data-root . --out $.../models/region
+$V train/train_pagetype.py --data-root . --out $.../models/pagetype
+$V train/export_model.py   --models $.../models --data-root . --out $.../models/artifact
+
+bun run train/holdout-tools.ts masked-all      # the fully-token-hidden holdout
+$V train/eval_maskall.py --data-root . --models $.../models
+bun run train/holdout-tools.ts bench --limit 500
+bun run train/holdout-tools.ts divsoup --limit 300
+```
+
+Nothing is materialised in full. `sample.py` streams the 5.25M rows through one
+reusable 50k-row dense chunk, converts each to CSR and keeps only that; peak RSS
+across the whole pipeline is 660 MB, on a dataset that is ~17 GB dense.
+
+### What is selected where
+
+Every choice that could read the answer is made on VAL: the class-weight
+exponent, the feature set, the tree size, the boosting cut. Holdout is touched
+once per reported number. The splits themselves are frozen by registrable
+domain in `split-manifest.json` and are never recomputed.
+
+Two traps worth keeping in mind if these are re-run:
+
+- **Do not stack class weights on downsampling.** The training sample already
+  moves content_block from 89% of nodes to 50%. Adding full inverse-frequency
+  weights on top rebalances twice, and the model then over-predicts every rare
+  class: sidebar came out at recall 0.82 for precision 0.18. The exponent is a
+  swept parameter for exactly this reason, and it chose 0.25, not 1.0.
+- **Do not pick the boosting cut by val macro-F1 when the probabilities matter.**
+  On the page-type head that rule chose 10 iterations (18 KB, against a 600 KB
+  budget) because macro-F1 over 926 val pages is noisy enough to peak anywhere.
+  A 10-round model's probabilities are squashed toward uniform, and the whole
+  `p >= 0.9` product metric read zero across the entire corpus. Early stopping
+  on weighted logloss is the criterion that is about probabilities.
+
+### The runtime
+
+`runtime/predict.ts` exposes `classifyPage(html, url, {model})` and
+`classifyDocument(document, url, {model})`, returning
+`{pageType: {label, confidence, source}, nodes: [{nodeRef, label, confidence, source}], degraded}`.
+`source` is `"model"` or `"rules"`, and the shape is identical either way.
+
+The rules path (`runtime/rules-fallback.ts`) runs when the artifact is absent,
+unparseable or built for another featurizer version, when a prediction is under
+the artifact's threshold, or when the per-page time budget is spent. It reads
+landmarks, ARIA roles and structured data — the same reading `silver-labels.ts`
+does, minus the corpus-level parts. A missing model degrades attribution, never
+detection.
+
+Float parity is by construction: `export_model.py` rounds thresholds to float32
+and walks the rounded trees in a numpy reference evaluator, and `predict.ts`
+implements the same walk with `Math.fround` on the feature value. The parity
+test compares TS against that reference on 10k holdout rows.
