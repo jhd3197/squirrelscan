@@ -15,7 +15,11 @@
 import type { CheckItem } from "./types";
 import type { ComponentFixGroup } from "./component-fix-groups";
 import type { ComponentFixRollup } from "./component-fix-rollup";
-import { componentFixRollups, describeRollupDefect } from "./component-fix-rollup";
+import {
+  componentFamilyRollups,
+  componentFixRollups,
+  describeRollupDefect,
+} from "./component-fix-rollup";
 import type { GroupedRule } from "./grouping";
 import { ruleAffectedPages } from "./affected-pages";
 
@@ -251,8 +255,12 @@ export function fixUnits(
   groups: readonly ComponentFixGroup[],
   rollupEnabled = true,
 ): ComponentFixRollup[] {
-  if (rollupEnabled) return componentFixRollups(groups);
+  // Root first: merging one block's slots is the stronger claim, and the family
+  // level then merges those units across structural variants.
+  if (rollupEnabled) return componentFamilyRollups(componentFixRollups(groups));
   return groups.map((group) => ({
+    level: "root" as const,
+    variantCount: 1,
     groups: [group],
     groupIds: [group.id],
     representative: group,
@@ -280,10 +288,18 @@ export function fixRollupLine(
   // One group is ONE element, however many pages it repeats on, so its slot
   // still locates the fix. Several groups are several distinct elements, where
   // any one slot describes none of the others.
-  if (rollup.groups.length === 1) return fixGroupLine(group, limit, format, includeSlot);
-  const sample = fixGroupPages(group, limit, format);
-  const pages = formatPageSample(sample);
-  return `${fixPrefix(group, undefined)}: ${describeRollupDefect(rollup)}, ${
+  if (rollup.groups.length === 1 && rollup.variantCount === 1) {
+    return fixGroupLine(group, limit, format, includeSlot);
+  }
+  // The UNION, not the representative's own pages: a family rollup spans
+  // variants, and sampling the representative would under-report its reach.
+  const shown = rollup.affectedPages.slice(0, limit).map(format);
+  const pages = formatPageSample({
+    shown,
+    total: rollup.affectedPageCount,
+    hasMore: rollup.affectedPageCount > shown.length,
+  });
+  return `${fixPrefix(group, undefined, rollup.variantCount)}: ${describeRollupDefect(rollup)}, ${
     group.attribution === "repeated-subtree" ? "seen on " : ""
   }${pages}`;
 }
@@ -316,14 +332,23 @@ export function fixGroupLine(
  * the fallback for a single element with no label, and neither appears when a
  * unit spans several elements (no single slot describes them).
  */
-function fixPrefix(group: ComponentFixGroup, slot: string | undefined): string {
+function fixPrefix(
+  group: ComponentFixGroup,
+  slot: string | undefined,
+  variantCount = 1,
+): string {
   const label = describeRoot(group);
   const region = describeRegion(group);
+  // Structural variants are stated, not hidden: the same repair covers two
+  // different renderings of the component, and a reader should know that.
+  const variants = variantCount > 1 ? `${variantCount} variants` : undefined;
   if (group.attribution === "repeated-subtree") {
-    const anchor = label ? ` (${label})` : "";
-    const tail = !label && slot ? ` (${slot})` : "";
+    const parts = [label, variants].filter(Boolean).join(", ");
+    const anchor = parts ? ` (${parts})` : "";
+    const tail = !parts && slot ? ` (${slot})` : "";
     return `Likely one shared block${anchor} in the ${region}${tail}`;
   }
-  const anchor = label ? ` (${label})` : slot ? ` (${slot})` : "";
+  const parts = [label, variants].filter(Boolean).join(", ");
+  const anchor = parts ? ` (${parts})` : slot ? ` (${slot})` : "";
   return `Fix once in the ${region}${anchor}`;
 }

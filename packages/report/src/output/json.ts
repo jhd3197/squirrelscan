@@ -21,8 +21,7 @@ import type { GroupedCheck } from "../grouping";
 
 import { REPORT_PAGES_HARD_CAP } from "../constants";
 import { siteWideContext, siteWideItem } from "../site-wide-items";
-import { componentFixRollups } from "../component-fix-rollup";
-import { ruleFixCoverage } from "../component-presentation";
+import { fixUnits, ruleFixCoverage } from "../component-presentation";
 import { reportFailureReasonCode } from "../failure-notice";
 import { getScoreGrade } from "../scoring";
 import { getGroupName } from "../categories";
@@ -199,6 +198,10 @@ interface SlimJsonReport {
      * about rollups reads exactly what it read before.
      */
     componentFixRollups?: Array<{
+      /** Which rollup level produced it; additive, `root` is today's meaning. */
+      level: "root" | "family";
+      /** Structural variants merged; 1 at the root level. */
+      variantCount: number;
       groupIds: string[];
       affectedPageCount: number;
       elementCount: number;
@@ -408,12 +411,15 @@ function buildSlimReport(report: AuditReport, version: string): SlimJsonReport {
           }
         : {}),
       ...(() => {
-        const rollups = componentFixRollups(ruleFixCoverage(rule).groups).filter(
-          (rollup) => rollup.groups.length > 1,
+        // Both levels, so a consumer sees the same units the renderers print.
+        const rollups = fixUnits(ruleFixCoverage(rule).groups).filter(
+          (rollup) => rollup.groups.length > 1 || rollup.variantCount > 1,
         );
         return rollups.length > 0
           ? {
               componentFixRollups: rollups.map((rollup) => ({
+                level: rollup.level,
+                variantCount: rollup.variantCount,
                 groupIds: rollup.groupIds,
                 affectedPageCount: rollup.affectedPageCount,
                 elementCount: rollup.elementCount,

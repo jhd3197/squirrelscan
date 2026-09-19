@@ -6,8 +6,17 @@
 
 import { describe, expect, test } from "bun:test";
 import type { AuditReport, CheckResult, ComponentOccurrence, ReportRuleResult } from "../src/types";
-import { componentFixRollups, describeRollupDefect } from "../src/component-fix-rollup";
-import { ROOT_LABEL_MAX, describeRoot, fixRollupLine } from "../src/component-presentation";
+import {
+  componentFamilyRollups,
+  componentFixRollups,
+  describeRollupDefect,
+} from "../src/component-fix-rollup";
+import {
+  ROOT_LABEL_MAX,
+  describeRoot,
+  fixRollupLine,
+  fixUnits,
+} from "../src/component-presentation";
 import type { ComponentFixGroup } from "../src/component-fix-groups";
 import { renderJson } from "../src/output/json";
 import { renderLlm } from "../src/output/llm";
@@ -186,6 +195,82 @@ describe("rendered output", () => {
     const empty = report([]);
     expect(renderLlm(empty)).not.toContain("likely-shared-block");
     expect(renderText(empty)).not.toContain("Likely one shared block");
+  });
+});
+
+describe("family rollup: one component in two structural variants", () => {
+  // A WordPress main nav renders differently per template, so one generic
+  // "log in" link printed as four groups across 34 pages.
+  const NAV_A = PAGES.slice(0, 7);
+  const NAV_B = PAGES.slice(7);
+  function variant(pages: string[], slot: string, value = "log in") {
+    return group({
+      root: `root-${slot}-${pages.length}`,
+      value,
+      affectedPages: pages,
+      affectedPageCount: pages.length,
+      semanticSlot: slot,
+      defect: {
+        kind: "link-text-generic" as const,
+        values: { normalizedText: value },
+        valueHashes: {},
+      },
+      componentFamilyKey: "family-nav",
+      attribution: "observed-component-evidence" as const,
+      region: { role: "navigation" as const, nestedIn: "none" as const, structuralSignature: "s128:n" },
+    } as Parameters<typeof group>[0]);
+  }
+
+  test("equal slot counts merge into one unit over the union of pages", () => {
+    const units = fixUnits([variant(NAV_A, "nav>a:1"), variant(NAV_B, "nav>ul:1>a:1")]);
+    expect(units).toHaveLength(1);
+    expect(units[0]!.level).toBe("family");
+    expect(units[0]!.variantCount).toBe(2);
+    expect(units[0]!.affectedPageCount).toBe(PAGES.length);
+    const line = fixRollupLine(units[0]!, 3, (p) => new URL(p).pathname);
+    expect(line).toBe(
+      'Fix once in the navigation (2 variants): 2 links with generic text "log in", ' +
+        "14 pages: /releases/1.0.0, /releases/1.0.1, /releases/1.0.10 (+11 more)",
+    );
+  });
+
+  test("differing slot counts stay separate", () => {
+    // Two slots in one variant, one in the other: not interchangeable, so
+    // merging would claim a repair one variant does not have.
+    // Same root key, so these two slots merge into ONE two-slot unit.
+    const two = componentFixRollups([
+      { ...variant(NAV_A, "nav>a:1"), componentRootKey: "shared-root" } as ComponentFixGroup,
+      { ...variant(NAV_A, "nav>a:2"), componentRootKey: "shared-root" } as ComponentFixGroup,
+    ]);
+    expect(two).toHaveLength(1);
+    const one = componentFixRollups([variant(NAV_B, "nav>ul:1>a:1")]);
+    expect(componentFamilyRollups([...two, ...one])).toHaveLength(2);
+  });
+
+  test("different defect values stay separate", () => {
+    const units = fixUnits([
+      variant(NAV_A, "nav>a:1", "log in"),
+      variant(NAV_B, "nav>ul:1>a:1", "learn more"),
+    ]);
+    expect(units).toHaveLength(2);
+  });
+
+  test("a single variant is byte-identical to today", () => {
+    const single = variant(NAV_A, "nav>a:1");
+    const withFamily = fixRollupLine(fixUnits([single])[0]!, 3, (p) => new URL(p).pathname);
+    const plain = fixRollupLine(
+      componentFixRollups([single])[0]!,
+      3,
+      (p) => new URL(p).pathname,
+    );
+    expect(withFamily).toBe(plain);
+    expect(withFamily).not.toContain("variants");
+  });
+
+  test("no family key keeps every unit apart", () => {
+    const noKey = (pages: string[], slot: string) =>
+      group({ root: `r-${slot}`, value: "log in", affectedPages: pages, affectedPageCount: pages.length, semanticSlot: slot } as Parameters<typeof group>[0]);
+    expect(fixUnits([noKey(NAV_A, "nav>a:1"), noKey(NAV_B, "nav>ul:1>a:1")])).toHaveLength(2);
   });
 });
 

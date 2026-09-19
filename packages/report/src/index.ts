@@ -73,10 +73,11 @@ export type { FixCoverage, FixCoverageMode, PageSample } from "./component-prese
 // One block, one line: roll up groups that are demonstrably the same repair.
 export {
   ROLLUP_MAX_DISTINCT_VALUES,
+  componentFamilyRollups,
   componentFixRollups,
   describeRollupDefect,
 } from "./component-fix-rollup";
-export type { ComponentFixRollup } from "./component-fix-rollup";
+export type { ComponentFixRollup, ComponentFixRollupLevel } from "./component-fix-rollup";
 // Site-wide item collapse: one shared resource on nearly every page.
 export {
   SITE_WIDE_MAX_EXCEPTIONS,

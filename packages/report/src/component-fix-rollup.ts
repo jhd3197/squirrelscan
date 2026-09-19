@@ -16,7 +16,20 @@ import type { ComponentFixGroup } from "./component-fix-groups";
 /** Distinct defect values to name inside a rolled-up block before counting. */
 export const ROLLUP_MAX_DISTINCT_VALUES = 3;
 
+/**
+ * Which rollup level produced a unit.
+ *
+ * - `root` — the same component root, the same pages. Strong: one block.
+ * - `family` — the same component FAMILY across structural variants, unioned
+ *   over their pages. Weaker: two templates render the nav differently, so this
+ *   asserts only that the same repair covers both.
+ */
+export type ComponentFixRollupLevel = "root" | "family";
+
 export interface ComponentFixRollup {
+  level: ComponentFixRollupLevel;
+  /** Structural variants merged into this unit. 1 for a root-level rollup. */
+  variantCount: number;
   /** The groups this unit stands for, in their original order. */
   groups: ComponentFixGroup[];
   /** Ids of those groups, for the JSON cross-reference. */
@@ -102,6 +115,8 @@ export function componentFixRollups(groups: readonly ComponentFixGroup[]): Compo
       distinct.push(value);
     }
     return {
+      level: "root" as const,
+      variantCount: 1,
       groups: members,
       groupIds: members.map((member) => member.id),
       representative,
@@ -148,4 +163,103 @@ export function describeRollupDefect(rollup: ComponentFixRollup): string {
   return values.length === 0
     ? `${elementCount} ${noun} ${what}`
     : `${elementCount} ${noun} ${what} ${tail}`;
+}
+
+
+/** Stable comparison key for a defect's VALUES, not just its kind. */
+function defectValuesKey(group: ComponentFixGroup): string {
+  return Object.entries(group.defect.values)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([key, value]) => `${key}\u0002${String(value)}`)
+    .join("\u0003");
+}
+
+/** The distinct repair slots a unit covers, as a sorted list. */
+function slotSet(unit: ComponentFixRollup): string[] {
+  return [...new Set(unit.groups.map((group) => group.semanticSlot))].sort((a, b) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  );
+}
+
+function componentFamilyKey(group: ComponentFixGroup): string | undefined {
+  return (group as { componentFamilyKey?: string }).componentFamilyKey;
+}
+
+/**
+ * Merge root-level units that are the same component in different STRUCTURAL
+ * VARIANTS, unioning their pages.
+ *
+ * A WordPress main nav exists in two variants across page templates, so one
+ * generic "log in" link printed as four separate groups over 34 pages. The
+ * family key says those are the same component; the defect values say it is the
+ * same defect; and equal SLOT COUNTS say the variants carry the same repair
+ * targets. Differing slot counts mean the variants are not interchangeable, so
+ * they stay apart rather than claiming a fix that one of them does not have.
+ *
+ * Runs AFTER {@link componentFixRollups}: root merging is the stronger claim
+ * and must not be pre-empted by this one.
+ */
+export function componentFamilyRollups(
+  units: readonly ComponentFixRollup[],
+): ComponentFixRollup[] {
+  const buckets = new Map<string, ComponentFixRollup[]>();
+  const order: string[] = [];
+
+  units.forEach((unit, index) => {
+    const group = unit.representative;
+    const family = componentFamilyKey(group);
+    const slots = slotSet(unit);
+    // No family key, no claim that two variants are one component.
+    const key =
+      family === undefined
+        ? `solo\u0000${index}`
+        : [
+            group.ruleId,
+            group.check.name,
+            group.check.status,
+            group.attribution,
+            family,
+            group.defect.kind,
+            defectValuesKey(group),
+            // Equal slot COUNT is the interchangeability test; the locators
+            // themselves differ between variants by construction.
+            String(slots.length),
+          ].join("\u0001");
+    const bucket = buckets.get(key);
+    if (bucket) bucket.push(unit);
+    else {
+      buckets.set(key, [unit]);
+      order.push(key);
+    }
+  });
+
+  return order.map((key) => {
+    const members = buckets.get(key)!;
+    if (members.length === 1) return members[0]!;
+    const groups = members.flatMap((member) => member.groups);
+    const pages = [...new Set(members.flatMap((member) => member.affectedPages))].sort((a, b) =>
+      a < b ? -1 : a > b ? 1 : 0,
+    );
+    const seen = new Set<string>();
+    const distinct: string[] = [];
+    for (const member of members) {
+      for (const value of member.distinctValues) {
+        if (seen.has(value)) continue;
+        seen.add(value);
+        distinct.push(value);
+      }
+    }
+    return {
+      level: "family" as const,
+      variantCount: members.length,
+      groups,
+      groupIds: groups.map((group) => group.id),
+      representative: members[0]!.representative,
+      affectedPages: pages,
+      affectedPageCount: pages.length,
+      elementCount: members.reduce((sum, member) => sum + member.elementCount, 0),
+      distinctValues: distinct.slice(0, ROLLUP_MAX_DISTINCT_VALUES),
+      additionalValues: Math.max(0, distinct.length - ROLLUP_MAX_DISTINCT_VALUES),
+    };
+  });
 }
