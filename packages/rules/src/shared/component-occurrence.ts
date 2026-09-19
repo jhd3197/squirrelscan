@@ -330,8 +330,20 @@ export class ComponentOccurrenceCache {
   }
 }
 
-/** Deepest-first, so the report stage can pick the highest level that recurs. */
-const MAX_SUBTREE_LEVELS = 8;
+/**
+ * Rungs nearest the faulty element, and rungs nearest the region root.
+ *
+ * A pure element-upward ladder made DEPTH decide which rungs exist: in one
+ * theme's menu, six links sat one level deeper than two others, so the deeper
+ * six ran out of budget before reaching the block and promoted at its child.
+ * One menu became two components. Anchoring the top of the ladder at the region
+ * root instead means any two elements under the same block always share that
+ * block's rungs, whatever their depth.
+ */
+const SUBTREE_NEAR_LEVELS = 4;
+const SUBTREE_ROOT_LEVELS = 4;
+/** Safety bound on the upward walk itself; real DOMs are far shallower. */
+const MAX_ANCESTOR_WALK = 64;
 
 /**
  * The ladder's root when there is no landmark at all.
@@ -373,17 +385,27 @@ function subtreeCandidates(
   const segments: string[] = [`${tag(element)}:${cache.siblingTagIndex(element)}`];
   for (
     let ancestor = element.parentElement;
-    ancestor && ancestor !== region && ancestors.length < MAX_SUBTREE_LEVELS;
+    ancestor && ancestor !== region && ancestors.length < MAX_ANCESTOR_WALK;
     ancestor = ancestor.parentElement
   ) {
     ancestors.push(ancestor);
-    if (ancestors.length < MAX_SUBTREE_LEVELS)
-      segments.push(`${tag(ancestor)}:${cache.siblingTagIndex(ancestor)}`);
+    segments.push(`${tag(ancestor)}:${cache.siblingTagIndex(ancestor)}`);
   }
+  // Nearest the element, then nearest the region root. Deduped and ordered, so
+  // two elements at different depths still share the outer rungs.
+  const chosen = new Set<number>();
+  for (let index = 0; index < Math.min(SUBTREE_NEAR_LEVELS, ancestors.length); index += 1)
+    chosen.add(index);
+  for (
+    let index = Math.max(0, ancestors.length - SUBTREE_ROOT_LEVELS);
+    index < ancestors.length;
+    index += 1
+  )
+    chosen.add(index);
   const candidates: SubtreeCandidate[] = [];
-  for (let index = 0; index < ancestors.length; index += 1) {
+  for (const index of [...chosen].sort((left, right) => left - right)) {
     const ancestor = ancestors[index]!;
-    // The locator for level N is the element's path through the N-1 ancestors
+    // The locator for this rung is the element's path through the ancestors
     // below it, rooted at that ancestor's tag.
     const path = [tag(ancestor), ...segments.slice(0, index + 1).reverse()].join(">");
     candidates.push({

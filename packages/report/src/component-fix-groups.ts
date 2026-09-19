@@ -226,7 +226,10 @@ function promoteRepeatedSubtrees(
     for (const { occurrence } of entries) {
       for (const candidate of occurrence.subtreeCandidates ?? []) {
         if (candidate.textShareOfRegion > REPEATED_SUBTREE_MAX_TEXT_SHARE) continue;
-        const rung = `${candidate.level}\u0000${candidate.skeletonSignature}`;
+        // Keyed on the SKELETON alone, not on the level: the same block sits at
+        // different depths for elements nested differently inside it, and
+        // counting those separately splits one component's page evidence.
+        const rung = candidate.skeletonSignature;
         const pages = pagesByRung.get(rung) ?? new Set<string>();
         pages.add(occurrence.pageUrl);
         pagesByRung.set(rung, pages);
@@ -250,16 +253,18 @@ function promoteRepeatedSubtrees(
         .filter(
           (item) =>
             item.textShareOfRegion <= REPEATED_SUBTREE_MAX_TEXT_SHARE &&
-            eligible.has(`${item.level}\u0000${item.skeletonSignature}`),
+            eligible.has(item.skeletonSignature),
         )
         .sort((a, b) => b.level - a.level || compare(a.skeletonSignature, b.skeletonSignature))[0];
       if (!candidate) continue;
       // The slot inside the block is part of the identity, so seven different
       // buttons in one block stay seven repair targets rather than one.
+      // No level here either: the slot path already encodes depth, and two
+      // elements at different depths in one block are different slots, not
+      // different components.
       const identity = stable({
         scope,
         repeatedSubtree: {
-          level: candidate.level,
           skeletonSignature: candidate.skeletonSignature,
           locatorFromRoot: candidate.locatorFromRoot,
         },

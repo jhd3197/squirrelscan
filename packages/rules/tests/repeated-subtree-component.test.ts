@@ -222,3 +222,53 @@ describe("repetition that is data, not a shared component, must not group", () =
     expect(crossPageFamilies(occurrencesFor(pages)).size).toBe(0);
   });
 });
+
+describe("depth inside a block does not decide which component it belongs to", () => {
+  /**
+   * One menu, two links, nested three levels apart. A ladder that only walked
+   * upward from the element ran out of budget for the deeper link and promoted
+   * it at an inner wrapper, so one menu became two components with two root
+   * keys (observed on a real theme: 6 groups at `div.main`, 2 at its parent).
+   */
+  function menuPage(page: string): string {
+    const shallow = `<div class="col"><a href="/a-${page}"></a></div>`;
+    const deep = `<div class="col"><div><div><div><a href="/b-${page}"></a></div></div></div></div>`;
+    return `<body><div class="wrap"><div class="main"><nav-block class="menu">${shallow}${deep}</nav-block></div></div><p>${page}</p></body>`;
+  }
+
+  test("two links three levels apart share one promoted root", () => {
+    const pages = ["p1", "p2", "p3", "p4"].map((page) => ({
+      url: `${ORIGIN}/${page}`,
+      body: menuPage(page),
+    }));
+    const occurrences = pages.flatMap((page) => {
+      const { document } = parseHTML(`<html>${page.body}</html>`);
+      const cache = new ComponentOccurrenceCache();
+      return (Array.from(document.querySelectorAll("a")) as unknown as Element[]).map((link) =>
+        componentOccurrence(
+          {
+            pageUrl: page.url,
+            rendered: false,
+            element: link,
+            kind: "link-text-empty",
+            values: { normalizedText: "" },
+            },
+          cache,
+        ),
+      );
+    });
+    expect(occurrences).toHaveLength(8);
+    // Both depths reach the same outer rungs, so they share a skeleton.
+    const shared = new Set(
+      occurrences
+        .filter((occurrence) => occurrence.pageUrl === `${ORIGIN}/p1`)
+        .map((occurrence) =>
+          (occurrence.subtreeCandidates ?? []).map((rung) => rung.skeletonSignature).join("|"),
+        ),
+    );
+    expect(shared.size).toBe(2);
+    const [first, second] = [...shared].map((value) => new Set(value.split("|")));
+    const overlap = [...first!].filter((value) => second!.has(value));
+    expect(overlap.length).toBeGreaterThan(0);
+  });
+});
