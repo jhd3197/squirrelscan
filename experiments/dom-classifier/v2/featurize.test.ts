@@ -470,3 +470,45 @@ describe("the exported schema", () => {
     expect(new Set(PAGE_FEATURE_NAMES).size).toBe(PAGE_FEATURE_NAMES.length);
   });
 });
+
+describe("maskAll", () => {
+  const page = `<!doctype html><html><head><title>T</title></head><body>
+    ${Array.from(
+      { length: 120 },
+      (_, i) =>
+        `<div class="site-footer nav"><p>Row ${i} with enough text to be a candidate.</p></div>`,
+    ).join("")}
+  </body></html>`;
+
+  test("hides every label word, where mask alone hides about half", () => {
+    const footer = NODE_FEATURE_NAMES.indexOf("self_footer");
+    const nav = NODE_FEATURE_NAMES.indexOf("self_nav");
+    const half = featurizePage(page, URL, { mask: true });
+    const all = featurizePage(page, URL, { mask: true, maskAll: true });
+    const kept = (out: ReturnType<typeof featurizePage>, index: number): number =>
+      out.nodes.filter((n) => n.features[index] === 1).length;
+    expect(kept(half, footer)).toBeGreaterThan(20);
+    expect(kept(half, nav)).toBeGreaterThan(20);
+    expect(kept(all, footer)).toBe(0);
+    expect(kept(all, nav)).toBe(0);
+    // And the hashed buckets those words would have set are gone too.
+    expect(all.nodes.every((n) => !n.tokens.includes(tokenBucket("s:footer")))).toBe(true);
+    expect(all.nodes.every((n) => !n.tokens.includes(tokenBucket("s:nav")))).toBe(true);
+  });
+
+  test("a non-label word is untouched by maskAll", () => {
+    const site = NODE_FEATURE_NAMES.indexOf("self_sticky");
+    const withWord = `<!doctype html><html><head><title>T</title></head><body>
+      <div class="sticky footer"><p>Text long enough to make this a candidate.</p></div>
+    </body></html>`;
+    const out = featurizePage(withWord, URL, { mask: true, maskAll: true });
+    expect(out.nodes[0]!.features[site]).toBe(1);
+    expect(out.nodes[0]!.features[NODE_FEATURE_NAMES.indexOf("self_footer")]).toBe(0);
+  });
+
+  test("maskAll without mask changes nothing", () => {
+    const plain = featurizePage(page, URL);
+    const odd = featurizePage(page, URL, { maskAll: true });
+    expect(odd.nodes.map((n) => n.features)).toEqual(plain.nodes.map((n) => n.features));
+  });
+});

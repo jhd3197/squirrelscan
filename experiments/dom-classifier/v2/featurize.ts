@@ -445,8 +445,8 @@ export function tokenBucket(token: string): number {
 }
 
 /** p = 0.5, deterministic in (nodeId, token). Bit 0 of the same hash. */
-function dropsUnderMask(nodeId: number, token: string): boolean {
-  return (fnv1a32(`${nodeId}\u0000${token}`) & 1) === 0;
+function dropsUnderMask(nodeId: number, token: string, always = false): boolean {
+  return always || (fnv1a32(`${nodeId}\u0000${token}`) & 1) === 0;
 }
 
 /**
@@ -479,6 +479,17 @@ export function tokenize(value: string | null): string[] {
 export interface FeaturizeOptions {
   /** Produce the masked vector in `features` instead of the true one. */
   mask?: boolean;
+  /**
+   * With `mask`, drop EVERY label-word token instead of half of them.
+   *
+   * Training uses p = 0.5 so the model still learns that class="site-footer"
+   * is evidence. This is the other end of that: the honest estimate for a page
+   * whose class names say nothing at all, which is the div-soup case the
+   * classifier exists for. It is a TEST-time option and is never used to build
+   * training rows; the feature SCHEMA is unchanged, so it does not move
+   * FEATURIZER_VERSION.
+   */
+  maskAll?: boolean;
   /** Also produce the masked vector alongside the true one. */
   emitMasked?: boolean;
   /** Candidate cap, for tests. Defaults to MAX_CANDIDATES. */
@@ -1304,7 +1315,7 @@ interface EmitContext {
   pageText: number;
 }
 
-function emitNodeVector(ctx: EmitContext, i: number, mask: boolean): number[] {
+function emitNodeVector(ctx: EmitContext, i: number, mask: boolean, maskAll = false): number[] {
   const { walk } = ctx;
   const parent = walk.parent[i]!;
   const grandparent = parent >= 0 ? walk.parent[parent]! : -1;
@@ -1386,14 +1397,18 @@ function emitNodeVector(ctx: EmitContext, i: number, mask: boolean): number[] {
   const out: number[] = Array.from({ length: NODE_FEATURE_NAMES.length }, () => 0);
   for (let f = 0; f < SELF_VOCAB_BASE; f++) out[f] = values[NODE_FEATURE_NAMES[f]!] ?? 0;
 
-  for (const token of walk.classTokens[i]!) setVocabBit(out, token, SELF_VOCAB_BASE, mask, i, "");
-  for (const token of walk.idTokens[i]!) setVocabBit(out, token, SELF_VOCAB_BASE, mask, i, "");
+  for (const token of walk.classTokens[i]!) {
+    setVocabBit(out, token, SELF_VOCAB_BASE, mask, i, "", maskAll);
+  }
+  for (const token of walk.idTokens[i]!) {
+    setVocabBit(out, token, SELF_VOCAB_BASE, mask, i, "", maskAll);
+  }
   if (parent >= 0) {
     for (const token of walk.classTokens[parent]!) {
-      setVocabBit(out, token, PARENT_VOCAB_BASE, mask, i, "p:");
+      setVocabBit(out, token, PARENT_VOCAB_BASE, mask, i, "p:", maskAll);
     }
     for (const token of walk.idTokens[parent]!) {
-      setVocabBit(out, token, PARENT_VOCAB_BASE, mask, i, "p:");
+      setVocabBit(out, token, PARENT_VOCAB_BASE, mask, i, "p:", maskAll);
     }
   }
 
@@ -1408,18 +1423,21 @@ function setVocabBit(
   mask: boolean,
   nodeId: number,
   seedPrefix: string,
+  maskAll: boolean,
 ): void {
-  if (mask && LABEL_WORDS.has(token) && dropsUnderMask(nodeId, `${seedPrefix}${token}`)) return;
+  if (mask && LABEL_WORDS.has(token) && dropsUnderMask(nodeId, `${seedPrefix}${token}`, maskAll)) {
+    return;
+  }
   const slot = CURATED_INDEX.get(token);
   if (slot !== undefined) out[base + slot] = 1;
 }
 
-function emitNodeTokens(walk: Walk, i: number, mask: boolean): number[] {
+function emitNodeTokens(walk: Walk, i: number, mask: boolean, maskAll = false): number[] {
   const parent = walk.parent[i]!;
   const buckets = new Set<number>();
   const add = (token: string, prefix: "s:" | "p:"): void => {
     const seed = prefix === "s:" ? token : `p:${token}`;
-    if (mask && LABEL_WORDS.has(token) && dropsUnderMask(i, seed)) return;
+    if (mask && LABEL_WORDS.has(token) && dropsUnderMask(i, seed, maskAll)) return;
     buckets.add(tokenBucket(`${prefix}${token}`));
   };
   for (const token of walk.classTokens[i]!) add(token, "s:");
@@ -1694,13 +1712,13 @@ export function featurizeDocument(
       parentCandidateId: ancestor,
       parentId: walk.parent[i]!,
       depth: walk.depth[i]!,
-      features: emitNodeVector(ctx, i, options.mask === true),
-      tokens: emitNodeTokens(walk, i, options.mask === true),
+      features: emitNodeVector(ctx, i, options.mask === true, options.maskAll === true),
+      tokens: emitNodeTokens(walk, i, options.mask === true, options.maskAll === true),
       masked: options.mask === true,
     };
     if (options.emitMasked && !options.mask) {
-      node.maskedFeatures = emitNodeVector(ctx, i, true);
-      node.maskedTokens = emitNodeTokens(walk, i, true);
+      node.maskedFeatures = emitNodeVector(ctx, i, true, options.maskAll === true);
+      node.maskedTokens = emitNodeTokens(walk, i, true, options.maskAll === true);
     }
     return node;
   });

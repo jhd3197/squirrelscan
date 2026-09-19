@@ -4,11 +4,11 @@
   "type": "module",
   "description": "The one featurizer + silver labeller for DOM classifier v2 (#2307). Experiment code: not published, not imported by the CLI yet.",
   "scripts": {
-    "test": "bun test featurize.test.ts silver-labels.test.ts",
+    "test": "bun test featurize.test.ts silver-labels.test.ts runtime/predict.test.ts",
     "typecheck": "tsgo --noEmit -p tsconfig.json",
     "lint": "oxlint .",
-    "format": "oxfmt --write *.ts",
-    "format:check": "oxfmt --check *.ts",
+    "format": "oxfmt --write *.ts runtime/*.ts train/*.ts",
+    "format:check": "oxfmt --check *.ts runtime/*.ts train/*.ts",
     "build-dataset": "bun run build-dataset.ts"
   },
   "dependencies": {
