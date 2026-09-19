@@ -335,7 +335,16 @@ describe("policy revisions", () => {
   });
 
   test("an unknown revision is refused rather than silently defaulted", () => {
-    expect(() => loadPolicy("v7" as never)).toThrow("unknown policy revision");
+    expect(() => loadPolicy("v99" as never)).toThrow("unknown policy revision");
+  });
+
+  test("v7 is the frozen revision: v6 plus the shape-only scoping", () => {
+    const v7 = loadPolicy("v7").text;
+    expect(v7).toContain("This rule decides SHAPE only");
+    expect(v7).toContain("never suppresses a purpose");
+    // Everything v6 fixed is still in v7.
+    expect(v7).toContain("are `layout_container`. No exception.");
+    expect(v7).toContain("When attributes are unavailable, label from the tag");
   });
 });
 
