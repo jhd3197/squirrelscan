@@ -1872,9 +1872,9 @@
           "warmups": 2,
           "repeats": 7,
           "milliseconds": {
-            "min": 0.815,
-            "median": 0.898,
-            "max": 1.358
+            "min": 0.608,
+            "median": 0.662,
+            "max": 0.987
           },
           "rawReportViewSerializedBytes": {
             "checks": 3040,
@@ -1889,8 +1889,8 @@
           },
           "renderedJsonBytesAtFullWidthSignatures": 3187,
           "heap": {
-            "beforeBytes": 18808302,
-            "afterBytes": 18808302,
+            "beforeBytes": 18764754,
+            "afterBytes": 18764754,
             "deltaBytes": 0,
             "gcBeforeMeasurement": true
           }
@@ -1899,9 +1899,9 @@
           "warmups": 2,
           "repeats": 7,
           "milliseconds": {
-            "min": 11.088,
-            "median": 12.324,
-            "max": 16.103
+            "min": 8.586,
+            "median": 9.077,
+            "max": 10.645
           },
           "rawReportViewSerializedBytes": {
             "checks": 36142,
@@ -1916,9 +1916,9 @@
           },
           "renderedJsonBytesAtFullWidthSignatures": 79104,
           "heap": {
-            "beforeBytes": 18808302,
-            "afterBytes": 19965078,
-            "deltaBytes": 1156776,
+            "beforeBytes": 18764754,
+            "afterBytes": 19969066,
+            "deltaBytes": 1204312,
             "gcBeforeMeasurement": true
           }
         }
@@ -1930,9 +1930,9 @@
           "warmups": 2,
           "repeats": 7,
           "milliseconds": {
-            "min": 0.377,
-            "median": 0.41,
-            "max": 0.777
+            "min": 0.275,
+            "median": 0.304,
+            "max": 0.662
           },
           "rawReportViewSerializedBytes": {
             "checks": 1858,
@@ -1947,8 +1947,8 @@
           },
           "renderedJsonBytesAtFullWidthSignatures": 1815,
           "heap": {
-            "beforeBytes": 20929223,
-            "afterBytes": 20929223,
+            "beforeBytes": 20955194,
+            "afterBytes": 20955194,
             "deltaBytes": 0,
             "gcBeforeMeasurement": true
           }
@@ -1957,9 +1957,9 @@
           "warmups": 2,
           "repeats": 7,
           "milliseconds": {
-            "min": 2.055,
-            "median": 2.085,
-            "max": 2.88
+            "min": 1.707,
+            "median": 1.763,
+            "max": 2.04
           },
           "rawReportViewSerializedBytes": {
             "checks": 9176,
@@ -1974,8 +1974,8 @@
           },
           "renderedJsonBytesAtFullWidthSignatures": 20640,
           "heap": {
-            "beforeBytes": 20929223,
-            "afterBytes": 20929223,
+            "beforeBytes": 20955194,
+            "afterBytes": 20955194,
             "deltaBytes": 0,
             "gcBeforeMeasurement": true
           }
@@ -1988,9 +1988,9 @@
           "warmups": 2,
           "repeats": 7,
           "milliseconds": {
-            "min": 1.966,
-            "median": 2.17,
-            "max": 2.744
+            "min": 1.592,
+            "median": 1.671,
+            "max": 1.934
           },
           "rawReportViewSerializedBytes": {
             "checks": 165,
@@ -2005,8 +2005,8 @@
           },
           "renderedJsonBytesAtFullWidthSignatures": 1488,
           "heap": {
-            "beforeBytes": 20929223,
-            "afterBytes": 20929223,
+            "beforeBytes": 20955194,
+            "afterBytes": 20955194,
             "deltaBytes": 0,
             "gcBeforeMeasurement": true
           }
@@ -2015,9 +2015,9 @@
           "warmups": 2,
           "repeats": 7,
           "milliseconds": {
-            "min": 296.734,
-            "median": 310.115,
-            "max": 325.347
+            "min": 254.105,
+            "median": 293.039,
+            "max": 434.293
           },
           "rawReportViewSerializedBytes": {
             "checks": 979083,
@@ -2032,9 +2032,9 @@
           },
           "renderedJsonBytesAtFullWidthSignatures": 2877145,
           "heap": {
-            "beforeBytes": 31716647,
-            "afterBytes": 25676463,
-            "deltaBytes": -6040184,
+            "beforeBytes": 31701164,
+            "afterBytes": 25278215,
+            "deltaBytes": -6422949,
             "gcBeforeMeasurement": true
           }
         }

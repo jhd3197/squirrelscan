@@ -179,12 +179,13 @@ function componentRootKey(
 ): string {
   const identity =
     attribution === "repeated-subtree" && promotedRoot
-      ? stable({
+      ? // The skeleton alone, WITHOUT the level: two slots in one block can
+        // promote at different depths when their ladders differ, and keying on
+        // the level would then split one block across two rollup lines. The
+        // same structure at two depths is the same component either way.
+        stable({
           origin: representative.siteOrigin,
-          repeatedSubtree: {
-            level: promotedRoot.level,
-            skeletonSignature: promotedRoot.skeletonSignature,
-          },
+          repeatedSubtree: { skeletonSignature: promotedRoot.skeletonSignature },
         })
       : stable({
           origin: representative.siteOrigin,
