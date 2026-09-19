@@ -7,6 +7,8 @@ import type { AuditReport, CheckResult, ComponentOccurrence, ReportRuleResult } 
 import { renderLlm } from "../src/output/llm";
 import { renderMarkdown } from "../src/output/markdown";
 import { renderText } from "../src/output/text";
+import { groupIssuesByCategory } from "../src/grouping";
+import { fixGroupLine, ruleFixCoverage } from "../src/component-presentation";
 
 function occurrence(pageUrl: string, overrides: Partial<ComponentOccurrence> = {}): ComponentOccurrence {
   return {
@@ -112,6 +114,75 @@ describe("partial coverage: groups first, remainder explicitly labelled", () => 
     expect(out).toContain("Fix once in the site header");
     expect(out).toContain("Not attributed to a shared component (1):");
     expect(out).toContain("-> /legal");
+  });
+});
+
+describe("a one-page group is not a group", () => {
+  // Real WordPress audits produced two separate single-page footer groups and a
+  // single-page nav group. "Fix once, 1 page" says nothing the legacy per-check
+  // line did not, so those fall back to legacy rendering entirely.
+  const singlePage = report([check(PAGES[0]!, [occurrence(PAGES[0]!)])]);
+  const legacy = report([check(PAGES[0]!)]);
+
+  test("llm, text and markdown render it exactly as if it had no evidence", () => {
+    expect(renderLlm(singlePage)).toBe(renderLlm(legacy));
+    expect(renderText(singlePage)).toBe(renderText(legacy));
+    expect(renderMarkdown(singlePage)).toBe(renderMarkdown(legacy));
+  });
+
+  test("no fix-once line is emitted at all", () => {
+    const out = renderLlm(singlePage);
+    expect(out).not.toContain("fix-once");
+    expect(out).not.toContain("Fix once");
+    // The defect is still reported the legacy way, not swallowed.
+    expect(out).toContain("Pages (1): /");
+  });
+
+  test("a mixed rule renders only the multi-page group and keeps the rest legacy", () => {
+    const mixed = report([
+      ...PAGES.map((page) => check(page, [occurrence(page)])),
+      // A second, unrelated one-page component on a fourth page.
+      check("https://example.test/legal", [
+        occurrence("https://example.test/legal", {
+          variant: { key: "s128:zzzz", structuralSignature: "s128:zzzz", contentHash: "s128:yyyy" },
+        }),
+      ]),
+    ]);
+    const out = renderLlm(mixed);
+    expect((out.match(/<fix-once /g) ?? [])).toHaveLength(1);
+    expect(out).toContain('<fix-once pages="3">');
+    // The single-page one is the uncovered remainder, labelled.
+    expect(out).toContain("Pages not attributed to a shared component (1): /legal");
+  });
+});
+
+describe("attribution changes what the line claims", () => {
+  test("repeated-subtree is an observation, not an instruction", () => {
+    const r = report(PAGES.map((page) => check(page, [occurrence(page)])));
+    const grouped = groupIssuesByCategory(r.ruleResults)[0]!.rules[0]!;
+    grouped.componentFixGroups = grouped.componentFixGroups!.map((group) => ({
+      ...group,
+      attribution: "repeated-subtree" as const,
+    }));
+    expect(fixGroupLine(grouped.componentFixGroups[0]!, 5, (p) => new URL(p).pathname)).toBe(
+      'Likely one shared block in the site header (nav:1 > a:1): link text "website" is generic, seen on 3 pages: /, /api, /guides',
+    );
+    // It must NOT read as an instruction to fix one place.
+    expect(fixGroupLine(grouped.componentFixGroups[0]!, 5, (p) => new URL(p).pathname)).not.toContain(
+      "Fix once",
+    );
+  });
+
+  test("an unknown attribution renders nothing rather than guessing", () => {
+    const r = report(PAGES.map((page) => check(page, [occurrence(page)])));
+    const grouped = groupIssuesByCategory(r.ruleResults)[0]!.rules[0]!;
+    grouped.componentFixGroups = grouped.componentFixGroups!.map((group) => ({
+      ...group,
+      attribution: "some-future-signal" as unknown as typeof group.attribution,
+    }));
+    const coverage = ruleFixCoverage(grouped);
+    expect(coverage.mode).toBe("none");
+    expect(coverage.groups).toHaveLength(0);
   });
 });
 

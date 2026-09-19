@@ -5,6 +5,8 @@
 import type { ComponentOccurrence } from "@squirrelscan/core-contracts";
 import type { CheckResult } from "./types";
 
+export type ComponentFixAttribution = "observed-component-evidence" | "repeated-subtree";
+
 export interface ComponentFixGroup {
   /**
    * `component-fix:<32 hex>` — a 128-bit digest of the canonical identity below,
@@ -16,7 +18,17 @@ export interface ComponentFixGroup {
   ruleId: string;
   check: { name: string; status: CheckResult["status"] };
   /** This is derived from observations and never replaces the raw checks. */
-  attribution: "observed-component-evidence";
+  /**
+   * How the grouping was established. Renderers treat these differently and an
+   * UNKNOWN value conservatively (legacy rendering), so a future producer can
+   * add one without a stale reader overstating its confidence.
+   *
+   * - `observed-component-evidence` — the elements share an observed landmark
+   *   region identity. Strong enough to say "fix once here".
+   * - `repeated-subtree` — a block recurring in page content, or on a theme
+   *   with no landmarks. Weaker: likely one shared block, not established.
+   */
+  attribution: ComponentFixAttribution;
   affectedPages: string[];
   affectedPageCount: number;
   /** Safe repair-target context from the representative observed element. */
@@ -103,6 +115,119 @@ export function componentOccurrenceKey(occurrence: ComponentOccurrence): string 
   });
 }
 
+/** A subtree must recur on at least this many pages to be called a component. */
+export const REPEATED_SUBTREE_MIN_PAGES = 3;
+/**
+ * Above this share of the region's text the candidate IS the page's content.
+ * A blog index's article list recurs on every index page and covers all of
+ * `main`; promoting it would claim one template fix for text authored per post.
+ */
+export const REPEATED_SUBTREE_MAX_TEXT_SHARE = 0.5;
+
+/**
+ * What must match for two occurrences to be the same defect in the same slot.
+ *
+ * Deliberately NOT the destination hash. On the site this was built for, the
+ * same download button carries a different href on every release page (107
+ * distinct destinations across 114 occurrences), so including it yields zero
+ * groups. Per-page data is exactly what a shared block is expected to vary;
+ * what must match is the slot (`locatorFromRoot`) and the defect itself.
+ */
+function promotionDefectIdentity(occurrence: ComponentOccurrence): string {
+  return stable({ kind: occurrence.defect.kind, values: occurrence.defect.values });
+}
+
+type Promotable = {
+  occurrence: ComponentOccurrence;
+  check: ComponentFixGroup["check"];
+  scope: string;
+};
+
+/**
+ * Promote occurrences the rules could not judge, using the ancestor ladders
+ * they recorded.
+ *
+ * A rule sees one page and so cannot know whether a block repeats; it emits the
+ * ladder and stays uncertain. Here, with every page in hand, the highest
+ * ancestor level whose skeleton recurs on enough pages becomes the component.
+ * The occurrences themselves are never rewritten: they are still `uncertain`
+ * and `groupable: false`, and the group carries the weaker attribution.
+ */
+function promoteRepeatedSubtrees(
+  ruleId: string,
+  promotable: Promotable[],
+): Map<string, { occurrences: ComponentOccurrence[]; check: ComponentFixGroup["check"] }> {
+  const byScope = new Map<string, Promotable[]>();
+  for (const entry of promotable) {
+    const bucket = byScope.get(entry.scope) ?? [];
+    bucket.push(entry);
+    byScope.set(entry.scope, bucket);
+  }
+
+  const promoted = new Map<
+    string,
+    { occurrences: ComponentOccurrence[]; check: ComponentFixGroup["check"] }
+  >();
+  for (const [scope, entries] of byScope) {
+    // Pages per (level, skeleton), counting only occurrences that pass the
+    // text-share guard: a page where the block is most of the content simply
+    // does not join, and cannot drag the level up on its own.
+    const pagesByRung = new Map<string, Set<string>>();
+    for (const { occurrence } of entries) {
+      for (const candidate of occurrence.subtreeCandidates ?? []) {
+        if (candidate.textShareOfRegion > REPEATED_SUBTREE_MAX_TEXT_SHARE) continue;
+        const rung = `${candidate.level}\u0000${candidate.skeletonSignature}`;
+        const pages = pagesByRung.get(rung) ?? new Set<string>();
+        pages.add(occurrence.pageUrl);
+        pagesByRung.set(rung, pages);
+      }
+    }
+    const eligible = [...pagesByRung.entries()]
+      .filter(([, pages]) => pages.size >= REPEATED_SUBTREE_MIN_PAGES)
+      .map(([rung]) => {
+        const separator = rung.indexOf("\u0000");
+        return { level: Number(rung.slice(0, separator)), skeleton: rung.slice(separator + 1) };
+      });
+    if (eligible.length === 0) continue;
+    // Highest level wins: it is the largest subtree that still recurs, so the
+    // repair target is the whole shared block rather than one row inside it.
+    // Ties resolve by signature codepoint order, never by input order.
+    eligible.sort((a, b) => b.level - a.level || compare(a.skeleton, b.skeleton));
+    const chosen = eligible[0]!;
+
+    for (const { occurrence, check } of entries) {
+      const candidate = (occurrence.subtreeCandidates ?? []).find(
+        (item) =>
+          item.level === chosen.level &&
+          item.skeletonSignature === chosen.skeleton &&
+          item.textShareOfRegion <= REPEATED_SUBTREE_MAX_TEXT_SHARE,
+      );
+      if (!candidate) continue;
+      // The slot inside the block is part of the identity, so seven different
+      // buttons in one block stay seven repair targets rather than one.
+      const identity = stable({
+        scope,
+        repeatedSubtree: {
+          level: candidate.level,
+          skeletonSignature: candidate.skeletonSignature,
+          locatorFromRoot: candidate.locatorFromRoot,
+        },
+      });
+      const entry = promoted.get(identity) ?? { occurrences: [], check };
+      entry.occurrences.push(occurrence);
+      promoted.set(identity, entry);
+    }
+  }
+  // A promoted group that ended up on fewer pages than the floor (because the
+  // guard removed occurrences after the level was chosen) is not a component.
+  for (const [identity, entry] of [...promoted]) {
+    const pages = new Set(entry.occurrences.map((occurrence) => occurrence.pageUrl));
+    if (pages.size < REPEATED_SUBTREE_MIN_PAGES) promoted.delete(identity);
+  }
+  void ruleId;
+  return promoted;
+}
+
 /**
  * Derive deterministic, evidence-backed fix groups from the complete selected
  * check evidence. Checks without this additive field retain legacy rendering.
@@ -112,12 +237,31 @@ export function componentFixGroups(ruleId: string, checks: CheckResult[]): Compo
     string,
     { occurrences: ComponentOccurrence[]; check: ComponentFixGroup["check"] }
   >();
+  const promotable: Promotable[] = [];
   for (const check of checks) {
     for (const occurrence of check.componentOccurrences ?? []) {
       // Unknown, article-nested and otherwise uncertain evidence stays in the
       // legacy page-scoped display. It is never promoted to an actionable
       // cross-page component claim merely because its message happens to match.
-      if (!occurrence.groupable || occurrence.confidence !== "observed") continue;
+      if (!occurrence.groupable || occurrence.confidence !== "observed") {
+        // …except a main-region occurrence carrying an ancestor ladder, which
+        // the pass below may still promote on cross-page evidence.
+        if (
+          occurrence.uncertainReason === "region-main" &&
+          (occurrence.subtreeCandidates?.length ?? 0) > 0
+        )
+          promotable.push({
+            occurrence,
+            check: { name: check.name, status: check.status },
+            scope: stable({
+              ruleId,
+              origin: occurrence.siteOrigin,
+              check: { name: check.name, status: check.status },
+              defect: promotionDefectIdentity(occurrence),
+            }),
+          });
+        continue;
+      }
       // Read the site the rule recorded rather than re-deriving one here: a
       // second derivation could only disagree with the one that already scoped
       // `family.key`. Keeping it an explicit term means a group cannot span two
@@ -137,6 +281,15 @@ export function componentFixGroups(ruleId: string, checks: CheckResult[]): Compo
       entry.occurrences.push(occurrence);
       groups.set(identity, entry);
     }
+  }
+
+  // Cross-page promotion runs after every page's evidence is in hand. Its
+  // identities are disjoint from the observed ones (they are keyed on the
+  // subtree ladder, not on family/variant), so they share the id space safely.
+  const promotedIdentities = new Set<string>();
+  for (const [identity, entry] of promoteRepeatedSubtrees(ruleId, promotable)) {
+    promotedIdentities.add(identity);
+    groups.set(identity, entry);
   }
 
   // Assign ids over the identities in codepoint order, so a digest collision
@@ -174,7 +327,9 @@ export function componentFixGroups(ruleId: string, checks: CheckResult[]): Compo
         id: idByIdentity.get(identity)!,
         ruleId,
         check: entry.check,
-        attribution: "observed-component-evidence" as const,
+        attribution: (promotedIdentities.has(identity)
+          ? "repeated-subtree"
+          : "observed-component-evidence") as ComponentFixAttribution,
         affectedPages,
         affectedPageCount: affectedPages.length,
         region: representative.region,

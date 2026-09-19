@@ -34,8 +34,35 @@ export interface FixCoverage {
   uncoveredPages: string[];
 }
 
+/**
+ * Attributions a renderer knows how to phrase. An unknown value renders as
+ * nothing at all rather than being narrated with borrowed confidence: a reader
+ * on an older build must not be told "fix once" about evidence that did not
+ * mean that. Keep in step with `ComponentFixAttribution`.
+ */
+const RENDERABLE_ATTRIBUTIONS = new Set<string>([
+  "observed-component-evidence",
+  "repeated-subtree",
+]);
+
+/**
+ * Whether a group earns a line of its own.
+ *
+ * A one-page group is not a group. "Fix once, 1 page" says nothing the legacy
+ * per-check line did not already say, and real template sites produce them in
+ * bulk: one WordPress audit emitted two separate single-page footer groups and
+ * a single-page nav group, three lines of pure noise. JSON keeps them, flagged
+ * as they are; the human and LLM surfaces do not.
+ */
+export function isRenderableFixGroup(group: ComponentFixGroup): boolean {
+  return group.affectedPageCount >= 2 && RENDERABLE_ATTRIBUTIONS.has(group.attribution);
+}
+
 export function ruleFixCoverage(rule: GroupedRule): FixCoverage {
-  const groups = rule.componentFixGroups ?? [];
+  // Coverage counts only the groups that will actually be RENDERED. Counting a
+  // group we then decline to print would suppress the legacy lines for its
+  // pages and leave the defect described nowhere at all.
+  const groups = (rule.componentFixGroups ?? []).filter(isRenderableFixGroup);
   if (groups.length === 0) return { mode: "none", groups: [], uncoveredPages: [] };
 
   const covered = new Set<string>();
@@ -142,9 +169,8 @@ export function fixGroupPages(
   };
 }
 
-/** "12 pages: /, /api, /guides (+9 more)" — or "1 page: /" when there is one. */
-export function formatPageSample(sample: PageSample): string {
-  const noun = sample.total === 1 ? "page" : "pages";
+/** "12 pages: /, /api, /guides (+9 more)". */
+export function formatPageSample(sample: PageSample, noun = "pages"): string {
   const list = sample.shown.join(", ");
   return sample.hasMore
     ? `${sample.total} ${noun}: ${list} (+${sample.total - sample.shown.length} more)`
@@ -154,8 +180,10 @@ export function formatPageSample(sample: PageSample): string {
 /**
  * The single actionable line a fix group exists to produce.
  *
- * "Fix once in the site footer (footer > a:1): link text "website" is generic,
- *  12 pages: /, /api (+10 more)"
+ * The wording tracks the ATTRIBUTION, because the two say different things.
+ * Observed landmark evidence supports an instruction ("fix once here").
+ * A repeated subtree supports an observation ("likely one shared block"), and
+ * phrasing it as an instruction would overstate what was established.
  */
 export function fixGroupLine(
   group: ComponentFixGroup,
@@ -164,6 +192,9 @@ export function fixGroupLine(
 ): string {
   const where = describeRegion(group);
   const slot = describeSlot(group);
-  const pages = formatPageSample(fixGroupPages(group, limit, format));
-  return `Fix once in the ${where} (${slot}): ${describeDefect(group)}, ${pages}`;
+  const sample = fixGroupPages(group, limit, format);
+  if (group.attribution === "repeated-subtree") {
+    return `Likely one shared block in the ${where} (${slot}): ${describeDefect(group)}, seen on ${formatPageSample(sample)}`;
+  }
+  return `Fix once in the ${where} (${slot}): ${describeDefect(group)}, ${formatPageSample(sample)}`;
 }

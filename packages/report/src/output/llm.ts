@@ -387,11 +387,15 @@ export function renderLlm(report: AuditReport, options?: LlmRenderOptions): stri
         // One actionable line. No hashes, no signatures, no family/variant keys:
         // those are grouping mechanics, and an agent cannot act on them.
         lines.push(
-          `${indent(2)}<fix-once pages="${fixGroup.affectedPageCount}">${escapeXml(
-            `Fix once in the ${describeRegion(fixGroup)}: ${describeDefect(fixGroup)}, ${formatPageSample(
+          `${indent(2)}<${fixGroup.attribution === "repeated-subtree" ? "likely-shared-block" : "fix-once"} pages="${fixGroup.affectedPageCount}">${escapeXml(
+            `${
+              fixGroup.attribution === "repeated-subtree"
+                ? `Likely one shared block in the ${describeRegion(fixGroup)}: ${describeDefect(fixGroup)}, seen on `
+                : `Fix once in the ${describeRegion(fixGroup)}: ${describeDefect(fixGroup)}, `
+            }${formatPageSample(
               fixGroupPages(fixGroup, LLM_FIX_GROUP_PAGES, (page) => compressUrl(page, baseOrigin)),
             )} [${describeSlot(fixGroup)}]`,
-          )}</fix-once>`,
+          )}</${fixGroup.attribution === "repeated-subtree" ? "likely-shared-block" : "fix-once"}>`,
         );
       }
       if (rule.mixedProvenanceNote) {

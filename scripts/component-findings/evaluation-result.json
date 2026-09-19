@@ -147,9 +147,9 @@
             "approxTokens": 130
           },
           "after": {
-            "lines": 14,
-            "bytes": 753,
-            "approxTokens": 188
+            "lines": 13,
+            "bytes": 519,
+            "approxTokens": 130
           }
         },
         "markdown": {
@@ -159,9 +159,9 @@
             "approxTokens": 337
           },
           "after": {
-            "lines": 51,
-            "bytes": 1367,
-            "approxTokens": 342
+            "lines": 54,
+            "bytes": 1346,
+            "approxTokens": 337
           }
         }
       },
@@ -260,9 +260,9 @@
             "approxTokens": 131
           },
           "after": {
-            "lines": 14,
-            "bytes": 741,
-            "approxTokens": 185
+            "lines": 15,
+            "bytes": 524,
+            "approxTokens": 131
           }
         },
         "markdown": {
@@ -272,9 +272,9 @@
             "approxTokens": 323
           },
           "after": {
-            "lines": 58,
-            "bytes": 1350,
-            "approxTokens": 338
+            "lines": 60,
+            "bytes": 1291,
+            "approxTokens": 323
           }
         }
       },
@@ -375,9 +375,9 @@
             "approxTokens": 134
           },
           "after": {
-            "lines": 14,
-            "bytes": 733,
-            "approxTokens": 183
+            "lines": 15,
+            "bytes": 536,
+            "approxTokens": 134
           }
         },
         "markdown": {
@@ -387,9 +387,9 @@
             "approxTokens": 344
           },
           "after": {
-            "lines": 59,
-            "bytes": 1388,
-            "approxTokens": 347
+            "lines": 62,
+            "bytes": 1375,
+            "approxTokens": 344
           }
         }
       },
@@ -702,8 +702,8 @@
           },
           "after": {
             "lines": 13,
-            "bytes": 626,
-            "approxTokens": 157
+            "bytes": 515,
+            "approxTokens": 129
           }
         },
         "markdown": {
@@ -713,9 +713,9 @@
             "approxTokens": 328
           },
           "after": {
-            "lines": 49,
-            "bytes": 1271,
-            "approxTokens": 318
+            "lines": 53,
+            "bytes": 1312,
+            "approxTokens": 328
           }
         }
       },
@@ -1274,9 +1274,9 @@
             "approxTokens": 135
           },
           "after": {
-            "lines": 14,
-            "bytes": 772,
-            "approxTokens": 193
+            "lines": 13,
+            "bytes": 538,
+            "approxTokens": 135
           }
         },
         "markdown": {
@@ -1286,9 +1286,9 @@
             "approxTokens": 335
           },
           "after": {
-            "lines": 51,
-            "bytes": 1365,
-            "approxTokens": 341
+            "lines": 54,
+            "bytes": 1340,
+            "approxTokens": 335
           }
         }
       },
@@ -1475,9 +1475,9 @@
             "approxTokens": 130
           },
           "after": {
-            "lines": 13,
-            "bytes": 593,
-            "approxTokens": 148
+            "lines": 15,
+            "bytes": 518,
+            "approxTokens": 130
           }
         },
         "markdown": {
@@ -1487,9 +1487,9 @@
             "approxTokens": 320
           },
           "after": {
-            "lines": 56,
-            "bytes": 1237,
-            "approxTokens": 309
+            "lines": 60,
+            "bytes": 1279,
+            "approxTokens": 320
           }
         }
       },
@@ -1614,6 +1614,51 @@
       }
     }
   ],
+  "renderingPolicy": {
+    "multiPageObserved": {
+      "llm": {
+        "lines": 13,
+        "bytes": 626,
+        "approxTokens": 157
+      },
+      "markdown": {
+        "lines": 59,
+        "bytes": 1372,
+        "approxTokens": 343
+      },
+      "note": "one 12-page group; renders as a fix-once line"
+    },
+    "attributionWording": {
+      "measured": true,
+      "observed": {
+        "text": "Fix once in the site footer (footer > a:1): link text \"read more\" is generic, 12 pages: /s0, /s1, /s10 (+9 more)",
+        "bytes": 112
+      },
+      "repeatedSubtree": {
+        "text": "Likely one shared block in the site footer (footer > a:1): link text \"read more\" is generic, seen on 12 pages: /s0, /s1, /s10 (+9 more)",
+        "bytes": 135
+      },
+      "distinct": true
+    },
+    "singlePageGroups": {
+      "llm": {
+        "lines": 15,
+        "bytes": 566,
+        "approxTokens": 142
+      },
+      "markdown": {
+        "lines": 74,
+        "bytes": 1788,
+        "approxTokens": 447
+      },
+      "llmLegacy": {
+        "lines": 15,
+        "bytes": 566,
+        "approxTokens": 142
+      },
+      "note": "every group covers 1 page; must be byte-identical to legacy"
+    }
+  },
   "storedAudit": {
     "measured": false,
     "reason": "SQUIRREL_EVAL_AUDIT_HOME not set"
@@ -1676,9 +1721,9 @@
           "warmups": 2,
           "repeats": 7,
           "milliseconds": {
-            "min": 0.433,
-            "median": 0.538,
-            "max": 0.784
+            "min": 0.483,
+            "median": 0.549,
+            "max": 0.765
           },
           "rawReportViewSerializedBytes": {
             "checks": 2384,
@@ -1693,8 +1738,8 @@
           },
           "renderedJsonBytesAtFullWidthSignatures": 2632,
           "heap": {
-            "beforeBytes": 14632980,
-            "afterBytes": 14632980,
+            "beforeBytes": 14710748,
+            "afterBytes": 14710748,
             "deltaBytes": 0,
             "gcBeforeMeasurement": true
           }
@@ -1703,9 +1748,9 @@
           "warmups": 2,
           "repeats": 7,
           "milliseconds": {
-            "min": 4.447,
-            "median": 4.818,
-            "max": 6.141
+            "min": 4.772,
+            "median": 5.082,
+            "max": 6
           },
           "rawReportViewSerializedBytes": {
             "checks": 24686,
@@ -1720,9 +1765,9 @@
           },
           "renderedJsonBytesAtFullWidthSignatures": 54510,
           "heap": {
-            "beforeBytes": 14632980,
-            "afterBytes": 18894352,
-            "deltaBytes": 4261372,
+            "beforeBytes": 14710748,
+            "afterBytes": 18951245,
+            "deltaBytes": 4240497,
             "gcBeforeMeasurement": true
           }
         }
@@ -1734,9 +1779,9 @@
           "warmups": 2,
           "repeats": 7,
           "milliseconds": {
-            "min": 0.273,
-            "median": 0.411,
-            "max": 0.558
+            "min": 0.252,
+            "median": 0.269,
+            "max": 0.428
           },
           "rawReportViewSerializedBytes": {
             "checks": 1858,
@@ -1751,8 +1796,8 @@
           },
           "renderedJsonBytesAtFullWidthSignatures": 1815,
           "heap": {
-            "beforeBytes": 18894352,
-            "afterBytes": 18894352,
+            "beforeBytes": 18951245,
+            "afterBytes": 18951245,
             "deltaBytes": 0,
             "gcBeforeMeasurement": true
           }
@@ -1761,9 +1806,9 @@
           "warmups": 2,
           "repeats": 7,
           "milliseconds": {
-            "min": 1.203,
-            "median": 1.293,
-            "max": 1.678
+            "min": 1.281,
+            "median": 1.389,
+            "max": 2.399
           },
           "rawReportViewSerializedBytes": {
             "checks": 9176,
@@ -1778,8 +1823,8 @@
           },
           "renderedJsonBytesAtFullWidthSignatures": 20316,
           "heap": {
-            "beforeBytes": 18894352,
-            "afterBytes": 18894352,
+            "beforeBytes": 18951245,
+            "afterBytes": 18951245,
             "deltaBytes": 0,
             "gcBeforeMeasurement": true
           }
@@ -1792,9 +1837,9 @@
           "warmups": 2,
           "repeats": 7,
           "milliseconds": {
-            "min": 1.478,
-            "median": 1.602,
-            "max": 1.769
+            "min": 1.829,
+            "median": 2.495,
+            "max": 3.928
           },
           "rawReportViewSerializedBytes": {
             "checks": 165,
@@ -1809,8 +1854,8 @@
           },
           "renderedJsonBytesAtFullWidthSignatures": 1488,
           "heap": {
-            "beforeBytes": 18894352,
-            "afterBytes": 18894352,
+            "beforeBytes": 18951245,
+            "afterBytes": 18951245,
             "deltaBytes": 0,
             "gcBeforeMeasurement": true
           }
@@ -1819,9 +1864,9 @@
           "warmups": 2,
           "repeats": 7,
           "milliseconds": {
-            "min": 27.102,
-            "median": 32.476,
-            "max": 34.636
+            "min": 28.671,
+            "median": 36.909,
+            "max": 38.134
           },
           "rawReportViewSerializedBytes": {
             "checks": 1031083,
@@ -1836,9 +1881,9 @@
           },
           "renderedJsonBytesAtFullWidthSignatures": 1232441,
           "heap": {
-            "beforeBytes": 48727080,
-            "afterBytes": 66963994,
-            "deltaBytes": 18236914,
+            "beforeBytes": 49209063,
+            "afterBytes": 67749913,
+            "deltaBytes": 18540850,
             "gcBeforeMeasurement": true
           }
         }

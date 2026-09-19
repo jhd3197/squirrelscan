@@ -12,6 +12,7 @@ import {
 import { renderJson } from "../../packages/report/src/output/json.ts";
 import { renderLlm } from "../../packages/report/src/output/llm.ts";
 import { renderMarkdown } from "../../packages/report/src/output/markdown.ts";
+import { fixGroupLine } from "../../packages/report/src/component-presentation.ts";
 import { packComponentOccurrences } from "../../packages/core-contracts/src/component-evidence.ts";
 import { staleCopyrightRule } from "../../packages/rules/src/content/stale-copyright.ts";
 import { linkTextRule } from "../../packages/rules/src/a11y/link-text.ts";
@@ -638,6 +639,75 @@ function storedAuditSize(): unknown {
   return { measured: true, note: "after only; a stored audit cannot be re-rendered pre-feature", llm, markdown };
 }
 
+
+/**
+ * The two rendering policies that decide whether a group is shown at all.
+ *
+ * Both come from real audits: a WordPress theme produced three single-page
+ * groups (noise), and a landmark-less theme is the case `repeated-subtree` is
+ * meant for. Measured here so a change to either policy shows up as a number.
+ */
+function renderingPolicySizes() {
+  const measure = (text: string) => ({
+    lines: text.split("\n").length,
+    bytes: Buffer.byteLength(text),
+    approxTokens: Math.round(Buffer.byteLength(text) / 4),
+  });
+  const shared = Array.from({ length: 12 }, (_, i) => ({
+    url: `https://example.invalid/s${i}`,
+    html: "<footer><a href='/x'>Read more</a></footer>",
+  }));
+  // Each page's footer differs structurally, so every group covers ONE page.
+  const singles = Array.from({ length: 12 }, (_, i) => ({
+    url: `https://example.invalid/u${i}`,
+    html: `<footer class='v${i}'>${"<span></span>".repeat(i + 1)}<a href='/x'>Read more</a></footer>`,
+  }));
+
+  const sharedChecks = run(current.link, shared);
+  const singleChecks = run(current.link, singles);
+  return {
+    multiPageObserved: {
+      llm: measure(renderLlm(reportFor(current.link, sharedChecks))),
+      markdown: measure(renderMarkdown(reportFor(current.link, sharedChecks))),
+      note: "one 12-page group; renders as a fix-once line",
+    },
+    // Attribution changes the WORDING, not the layout, so it is measured at the
+    // line level. Injecting it into a rendered report is not possible here:
+    // renderers derive groups internally, so a report-level "measurement" of it
+    // would silently compare a report against itself.
+    attributionWording: (() => {
+      const [group] = componentFixGroups(current.link.meta.id, sharedChecks);
+      if (!group) return { measured: false };
+      const path = (page: string) => new URL(page).pathname;
+      const observed = fixGroupLine(group, 3, path);
+      const repeated = fixGroupLine(
+        { ...group, attribution: "repeated-subtree" as const },
+        3,
+        path,
+      );
+      return {
+        measured: true,
+        observed: { text: observed, bytes: Buffer.byteLength(observed) },
+        repeatedSubtree: { text: repeated, bytes: Buffer.byteLength(repeated) },
+        distinct: observed !== repeated,
+      };
+    })(),
+    singlePageGroups: {
+      llm: measure(renderLlm(reportFor(current.link, singleChecks))),
+      markdown: measure(renderMarkdown(reportFor(current.link, singleChecks))),
+      llmLegacy: measure(
+        renderLlm(
+          reportFor(
+            current.link,
+            singleChecks.map(({ componentOccurrences: _d, ...rest }) => rest),
+          ),
+        ),
+      ),
+      note: "every group covers 1 page; must be byte-identical to legacy",
+    },
+  };
+}
+
 const baseline = await loadBaseline();
 const current: Record<RuleName, Rule> = { stale: staleCopyrightRule, link: linkTextRule };
 const evaluated = cases.map((entry) => {
@@ -946,6 +1016,7 @@ const output = {
   cases: evaluated,
   legacy,
   renderedSizeAtScale: [renderedSizeAtScale(12), renderedSizeAtScale(60)],
+  renderingPolicy: renderingPolicySizes(),
   storedAudit: storedAuditSize(),
   jsonSerialization: serialization,
   foldPageSample: foldEvidence,

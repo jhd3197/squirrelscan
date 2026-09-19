@@ -52,7 +52,7 @@ export {
   componentOccurrenceIdentity,
   componentOccurrenceKey,
 } from "./component-fix-groups";
-export type { ComponentFixGroup } from "./component-fix-groups";
+export type { ComponentFixGroup, ComponentFixAttribution } from "./component-fix-groups";
 // Human-facing presentation of those groups. Renderers share these so llm,
 // markdown, text and console cannot drift in wording or in what they suppress.
 export {
