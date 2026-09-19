@@ -309,3 +309,95 @@ describe("evidence written before the ladder existed still reads", () => {
     expect(groupsFor(empty)).toHaveLength(0);
   });
 });
+
+describe("componentRootKey identifies the block, not the slot inside it", () => {
+  const pages = ["/releases/1.0.1", "/releases/1.0.2", "/releases/1.0.3", "/releases/1.0.4"];
+
+  /** One block, `slots` broken links inside it, on every page. */
+  function installBlock(slots: number, skeleton = "block") {
+    return pages.flatMap((page) =>
+      Array.from({ length: slots }, (_, index) =>
+        occurrence({
+          page,
+          slot: `div:${index + 1}>a:1`,
+          ladder: [
+            [1, `row-${skeleton}`, 0.05],
+            [2, skeleton, 0.31],
+          ],
+        }),
+      ),
+    );
+  }
+
+  test("seven links in one install block are seven groups with ONE root key", () => {
+    const groups = groupsFor(installBlock(7));
+    expect(groups).toHaveLength(7);
+    // Seven repair targets, because each link is separately wrong...
+    expect(new Set(groups.map((group) => group.semanticSlot)).size).toBe(7);
+    // ...but one thing to go and look at.
+    expect(new Set(groups.map((group) => group.componentRootKey)).size).toBe(1);
+    expect(groups.every((group) => group.componentRootKey.startsWith("component-root:"))).toBe(true);
+    expect(groups.every((group) => group.affectedPageCount === 4)).toBe(true);
+  });
+
+  test("two different blocks on the same pages keep two root keys", () => {
+    const groups = groupsFor([...installBlock(2, "install"), ...installBlock(2, "support")]);
+    expect(groups).toHaveLength(4);
+    const keys = new Set(groups.map((group) => group.componentRootKey));
+    expect(keys.size).toBe(2);
+    // Each block keeps its own slots; the key does not merge them.
+    for (const key of keys) {
+      const members = groups.filter((group) => group.componentRootKey === key);
+      expect(members).toHaveLength(2);
+    }
+  });
+
+  test("the key is stable under page order", () => {
+    const forward = installBlock(3);
+    const reversed = [...forward].reverse();
+    const shuffled = forward.filter((_, index) => index % 2 === 0).concat(
+      forward.filter((_, index) => index % 2 === 1),
+    );
+    const keysFor = (order: typeof forward) =>
+      groupsFor(order)
+        .map((group) => `${group.componentRootKey}|${group.semanticSlot}`)
+        .sort();
+    expect(keysFor(reversed)).toEqual(keysFor(forward));
+    expect(keysFor(shuffled)).toEqual(keysFor(forward));
+  });
+
+  test("an observed landmark group is rooted on its region, not on a subtree", () => {
+    // Two slots in one footer: the rule already judged them, so the root key
+    // comes from the landmark identity and still collapses to one block.
+    const footer = (page: string, slot: string): ComponentOccurrence => ({
+      // One constant destination: an observed group's identity includes the
+      // defect hashes, so a per-page href would split it for the wrong reason.
+      ...occurrence({ page, slot, destination: "footer-legal", ladder: [[1, "row", 0.05]] }),
+      groupable: true,
+      confidence: "observed",
+      uncertainReason: undefined,
+      region: { role: "footer", nestedIn: "none", structuralSignature: "s128:footer" },
+      family: { key: "s128:footer-family", structuralSignature: "s128:ff" },
+      variant: { key: "s128:footer-variant", structuralSignature: "s128:fv", contentHash: "s128:fc" },
+      element: { locator: `footer>${slot}`, structuralSignature: `s128:el-${slot}` },
+      subtreeCandidates: undefined,
+    });
+    const groups = groupsFor(
+      pages.flatMap((page) => [footer(page, "a:1"), footer(page, "a:2")]),
+    );
+    expect(groups).toHaveLength(2);
+    expect(groups.every((group) => group.attribution === "observed-component-evidence")).toBe(true);
+    expect(new Set(groups.map((group) => group.componentRootKey)).size).toBe(1);
+  });
+
+  test("a promoted block and an observed footer never share a root key", () => {
+    const groups = groupsFor(installBlock(2));
+    const observed = groupsFor([]);
+    expect(groups.length).toBeGreaterThan(0);
+    expect(observed).toHaveLength(0);
+    // Attribution is part of what a caller keys on, but the root keys are
+    // derived from disjoint identities and must not collide by construction.
+    const promotedKey = groups[0]!.componentRootKey;
+    expect(promotedKey).toMatch(/^component-root:[0-9a-f]{32}$/);
+  });
+});

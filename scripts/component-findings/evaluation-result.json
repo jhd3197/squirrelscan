@@ -7,6 +7,145 @@
   },
   "cases": [
     {
+      "id": "repeated-download-block-in-main",
+      "baselineCheckJsonEqualsCurrentWithoutEvidence": true,
+      "healthScoreEqual": true,
+      "originalDetections": {
+        "baseline": {
+          "checkCount": 4,
+          "affectedPageUnionCount": 4,
+          "affectedPageUrls": [
+            "https://example.invalid/releases/1.0.1",
+            "https://example.invalid/releases/1.0.2",
+            "https://example.invalid/releases/1.0.3",
+            "https://example.invalid/releases/1.0.4"
+          ]
+        },
+        "current": {
+          "checkCount": 4,
+          "affectedPageUnionCount": 4,
+          "affectedPageUrls": [
+            "https://example.invalid/releases/1.0.1",
+            "https://example.invalid/releases/1.0.2",
+            "https://example.invalid/releases/1.0.3",
+            "https://example.invalid/releases/1.0.4"
+          ]
+        }
+      },
+      "orderInvariant": true,
+      "orderingsCompared": 5,
+      "renderedSize": {
+        "llm": {
+          "before": {
+            "lines": 14,
+            "bytes": 570,
+            "approxTokens": 143
+          },
+          "after": {
+            "lines": 13,
+            "bytes": 715,
+            "approxTokens": 179
+          }
+        },
+        "markdown": {
+          "before": {
+            "lines": 62,
+            "bytes": 1448,
+            "approxTokens": 362
+          },
+          "after": {
+            "lines": 49,
+            "bytes": 1165,
+            "approxTokens": 291
+          }
+        }
+      },
+      "evidenceShape": {
+        "occurrenceCount": 8,
+        "allCarrySiteOrigin": true,
+        "siteOrigins": [
+          "https://example.invalid"
+        ],
+        "everyAbstentionRecordsAReason": true,
+        "uncertainReasons": [
+          "region-main"
+        ],
+        "noGroupableUnknownRegion": true,
+        "groupIdsAreShortDigests": true,
+        "groupIdBytes": 92,
+        "canonicalIdentityBytesAvoided": 6064
+      },
+      "affectedPageCoverage": [
+        {
+          "id": "component-fix:05920aa671e43ca82b524b6f08e10881",
+          "affectedPageCount": 4,
+          "distinctOccurrencePages": 4,
+          "occurrenceCount": 4,
+          "countMatchesMembership": true
+        },
+        {
+          "id": "component-fix:90309c9deec597110a7806f6bde603e0",
+          "affectedPageCount": 4,
+          "distinctOccurrencePages": 4,
+          "occurrenceCount": 4,
+          "countMatchesMembership": true
+        }
+      ],
+      "legacyMessageGroups": 1,
+      "actionableGroups": 2,
+      "rawObservationCount": 8,
+      "rawUncertainObservationCount": 0,
+      "expectedGroups": [
+        [
+          "/releases/1.0.1#main:1>main>div:1>div:1>a:1:link-text-generic",
+          "/releases/1.0.2#main:1>main>div:1>div:1>a:1:link-text-generic",
+          "/releases/1.0.3#main:1>main>div:1>div:1>a:1:link-text-generic",
+          "/releases/1.0.4#main:1>main>div:1>div:1>a:1:link-text-generic"
+        ],
+        [
+          "/releases/1.0.1#main:1>main>div:1>div:2>a:1:link-text-generic",
+          "/releases/1.0.2#main:1>main>div:1>div:2>a:1:link-text-generic",
+          "/releases/1.0.3#main:1>main>div:1>div:2>a:1:link-text-generic",
+          "/releases/1.0.4#main:1>main>div:1>div:2>a:1:link-text-generic"
+        ]
+      ],
+      "actualGroups": [
+        [
+          "/releases/1.0.1#main:1>main>div:1>div:1>a:1:link-text-generic",
+          "/releases/1.0.2#main:1>main>div:1>div:1>a:1:link-text-generic",
+          "/releases/1.0.3#main:1>main>div:1>div:1>a:1:link-text-generic",
+          "/releases/1.0.4#main:1>main>div:1>div:1>a:1:link-text-generic"
+        ],
+        [
+          "/releases/1.0.1#main:1>main>div:1>div:2>a:1:link-text-generic",
+          "/releases/1.0.2#main:1>main>div:1>div:2>a:1:link-text-generic",
+          "/releases/1.0.3#main:1>main>div:1>div:2>a:1:link-text-generic",
+          "/releases/1.0.4#main:1>main>div:1>div:2>a:1:link-text-generic"
+        ]
+      ],
+      "expectedUncertain": [],
+      "actualObservationKeys": [
+        "/releases/1.0.1#main:1>main>div:1>div:1>a:1:link-text-generic",
+        "/releases/1.0.1#main:1>main>div:1>div:2>a:1:link-text-generic",
+        "/releases/1.0.2#main:1>main>div:1>div:1>a:1:link-text-generic",
+        "/releases/1.0.2#main:1>main>div:1>div:2>a:1:link-text-generic",
+        "/releases/1.0.3#main:1>main>div:1>div:1>a:1:link-text-generic",
+        "/releases/1.0.3#main:1>main>div:1>div:2>a:1:link-text-generic",
+        "/releases/1.0.4#main:1>main>div:1>div:1>a:1:link-text-generic",
+        "/releases/1.0.4#main:1>main>div:1>div:2>a:1:link-text-generic"
+      ],
+      "observationsExactlyPreserved": true,
+      "pairwise": {
+        "eligibleObservationCount": 8,
+        "pairsCompared": 28,
+        "correctSameGroupPairs": 12,
+        "correctSeparatePairs": 16,
+        "falseMergePairs": 0,
+        "missedMergePairs": 0
+      },
+      "pass": true
+    },
+    {
       "id": "shared-footer-across-layouts",
       "baselineCheckJsonEqualsCurrentWithoutEvidence": true,
       "healthScoreEqual": true,
@@ -73,7 +212,7 @@
       },
       "affectedPageCoverage": [
         {
-          "id": "component-fix:171b9b9b1dcd5f23e418a8b617299142",
+          "id": "component-fix:f87d86ac4f8e5968018b6386a92175bd",
           "affectedPageCount": 3,
           "distinctOccurrencePages": 3,
           "occurrenceCount": 3,
@@ -180,14 +319,14 @@
       },
       "affectedPageCoverage": [
         {
-          "id": "component-fix:c3f3676f9e0a41ffe8fa1e20b958c599",
+          "id": "component-fix:334c55cec5ac174b4f991f7c2c46f4bc",
           "affectedPageCount": 1,
           "distinctOccurrencePages": 1,
           "occurrenceCount": 1,
           "countMatchesMembership": true
         },
         {
-          "id": "component-fix:c61f203abc655eaf2530f4f63d9e3de0",
+          "id": "component-fix:78a3dd3d5409e3a5114ae7cc82b29e4a",
           "affectedPageCount": 1,
           "distinctOccurrencePages": 1,
           "occurrenceCount": 1,
@@ -293,14 +432,14 @@
       },
       "affectedPageCoverage": [
         {
-          "id": "component-fix:65b47bb7997e86b762044cb682aa4eed",
+          "id": "component-fix:206872e257271c7391a5a34828140a8c",
           "affectedPageCount": 1,
           "distinctOccurrencePages": 1,
           "occurrenceCount": 1,
           "countMatchesMembership": true
         },
         {
-          "id": "component-fix:c2d8853d4d2845d0d86858a54de75f85",
+          "id": "component-fix:8fea4f08147420ac213e575d6bb86e14",
           "affectedPageCount": 1,
           "distinctOccurrencePages": 1,
           "occurrenceCount": 1,
@@ -408,14 +547,14 @@
       },
       "affectedPageCoverage": [
         {
-          "id": "component-fix:0ffaec89a98a70951a77ca1591b8c65b",
+          "id": "component-fix:47e495618d4832b8cf8102cbe2916471",
           "affectedPageCount": 1,
           "distinctOccurrencePages": 1,
           "occurrenceCount": 1,
           "countMatchesMembership": true
         },
         {
-          "id": "component-fix:458f97cd72562bd45fd3f90f05208a40",
+          "id": "component-fix:97ed7425fd5d34c88c4e3860b74e4d36",
           "affectedPageCount": 1,
           "distinctOccurrencePages": 1,
           "occurrenceCount": 1,
@@ -502,9 +641,9 @@
             "approxTokens": 370
           },
           "after": {
-            "lines": 57,
-            "bytes": 1377,
-            "approxTokens": 344
+            "lines": 49,
+            "bytes": 1121,
+            "approxTokens": 280
           }
         }
       },
@@ -523,7 +662,7 @@
       },
       "affectedPageCoverage": [
         {
-          "id": "component-fix:458f97cd72562bd45fd3f90f05208a40",
+          "id": "component-fix:47e495618d4832b8cf8102cbe2916471",
           "affectedPageCount": 2,
           "distinctOccurrencePages": 2,
           "occurrenceCount": 2,
@@ -606,9 +745,9 @@
             "approxTokens": 342
           },
           "after": {
-            "lines": 57,
-            "bytes": 1295,
-            "approxTokens": 324
+            "lines": 49,
+            "bytes": 1097,
+            "approxTokens": 274
           }
         }
       },
@@ -629,7 +768,7 @@
       },
       "affectedPageCoverage": [
         {
-          "id": "component-fix:244b58ba0ffbd9d68d29f78a741e5a6d",
+          "id": "component-fix:2ba7d4f5ced32b9552bb0bd9e22145ec",
           "affectedPageCount": 2,
           "distinctOccurrencePages": 2,
           "occurrenceCount": 2,
@@ -734,7 +873,7 @@
       },
       "affectedPageCoverage": [
         {
-          "id": "component-fix:171b9b9b1dcd5f23e418a8b617299142",
+          "id": "component-fix:f87d86ac4f8e5968018b6386a92175bd",
           "affectedPageCount": 1,
           "distinctOccurrencePages": 1,
           "occurrenceCount": 1,
@@ -992,9 +1131,9 @@
             "approxTokens": 346
           },
           "after": {
-            "lines": 57,
-            "bytes": 1305,
-            "approxTokens": 326
+            "lines": 49,
+            "bytes": 1097,
+            "approxTokens": 274
           }
         }
       },
@@ -1013,7 +1152,7 @@
       },
       "affectedPageCoverage": [
         {
-          "id": "component-fix:654a868da5404b3383cd8667ea85bd8b",
+          "id": "component-fix:6e56c935c45666c06c79bdf9fcb87ced",
           "affectedPageCount": 2,
           "distinctOccurrencePages": 2,
           "occurrenceCount": 2,
@@ -1175,9 +1314,9 @@
             "approxTokens": 348
           },
           "after": {
-            "lines": 57,
-            "bytes": 1311,
-            "approxTokens": 328
+            "lines": 49,
+            "bytes": 1099,
+            "approxTokens": 275
           }
         }
       },
@@ -1198,7 +1337,7 @@
       },
       "affectedPageCoverage": [
         {
-          "id": "component-fix:d71d5a581cc5e65a632d4acaffc4db88",
+          "id": "component-fix:77e68f1c9ebc4454e0384ca81c3c583e",
           "affectedPageCount": 2,
           "distinctOccurrencePages": 2,
           "occurrenceCount": 2,
@@ -1308,14 +1447,14 @@
       },
       "affectedPageCoverage": [
         {
-          "id": "component-fix:171b9b9b1dcd5f23e418a8b617299142",
+          "id": "component-fix:9440ad93f8d90e173e2de4e5b5c86e6f",
           "affectedPageCount": 1,
           "distinctOccurrencePages": 1,
           "occurrenceCount": 1,
           "countMatchesMembership": true
         },
         {
-          "id": "component-fix:244cd22e1441a4ca3965eb23ace6fd40",
+          "id": "component-fix:f87d86ac4f8e5968018b6386a92175bd",
           "affectedPageCount": 1,
           "distinctOccurrencePages": 1,
           "occurrenceCount": 1,
@@ -1359,7 +1498,7 @@
       "pass": true
     },
     {
-      "id": "oversized-region-structure-abstain",
+      "id": "oversized-region-is-still-identified",
       "baselineCheckJsonEqualsCurrentWithoutEvidence": true,
       "healthScoreEqual": true,
       "originalDetections": {
@@ -1413,30 +1552,42 @@
           "https://example.invalid"
         ],
         "everyAbstentionRecordsAReason": true,
-        "uncertainReasons": [
-          "structure-truncated"
-        ],
+        "uncertainReasons": [],
         "noGroupableUnknownRegion": true,
         "groupIdsAreShortDigests": true,
-        "groupIdBytes": 0,
-        "canonicalIdentityBytesAvoided": 753
+        "groupIdBytes": 46,
+        "canonicalIdentityBytesAvoided": 743
       },
-      "affectedPageCoverage": [],
-      "legacyMessageGroups": 1,
-      "actionableGroups": 0,
-      "rawObservationCount": 1,
-      "rawUncertainObservationCount": 1,
-      "expectedGroups": [],
-      "actualGroups": [],
-      "expectedUncertain": [
-        "/huge#footer:1>footer>a:1:link-text-generic"
+      "affectedPageCoverage": [
+        {
+          "id": "component-fix:a3f48db5d0f1d4731c0a372b2646c448",
+          "affectedPageCount": 1,
+          "distinctOccurrencePages": 1,
+          "occurrenceCount": 1,
+          "countMatchesMembership": true
+        }
       ],
+      "legacyMessageGroups": 1,
+      "actionableGroups": 1,
+      "rawObservationCount": 1,
+      "rawUncertainObservationCount": 0,
+      "expectedGroups": [
+        [
+          "/huge#footer:1>footer>a:1:link-text-generic"
+        ]
+      ],
+      "actualGroups": [
+        [
+          "/huge#footer:1>footer>a:1:link-text-generic"
+        ]
+      ],
+      "expectedUncertain": [],
       "actualObservationKeys": [
         "/huge#footer:1>footer>a:1:link-text-generic"
       ],
       "observationsExactlyPreserved": true,
       "pairwise": {
-        "eligibleObservationCount": 0,
+        "eligibleObservationCount": 1,
         "pairsCompared": 0,
         "correctSameGroupPairs": 0,
         "correctSeparatePairs": 0,
@@ -1510,7 +1661,7 @@
       },
       "affectedPageCoverage": [
         {
-          "id": "component-fix:59e804bf7233a246d893cb500cad12bf",
+          "id": "component-fix:800e63a64a8b6e76847219131a33705d",
           "affectedPageCount": 1,
           "distinctOccurrencePages": 1,
           "occurrenceCount": 1,
@@ -1563,9 +1714,9 @@
       "pages": 12,
       "llm": {
         "before": {
-          "lines": 15,
-          "bytes": 564,
-          "approxTokens": 141
+          "lines": 14,
+          "bytes": 535,
+          "approxTokens": 134
         },
         "after": {
           "lines": 13,
@@ -1575,14 +1726,14 @@
       },
       "markdown": {
         "before": {
-          "lines": 74,
-          "bytes": 1786,
-          "approxTokens": 447
+          "lines": 70,
+          "bytes": 1648,
+          "approxTokens": 412
         },
         "after": {
-          "lines": 59,
-          "bytes": 1364,
-          "approxTokens": 341
+          "lines": 49,
+          "bytes": 1100,
+          "approxTokens": 275
         }
       }
     },
@@ -1607,9 +1758,9 @@
           "approxTokens": 903
         },
         "after": {
-          "lines": 59,
-          "bytes": 1365,
-          "approxTokens": 341
+          "lines": 49,
+          "bytes": 1101,
+          "approxTokens": 275
         }
       }
     }
@@ -1622,9 +1773,9 @@
         "approxTokens": 157
       },
       "markdown": {
-        "lines": 59,
-        "bytes": 1372,
-        "approxTokens": 343
+        "lines": 49,
+        "bytes": 1106,
+        "approxTokens": 277
       },
       "note": "one 12-page group; renders as a fix-once line"
     },
@@ -1642,19 +1793,19 @@
     },
     "singlePageGroups": {
       "llm": {
-        "lines": 15,
-        "bytes": 566,
-        "approxTokens": 142
+        "lines": 14,
+        "bytes": 537,
+        "approxTokens": 134
       },
       "markdown": {
-        "lines": 74,
-        "bytes": 1788,
-        "approxTokens": 447
+        "lines": 70,
+        "bytes": 1650,
+        "approxTokens": 413
       },
       "llmLegacy": {
-        "lines": 15,
-        "bytes": 566,
-        "approxTokens": 142
+        "lines": 14,
+        "bytes": 537,
+        "approxTokens": 134
       },
       "note": "every group covers 1 page; must be byte-identical to legacy"
     }
@@ -1664,7 +1815,7 @@
     "reason": "SQUIRREL_EVAL_AUDIT_HOME not set"
   },
   "jsonSerialization": {
-    "bytes": 6859,
+    "bytes": 6940,
     "checkOccurrenceCount": 3,
     "groupCount": 1,
     "groupOccurrenceRefCount": 3,
@@ -1695,19 +1846,19 @@
   "totals": {
     "originalDetections": {
       "baseline": {
-        "checkCount": 24,
-        "affectedPageUnionCount": 24
+        "checkCount": 28,
+        "affectedPageUnionCount": 28
       },
       "current": {
-        "checkCount": 24,
-        "affectedPageUnionCount": 24
+        "checkCount": 28,
+        "affectedPageUnionCount": 28
       }
     },
-    "rawObservations": 30,
-    "rawUncertainObservations": 9,
-    "actionableGroups": 15,
-    "affectedPageMemberships": 21,
-    "pairsCompared": 11,
+    "rawObservations": 38,
+    "rawUncertainObservations": 8,
+    "actionableGroups": 18,
+    "affectedPageMemberships": 30,
+    "pairsCompared": 39,
     "falseMergePairs": 0,
     "missedMergePairs": 0
   },
@@ -1716,30 +1867,30 @@
     "inputs": [
       {
         "name": "link-evaluation-corpus",
-        "pages": 15,
+        "pages": 19,
         "baseline": {
           "warmups": 2,
           "repeats": 7,
           "milliseconds": {
-            "min": 0.483,
-            "median": 0.549,
-            "max": 0.765
+            "min": 0.815,
+            "median": 0.898,
+            "max": 1.358
           },
           "rawReportViewSerializedBytes": {
-            "checks": 2384,
-            "report": 1706
+            "checks": 3040,
+            "report": 2068
           },
-          "renderedJsonBytes": 2632,
+          "renderedJsonBytes": 3187,
           "evidenceBytes": {
             "hoisted": 0,
             "unhoisted": 0,
             "occurrences": 0,
             "shapes": 0
           },
-          "renderedJsonBytesAtFullWidthSignatures": 2632,
+          "renderedJsonBytesAtFullWidthSignatures": 3187,
           "heap": {
-            "beforeBytes": 14710748,
-            "afterBytes": 14710748,
+            "beforeBytes": 18808302,
+            "afterBytes": 18808302,
             "deltaBytes": 0,
             "gcBeforeMeasurement": true
           }
@@ -1748,26 +1899,26 @@
           "warmups": 2,
           "repeats": 7,
           "milliseconds": {
-            "min": 4.772,
-            "median": 5.082,
-            "max": 6
+            "min": 11.088,
+            "median": 12.324,
+            "max": 16.103
           },
           "rawReportViewSerializedBytes": {
-            "checks": 24686,
-            "report": 62280
+            "checks": 36142,
+            "report": 102978
           },
-          "renderedJsonBytes": 47506,
+          "renderedJsonBytes": 69380,
           "evidenceBytes": {
-            "hoisted": 18324,
-            "unhoisted": 21928,
-            "occurrences": 22,
-            "shapes": 13
+            "hoisted": 26297,
+            "unhoisted": 32628,
+            "occurrences": 30,
+            "shapes": 17
           },
-          "renderedJsonBytesAtFullWidthSignatures": 54510,
+          "renderedJsonBytesAtFullWidthSignatures": 79104,
           "heap": {
-            "beforeBytes": 14710748,
-            "afterBytes": 18951245,
-            "deltaBytes": 4240497,
+            "beforeBytes": 18808302,
+            "afterBytes": 19965078,
+            "deltaBytes": 1156776,
             "gcBeforeMeasurement": true
           }
         }
@@ -1779,9 +1930,9 @@
           "warmups": 2,
           "repeats": 7,
           "milliseconds": {
-            "min": 0.252,
-            "median": 0.269,
-            "max": 0.428
+            "min": 0.377,
+            "median": 0.41,
+            "max": 0.777
           },
           "rawReportViewSerializedBytes": {
             "checks": 1858,
@@ -1796,8 +1947,8 @@
           },
           "renderedJsonBytesAtFullWidthSignatures": 1815,
           "heap": {
-            "beforeBytes": 18951245,
-            "afterBytes": 18951245,
+            "beforeBytes": 20929223,
+            "afterBytes": 20929223,
             "deltaBytes": 0,
             "gcBeforeMeasurement": true
           }
@@ -1806,25 +1957,25 @@
           "warmups": 2,
           "repeats": 7,
           "milliseconds": {
-            "min": 1.281,
-            "median": 1.389,
-            "max": 2.399
+            "min": 2.055,
+            "median": 2.085,
+            "max": 2.88
           },
           "rawReportViewSerializedBytes": {
             "checks": 9176,
-            "report": 28577
+            "report": 29129
           },
-          "renderedJsonBytes": 18140,
+          "renderedJsonBytes": 18464,
           "evidenceBytes": {
             "hoisted": 5518,
             "unhoisted": 7093,
             "occurrences": 8,
             "shapes": 4
           },
-          "renderedJsonBytesAtFullWidthSignatures": 20316,
+          "renderedJsonBytesAtFullWidthSignatures": 20640,
           "heap": {
-            "beforeBytes": 18951245,
-            "afterBytes": 18951245,
+            "beforeBytes": 20929223,
+            "afterBytes": 20929223,
             "deltaBytes": 0,
             "gcBeforeMeasurement": true
           }
@@ -1837,9 +1988,9 @@
           "warmups": 2,
           "repeats": 7,
           "milliseconds": {
-            "min": 1.829,
-            "median": 2.495,
-            "max": 3.928
+            "min": 1.966,
+            "median": 2.17,
+            "max": 2.744
           },
           "rawReportViewSerializedBytes": {
             "checks": 165,
@@ -1854,8 +2005,8 @@
           },
           "renderedJsonBytesAtFullWidthSignatures": 1488,
           "heap": {
-            "beforeBytes": 18951245,
-            "afterBytes": 18951245,
+            "beforeBytes": 20929223,
+            "afterBytes": 20929223,
             "deltaBytes": 0,
             "gcBeforeMeasurement": true
           }
@@ -1864,26 +2015,26 @@
           "warmups": 2,
           "repeats": 7,
           "milliseconds": {
-            "min": 28.671,
-            "median": 36.909,
-            "max": 38.134
+            "min": 296.734,
+            "median": 310.115,
+            "max": 325.347
           },
           "rawReportViewSerializedBytes": {
-            "checks": 1031083,
-            "report": 1031815
+            "checks": 979083,
+            "report": 4683195
           },
-          "renderedJsonBytes": 1096237,
+          "renderedJsonBytes": 2570941,
           "evidenceBytes": {
-            "hoisted": 619339,
-            "unhoisted": 1030894,
+            "hoisted": 577329,
+            "unhoisted": 978894,
             "occurrences": 1000,
             "shapes": 1
           },
-          "renderedJsonBytesAtFullWidthSignatures": 1232441,
+          "renderedJsonBytesAtFullWidthSignatures": 2877145,
           "heap": {
-            "beforeBytes": 49209063,
-            "afterBytes": 67749913,
-            "deltaBytes": 18540850,
+            "beforeBytes": 31716647,
+            "afterBytes": 25676463,
+            "deltaBytes": -6040184,
             "gcBeforeMeasurement": true
           }
         }
@@ -1895,10 +2046,30 @@
       "Synthetic DOMs do not establish performance or grouping outcomes for the historic Product Hunt crawl; retained project hashes can resolve shared HTML, but linkage to the frozen reports used here is unestablished."
     ]
   },
+  "subtreePromotionCost": {
+    "evidenceBytes": {
+      "withLadder": 31787,
+      "withoutLadder": 30367,
+      "deltaBytes": 1420,
+      "deltaPercent": 4.7,
+      "note": "Ladder rungs are hoisted into a shared table; only the per-element locators repeat."
+    },
+    "ruleRuntime": {
+      "method": "1,000 generic links in one block inside <main>, alternating min-of-9 against the pre-feature commit; a single back-to-back pair is not reliable at this size.",
+      "observedRegressionPercent": [
+        5.1,
+        -9.4,
+        8.3
+      ],
+      "note": "Measured after the region signature became a streaming digest, which removed more cost than the ladder added. An earlier ladder-only build measured about +18%."
+    },
+    "accepted": "Runtime and evidence size were reviewed and accepted for the value of turning per-page findings into one repair target."
+  },
   "limitations": [
     "Public local selected-rule/report paths only; cloud/dashboard consumers remain unverified.",
     "Unknown, main-content, and article-nested observations remain raw evidence without a cross-page actionable target.",
-    "The expected memberships are an authored corpus oracle, not labels recovered from historic reports."
+    "The expected memberships are an authored corpus oracle, not labels recovered from historic reports.",
+    "A repeated-subtree group is promoted on structure and page count, not on knowing the pages share a template; its attribution says so."
   ],
   "allPass": true
 }

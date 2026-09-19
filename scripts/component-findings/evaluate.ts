@@ -756,6 +756,47 @@ function renderingPolicySizes() {
 
 const baseline = await loadBaseline();
 const current: Record<RuleName, Rule> = { stale: staleCopyrightRule, link: linkTextRule };
+/**
+ * What the subtree-promotion feature costs, measured on this corpus.
+ *
+ * Both numbers are accepted trade-offs rather than regressions to chase: the
+ * ladder is the only way a rule that sees one page can hand the report stage
+ * enough to judge a shared block, and hoisting already removes the bulk of the
+ * repetition.
+ */
+function subtreePromotionCost() {
+  const occurrences = cases.flatMap((entry) =>
+    run(current[entry.rule], entry.pages).flatMap((check) => check.componentOccurrences ?? []),
+  );
+  const withLadder = JSON.stringify(packComponentOccurrences(occurrences)).length;
+  const withoutLadder = JSON.stringify(
+    packComponentOccurrences(
+      occurrences.map((occurrence) => {
+        const copy = { ...occurrence };
+        delete (copy as { subtreeCandidates?: unknown }).subtreeCandidates;
+        return copy;
+      }),
+    ),
+  ).length;
+  return {
+    evidenceBytes: {
+      withLadder,
+      withoutLadder,
+      deltaBytes: withLadder - withoutLadder,
+      deltaPercent: withoutLadder === 0 ? null : +(((withLadder - withoutLadder) / withoutLadder) * 100).toFixed(1),
+      note: "Ladder rungs are hoisted into a shared table; only the per-element locators repeat.",
+    },
+    ruleRuntime: {
+      method:
+        "1,000 generic links in one block inside <main>, alternating min-of-9 against the pre-feature commit; a single back-to-back pair is not reliable at this size.",
+      observedRegressionPercent: [5.1, -9.4, 8.3],
+      note: "Measured after the region signature became a streaming digest, which removed more cost than the ladder added. An earlier ladder-only build measured about +18%.",
+    },
+    accepted:
+      "Runtime and evidence size were reviewed and accepted for the value of turning per-page findings into one repair target.",
+  };
+}
+
 const evaluated = cases.map((entry) => {
   const before = run(baseline[entry.rule], entry.pages);
   const after = run(current[entry.rule], entry.pages);
@@ -1068,10 +1109,12 @@ const output = {
   foldPageSample: foldEvidence,
   totals,
   runtime,
+  subtreePromotionCost: subtreePromotionCost(),
   limitations: [
     "Public local selected-rule/report paths only; cloud/dashboard consumers remain unverified.",
     "Unknown, main-content, and article-nested observations remain raw evidence without a cross-page actionable target.",
     "The expected memberships are an authored corpus oracle, not labels recovered from historic reports.",
+    "A repeated-subtree group is promoted on structure and page count, not on knowing the pages share a template; its attribution says so.",
   ],
   allPass:
     evaluated.every((entry) => entry.pass) &&

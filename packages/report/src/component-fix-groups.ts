@@ -29,6 +29,18 @@ export interface ComponentFixGroup {
    *   with no landmarks. Weaker: likely one shared block, not established.
    */
   attribution: ComponentFixAttribution;
+  /**
+   * The component INSTANCE this group belongs to, independent of which slot
+   * inside it is broken.
+   *
+   * One install block with seven generic links produces seven groups, which is
+   * seven correct repair targets but one thing to go and look at. Groups that
+   * share a root key are the same block, so a renderer can roll them into a
+   * single line ("7 links in this block") while JSON keeps them apart. Equal
+   * key means the same component instance family; it deliberately carries no
+   * rule, check or defect, which callers supply alongside it.
+   */
+  componentRootKey: string;
   affectedPages: string[];
   affectedPageCount: number;
   /** Safe repair-target context from the representative observed element. */
@@ -148,7 +160,40 @@ type GroupEntry = {
   check: ComponentFixGroup["check"];
   /** Set only for a promoted group: the slot relative to the subtree root. */
   semanticSlot?: string;
+  /** Set only for a promoted group: the subtree root it was promoted on. */
+  promotedRoot?: { level: number; skeletonSignature: string };
 };
+
+/**
+ * Identity of the component a group sits in.
+ *
+ * A promoted group is rooted on the subtree that recurred, so the root is that
+ * level and skeleton: every slot inside the same block resolves to one key. An
+ * observed group is rooted on the landmark the rule already identified, so the
+ * region role plus the family and variant keys are the instance.
+ */
+function componentRootKey(
+  attribution: ComponentFixAttribution,
+  representative: ComponentOccurrence,
+  promotedRoot: GroupEntry["promotedRoot"],
+): string {
+  const identity =
+    attribution === "repeated-subtree" && promotedRoot
+      ? stable({
+          origin: representative.siteOrigin,
+          repeatedSubtree: {
+            level: promotedRoot.level,
+            skeletonSignature: promotedRoot.skeletonSignature,
+          },
+        })
+      : stable({
+          origin: representative.siteOrigin,
+          region: representative.region.role,
+          family: representative.family.key,
+          variant: representative.variant.key,
+        });
+  return `component-root:${componentFixGroupDigest(identity)}`;
+}
 
 /**
  * Promote occurrences the rules could not judge, using the ancestor ladders
@@ -186,26 +231,27 @@ function promoteRepeatedSubtrees(
         pagesByRung.set(rung, pages);
       }
     }
-    const eligible = [...pagesByRung.entries()]
-      .filter(([, pages]) => pages.size >= REPEATED_SUBTREE_MIN_PAGES)
-      .map(([rung]) => {
-        const separator = rung.indexOf("\u0000");
-        return { level: Number(rung.slice(0, separator)), skeleton: rung.slice(separator + 1) };
-      });
-    if (eligible.length === 0) continue;
-    // Highest level wins: it is the largest subtree that still recurs, so the
-    // repair target is the whole shared block rather than one row inside it.
-    // Ties resolve by signature codepoint order, never by input order.
-    eligible.sort((a, b) => b.level - a.level || compare(a.skeleton, b.skeleton));
-    const chosen = eligible[0]!;
+    // Every rung that recurs enough, not just the best one overall: two
+    // different blocks can carry the same defect on the same pages, and a
+    // single winning rung would promote one and silently drop the other.
+    const eligible = new Set(
+      [...pagesByRung.entries()]
+        .filter(([, pages]) => pages.size >= REPEATED_SUBTREE_MIN_PAGES)
+        .map(([rung]) => rung),
+    );
+    if (eligible.size === 0) continue;
 
     for (const { occurrence, check } of entries) {
-      const candidate = (occurrence.subtreeCandidates ?? []).find(
-        (item) =>
-          item.level === chosen.level &&
-          item.skeletonSignature === chosen.skeleton &&
-          item.textShareOfRegion <= REPEATED_SUBTREE_MAX_TEXT_SHARE,
-      );
+      // Each occurrence joins at the highest of ITS OWN eligible rungs, so the
+      // repair target is the largest recurring block containing it. Ties resolve
+      // by signature codepoint order, never by input order.
+      const candidate = (occurrence.subtreeCandidates ?? [])
+        .filter(
+          (item) =>
+            item.textShareOfRegion <= REPEATED_SUBTREE_MAX_TEXT_SHARE &&
+            eligible.has(`${item.level}\u0000${item.skeletonSignature}`),
+        )
+        .sort((a, b) => b.level - a.level || compare(a.skeletonSignature, b.skeletonSignature))[0];
       if (!candidate) continue;
       // The slot inside the block is part of the identity, so seven different
       // buttons in one block stay seven repair targets rather than one.
@@ -217,13 +263,14 @@ function promoteRepeatedSubtrees(
           locatorFromRoot: candidate.locatorFromRoot,
         },
       });
-      // The repair target is the slot INSIDE the block, not the page path that
-      // led to it: that is what makes the same target recognisable on a page
-      // whose surrounding layout differs.
       const entry = promoted.get(identity) ?? {
         occurrences: [],
         check,
         semanticSlot: candidate.locatorFromRoot,
+        promotedRoot: {
+          level: candidate.level,
+          skeletonSignature: candidate.skeletonSignature,
+        },
       };
       entry.occurrences.push(occurrence);
       promoted.set(identity, entry);
@@ -332,13 +379,15 @@ export function componentFixGroups(ruleId: string, checks: CheckResult[]): Compo
         ...new Set(occurrences.map((occurrence) => occurrence.pageUrl)),
       ].sort(compare);
       const representative = occurrences[0]!;
+      const attribution: ComponentFixAttribution = promotedIdentities.has(identity)
+        ? "repeated-subtree"
+        : "observed-component-evidence";
       return {
         id: idByIdentity.get(identity)!,
         ruleId,
         check: entry.check,
-        attribution: (promotedIdentities.has(identity)
-          ? "repeated-subtree"
-          : "observed-component-evidence") as ComponentFixAttribution,
+        attribution,
+        componentRootKey: componentRootKey(attribution, representative, entry.promotedRoot),
         affectedPages,
         affectedPageCount: affectedPages.length,
         region: representative.region,
