@@ -40,11 +40,18 @@ export const JEV_MODEL_V5 = "jev-1.13.0";
 // `as const` keeps the literal type through an object property, so a row whose
 // promptRevision drifts from this module is a type error rather than a string.
 export const PROMPT_REVISION_V5 = "dom-suggestions-v5" as const;
+/** Revisions this module can run. Each has its own policy file; none overwrites another. */
+export const POLICY_REVISIONS = ["v5", "v6"] as const;
+export type PolicyRevision = (typeof POLICY_REVISIONS)[number];
+export type PromptRevision = `dom-suggestions-${PolicyRevision}`;
 export const PACKET_REVISION_V5 = "runtime-dom-text-v2";
 /** Packets built from full HTML, which carry attributes a capture cannot hold. */
 export const HTML_PACKET_REVISION_V5 = "runtime-dom-html-v1";
 export const PAGE_PACKET_REVISION_V5 = "dom-page-text-v2";
 export const POLICY_PATH = join(import.meta.dir, "..", "v2", "labels", "policy-v5.md");
+export function policyPath(revision: PolicyRevision): string {
+  return join(import.meta.dir, "..", "v2", "labels", `policy-${revision}.md`);
+}
 
 export const PAGE_TYPES_V5 = pageTypeMap.classes as readonly string[];
 export const PAGE_TYPE_COLLAPSE = pageTypeMap.map as Record<string, string>;
@@ -397,13 +404,23 @@ export function serializePagePacket(evidence: PageEvidence): string {
   ].join("\n");
 }
 
-export type PolicyDocument = { text: string; sha256: string };
+export type PolicyDocument = { text: string; sha256: string; revision: PromptRevision };
 
-export function loadPolicy(path = POLICY_PATH): PolicyDocument {
-  const text = readFileSync(path, "utf8");
+/**
+ * Read one revision's policy and bind it to its own prompt revision.
+ *
+ * The revision travels on the document rather than as a module constant, so a
+ * row can never claim one revision while carrying another's bytes; both the
+ * hash and the revision are written on every emitted row.
+ */
+export function loadPolicy(revision: PolicyRevision = "v5"): PolicyDocument {
+  if (!POLICY_REVISIONS.includes(revision)) throw new Error(`unknown policy revision ${revision}`);
+  const text = readFileSync(policyPath(revision), "utf8");
   if (!text.includes("## 1. componentType") || !text.includes("## 4. pageType"))
-    throw new Error("policy-v5.md is missing a required section");
-  return { text, sha256: sha256(text) };
+    throw new Error(`policy-${revision}.md is missing a required section`);
+  if (!text.startsWith(`# Shared annotation policy, revision \`dom-suggestions-${revision}\``))
+    throw new Error(`policy-${revision}.md does not declare revision ${revision}`);
+  return { text, sha256: sha256(text), revision: `dom-suggestions-${revision}` };
 }
 
 function noul(
@@ -502,7 +519,7 @@ export function buildRequestV5(
     };
   }
   const state: JevStateV5 = {
-    policy: { revision: PROMPT_REVISION_V5, sha256: policy.sha256, text: policy.text },
+    policy: { revision: policy.revision, sha256: policy.sha256, text: policy.text },
     page: {
       pageId: evidence.pageId,
       title: evidence.title,
@@ -530,7 +547,7 @@ export type JevRowV5 = {
   schemaVersion: 1;
   provider: "typesafe";
   modelId: string;
-  promptRevision: typeof PROMPT_REVISION_V5;
+  promptRevision: PromptRevision;
   taxonomyRevision: typeof TAXONOMY_REVISION;
   pageTypeMappingRevision: string;
   purposeMappingRevision: string;
@@ -573,7 +590,12 @@ export function toRowsV5(
   page: CapturedPage,
   built: ReturnType<typeof buildRequestV5>,
   response: JevResponse,
-  context: { split: string; strata: Map<string, string>; policySha256: string; latencyMs: number },
+  context: {
+    split: string;
+    strata: Map<string, string>;
+    policy: PolicyDocument;
+    latencyMs: number;
+  },
   includePage: boolean,
   createdAt = new Date().toISOString(),
 ): JevRowV5[] {
@@ -583,11 +605,11 @@ export function toRowsV5(
     schemaVersion: 1 as const,
     provider: "typesafe" as const,
     modelId: JEV_MODEL_V5,
-    promptRevision: PROMPT_REVISION_V5,
+    promptRevision: context.policy.revision,
     taxonomyRevision: TAXONOMY_REVISION,
     pageTypeMappingRevision: pageTypeMap.mappingRevision as string,
     purposeMappingRevision: purposeMap.mappingRevision as string,
-    policySha256: context.policySha256,
+    policySha256: context.policy.sha256,
     pageId: page.id,
     captureHash: page.captureHash,
     snapshotHash: snapshot,

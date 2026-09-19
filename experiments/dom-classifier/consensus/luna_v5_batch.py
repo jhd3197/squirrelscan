@@ -62,10 +62,22 @@ def load_vocabulary() -> dict[str, list[str]]:
     }
 
 
-def load_policy() -> tuple[str, str]:
-    text = (LABELS_DIR / "policy-v5.md").read_text()
+POLICY_REVISIONS = ("v5", "v6")
+
+
+def prompt_revision(revision: str = "v5") -> str:
+    if revision not in POLICY_REVISIONS:
+        raise ValueError(f"unknown policy revision {revision}")
+    return f"dom-suggestions-{revision}"
+
+
+def load_policy(revision: str = "v5") -> tuple[str, str]:
+    """Read one revision's policy. Each revision has its own file; none is edited in place."""
+    text = (LABELS_DIR / f"policy-{revision}.md").read_text()
     if "## 1. componentType" not in text or "## 4. pageType" not in text:
-        raise ValueError("policy-v5.md is missing a required section")
+        raise ValueError(f"policy-{revision}.md is missing a required section")
+    if not text.startswith(f"# Shared annotation policy, revision `{prompt_revision(revision)}`"):
+        raise ValueError(f"policy-{revision}.md does not declare revision {revision}")
     return text, sha256_text(text)
 
 
@@ -107,7 +119,9 @@ def blind(packet: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def response_schema(batch: list[dict[str, Any]], vocabulary: dict[str, list[str]]) -> dict[str, Any]:
+def response_schema(
+    batch: list[dict[str, Any]], vocabulary: dict[str, list[str]], revision: str = PROMPT_REVISION
+) -> dict[str, Any]:
     multi = {
         axis: {
             "type": "object",
@@ -174,7 +188,7 @@ def response_schema(batch: list[dict[str, Any]], vocabulary: dict[str, list[str]
                             "type": "string",
                             "const": "independent_reasoned_review",
                         },
-                        "promptRevision": {"type": "string", "const": PROMPT_REVISION},
+                        "promptRevision": {"type": "string", "const": revision},
                         "evidence": {"type": "string", "minLength": 1, "maxLength": 600},
                         "observations": {"type": "array", "items": observation},
                     },
@@ -209,11 +223,15 @@ Blind packets:
 
 
 def prompt_for(
-    batch: list[dict[str, Any]], vocabulary: dict[str, list[str]], policy: str, policy_hash: str
+    batch: list[dict[str, Any]],
+    vocabulary: dict[str, list[str]],
+    policy: str,
+    policy_hash: str,
+    revision: str = PROMPT_REVISION,
 ) -> str:
     return PREAMBLE.format(
         model=MODEL,
-        revision=PROMPT_REVISION,
+        revision=revision,
         policy=policy,
         policy_hash=policy_hash,
         node_revision="runtime-dom-text-v2",
@@ -224,7 +242,10 @@ def prompt_for(
 
 
 def validate_record(
-    record: dict[str, Any], packet: dict[str, Any], vocabulary: dict[str, list[str]]
+    record: dict[str, Any],
+    packet: dict[str, Any],
+    vocabulary: dict[str, list[str]],
+    revision: str = PROMPT_REVISION,
 ) -> dict[str, Any]:
     if record.get("packetKey") != packet_key(packet):
         raise ValueError("response packetKey does not match its blind packet")
@@ -233,7 +254,7 @@ def validate_record(
         or record.get("gold") is not False
         or record.get("model") != MODEL
         or record.get("labelingMethod") != "independent_reasoned_review"
-        or record.get("promptRevision") != PROMPT_REVISION
+        or record.get("promptRevision") != revision
     ):
         raise ValueError("response provenance is invalid")
     evidence = record.get("evidence")
@@ -286,6 +307,7 @@ def validated_batch(
     prompt: str,
     number: int,
     latency_ms: int,
+    revision: str = PROMPT_REVISION,
 ) -> list[dict[str, Any]]:
     start = response_text.find("{")
     if start < 0:
@@ -299,7 +321,7 @@ def validated_batch(
         raise ValueError("response packet keys do not match the batch")
     validated = []
     for packet in batch:
-        row = validate_record(by_key[packet_key(packet)], packet, vocabulary)
+        row = validate_record(by_key[packet_key(packet)], packet, vocabulary, revision)
         row["lunaRun"] = {
             "promptSha256": sha256_text(prompt),
             "responseSha256": sha256_text(response_text),
@@ -348,12 +370,14 @@ def main() -> None:
     parser.add_argument("--runs-dir", type=Path, required=True)
     parser.add_argument("--batch-size", type=int, default=20)
     parser.add_argument("--max-batches", type=int, default=0)
+    parser.add_argument("--policy-revision", choices=POLICY_REVISIONS, default="v5")
     args = parser.parse_args()
     if not 1 <= args.batch_size <= 40:
         raise ValueError("batch-size must be 1..40")
 
+    revision = prompt_revision(args.policy_revision)
     vocabulary = load_vocabulary()
-    policy, policy_hash = load_policy()
+    policy, policy_hash = load_policy(args.policy_revision)
     packets = read_jsonl(args.packets)
     for packet in packets:
         validate_packet(packet)
@@ -379,19 +403,21 @@ def main() -> None:
         if args.max_batches and batches >= args.max_batches:
             break
         batches += 1
-        prompt = prompt_for(batch, vocabulary, policy, policy_hash)
+        prompt = prompt_for(batch, vocabulary, policy, policy_hash, revision)
         batch_dir = args.runs_dir / f"batch-{number:04d}"
         batch_dir.mkdir(parents=True, exist_ok=True)
         (batch_dir / "prompt.txt").write_text(prompt)
         schema_path = batch_dir / "response-schema.json"
         schema_path.write_text(
-            json.dumps(response_schema(batch, vocabulary), indent=2, sort_keys=True) + "\n"
+            json.dumps(response_schema(batch, vocabulary, revision), indent=2, sort_keys=True) + "\n"
         )
         response_text, latency_ms = run_batch(prompt, batch_dir / "response.json", schema_path)
         latencies.append(latency_ms)
         try:
             accepted.extend(
-                validated_batch(response_text, batch, vocabulary, prompt, number, latency_ms)
+                validated_batch(
+                    response_text, batch, vocabulary, prompt, number, latency_ms, revision
+                )
             )
             completed.update((packet["pageId"], packet.get("nodeId")) for packet in batch)
         except Exception as error:  # noqa: BLE001 - recorded, never silently dropped
@@ -421,6 +447,7 @@ def main() -> None:
                 "rejectedBatches": len(rejected),
                 "batchesRun": batches,
                 "policySha256": policy_hash,
+                "promptRevision": revision,
                 "medianBatchLatencyMs": sorted(latencies)[len(latencies) // 2] if latencies else None,
                 "totalLatencyMs": sum(latencies),
             },

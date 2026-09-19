@@ -333,6 +333,45 @@ def test_the_two_revisions_offer_different_page_type_vocabularies() -> None:
     assert len(v5.allowed["pageType"]) == 11
 
 
+def test_v6_loads_its_own_policy_and_declares_its_own_revision() -> None:
+    v5, v6 = reviewer_b.Revision("v5"), reviewer_b.Revision("v6")
+    assert v5.revision_id == "dom-suggestions-v5"
+    assert v6.revision_id == "dom-suggestions-v6"
+    assert v5.policy_sha256 != v6.policy_sha256
+
+
+def test_the_v6_prompt_carries_the_v6_policy_not_the_v5_one() -> None:
+    prompt = reviewer_b.Revision("v6").prompt([packet()])
+    assert "are `layout_container`. No exception." in prompt
+    assert "dominated by a link menu, `navigation_menu` wins" not in prompt
+    assert "dom-suggestions-v6" in prompt
+
+
+def test_a_policy_file_that_declares_the_wrong_revision_is_refused(tmp_path: Path) -> None:
+    """A v5 file copied to the v6 name must not pass as v6.
+
+    This is the failure the revision guard exists for: `policy-v6.md` began life
+    as a copy of v5, and a half-finished copy that still declared v5 in its first
+    line would otherwise have labelled 200 nodes under the old definitions while
+    every row claimed v6.
+    """
+    module = _load("luna_v5_batch")
+    module.LABELS_DIR = tmp_path
+    (tmp_path / "policy-v6.md").write_text(
+        "# Shared annotation policy, revision `dom-suggestions-v5`\n\n"
+        "## 1. componentType\n\n## 4. pageType\n"
+    )
+    with pytest.raises(ValueError, match="does not declare revision v6"):
+        module.load_policy("v6")
+
+
+def test_an_unknown_revision_is_refused() -> None:
+    with pytest.raises(ValueError, match="unknown policy revision"):
+        luna_v5.prompt_revision("v9")
+    with pytest.raises(ValueError, match="revision must be v4, v5 or v6"):
+        reviewer_b.Revision("v9")
+
+
 # --- scoring --------------------------------------------------------------
 
 

@@ -109,8 +109,8 @@ class Revision:
     """One prompt revision's packet source, instructions and validator."""
 
     def __init__(self, name: str) -> None:
-        if name not in {"v4", "v5"}:
-            raise ValueError("revision must be v4 or v5")
+        if name not in {"v4", "v5", "v6"}:
+            raise ValueError("revision must be v4, v5 or v6")
         self.name = name
         if name == "v4":
             self.module = _load("luna_batch")
@@ -121,11 +121,12 @@ class Revision:
             )
             self.policy_sha256 = None
         else:
+            # v5 and v6 share one runner and differ only in their policy file.
             self.module = _load("luna_v5_batch")
             self.original_model = self.module.MODEL
-            self.revision_id = self.module.PROMPT_REVISION
+            self.revision_id = self.module.prompt_revision(name)
             self.allowed = self.module.load_vocabulary()
-            _, self.policy_sha256 = self.module.load_policy()
+            _, self.policy_sha256 = self.module.load_policy(name)
         # Reviewer B must declare its own model. Reviewer A's validators compare
         # against their module constant, so the constant moves with the prompt
         # and the two stay in lockstep.
@@ -140,8 +141,10 @@ class Revision:
         if self.name == "v4":
             text = self.module.prompt_for(batch, self.taxonomy_revision, self.allowed)
         else:
-            policy, policy_hash = self.module.load_policy()
-            text = self.module.prompt_for(batch, self.allowed, policy, policy_hash)
+            policy, policy_hash = self.module.load_policy(self.name)
+            text = self.module.prompt_for(
+                batch, self.allowed, policy, policy_hash, self.revision_id
+            )
         return retarget_model(text, self.original_model)
 
     def validate(self, record: dict[str, Any], packet: dict[str, Any]) -> dict[str, Any]:
@@ -149,7 +152,7 @@ class Revision:
             return self.module.validate_record(
                 record, packet, self.taxonomy_revision, self.allowed
             )
-        return self.module.validate_record(record, packet, self.allowed)
+        return self.module.validate_record(record, packet, self.allowed, self.revision_id)
 
     def validate_packet(self, packet: dict[str, Any]) -> None:
         if self.name == "v4":
@@ -199,7 +202,7 @@ def run_cli(prompt: str, log_path: Path) -> tuple[str, float, int]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--packets", type=Path, required=True)
-    parser.add_argument("--revision", choices=("v4", "v5"), required=True)
+    parser.add_argument("--revision", choices=("v4", "v5", "v6"), required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--runs-dir", type=Path, required=True)
     parser.add_argument("--batch-size", type=int, default=20)

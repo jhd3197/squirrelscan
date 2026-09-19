@@ -21,7 +21,8 @@ import {
   buildRequestV5,
   evaluateWithBackoff,
   loadPolicy,
-  PROMPT_REVISION_V5,
+  POLICY_REVISIONS,
+  type PolicyRevision,
   sha256,
   snapshotHash,
   toRowsV5,
@@ -90,7 +91,10 @@ for (const row of selection) {
 const strata = new Map(
   selection.filter((row) => row.nodeId).map((row) => [row.nodeId as string, row.stratum]),
 );
-const policy = loadPolicy();
+const policyRevision = argument("--policy-revision", "v5") as PolicyRevision;
+if (!POLICY_REVISIONS.includes(policyRevision))
+  throw new Error(`--policy-revision must be one of ${POLICY_REVISIONS.join(", ")}`);
+const policy = loadPolicy(policyRevision);
 mkdirSync(dirname(outputPath), { recursive: true, mode: 0o700 });
 
 const pages = [...byPage.entries()].sort(([left], [right]) => left.localeCompare(right));
@@ -116,7 +120,7 @@ for (const [pageId, entry] of work) {
   const plan = buildRequestV5(page, nodes, policy, { includePage: !!entry.page });
   if (entry.page)
     packetRows.push({
-      packetRevision: PROMPT_REVISION_V5,
+      packetRevision: policy.revision,
       recordType: "page",
       split: entry.split,
       pageId,
@@ -132,7 +136,7 @@ for (const [pageId, entry] of work) {
   for (const candidate of plan.candidates) {
     const source = entry.nodes.find((row) => row.nodeId === candidate.evidence.nodeId)!;
     packetRows.push({
-      packetRevision: PROMPT_REVISION_V5,
+      packetRevision: policy.revision,
       recordType: "node",
       split: entry.split,
       pageId,
@@ -158,6 +162,7 @@ console.log(
     rows: packetRows.length,
     pages: work.length,
     policySha256: policy.sha256,
+    promptRevision: policy.revision,
   }),
 );
 if (flag("--packets-only")) process.exit(0);
@@ -168,7 +173,7 @@ if (existsSync(outputPath))
   for (const line of readFileSync(outputPath, "utf8").split("\n").filter(Boolean)) {
     try {
       const row = JSON.parse(line) as JevRowV5;
-      if (row.promptRevision === PROMPT_REVISION_V5 && row.policySha256 === policy.sha256)
+      if (row.promptRevision === policy.revision && row.policySha256 === policy.sha256)
         done.add(row.pageId);
     } catch {
       /* a partially written line resumes as not done */
@@ -198,7 +203,7 @@ async function worker(): Promise<void> {
         entry.page,
         plan,
         response,
-        { split: entry.split, strata, policySha256: policy.sha256, latencyMs },
+        { split: entry.split, strata, policy, latencyMs },
         entry.includePage,
       );
       appendFileSync(outputPath, rows.map((row) => `${JSON.stringify(row)}\n`).join(""), {

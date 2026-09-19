@@ -134,14 +134,14 @@ describe("packets from full HTML", () => {
     expect(fromHtml).not.toContain("size=");
   });
 
-  test("extractPage yields only container tags, so rare component classes are unreachable", () => {
+  test("extractPage now reaches the nodes the rare component classes live on", () => {
     const { candidates } = extractPage(html, "https://northwind.example/shop");
     const tags = new Set(candidates.map((item) => (item as { tag: string }).tag));
-    // This is a corpus-design constraint, not a bug in this module: a labelling
-    // set sampled straight from extractPage can contain no image, card, link,
-    // button or video_player node, which are exactly the classes with zero
-    // support today. The corpus builder has to widen the filter first.
-    for (const tag of ["img", "li", "a", "iframe", "button"]) expect(tags.has(tag)).toBe(false);
+    // Before the extractor was widened every one of these was absent, so no
+    // sample size could yield an image, card, link or video_player label. The
+    // per-parent cap and the container compatibility guarantee are pinned in
+    // extract-dom.test.ts; this only asserts the packet builder can see them.
+    for (const tag of ["img", "li", "a", "iframe"]) expect(tags.has(tag)).toBe(true);
     expect(tags.has("header")).toBe(true);
   });
 });
@@ -278,7 +278,7 @@ describe("toRowsV5", () => {
       {
         split: "validation",
         strata: new Map([["n1", "footer"]]),
-        policySha256: policy.sha256,
+        policy,
         latencyMs: 5,
       },
       true,
@@ -295,7 +295,47 @@ describe("toRowsV5", () => {
     expect(nodeRow.observedAxes.purposes).toEqual({ complete: true, labels: ["navigation"] });
     expect(nodeRow.stratum).toBe("footer");
     expect(nodeRow.promptRevision).toBe(PROMPT_REVISION_V5);
+    expect(nodeRow.promptRevision).toBe(policy.revision);
     expect(nodeRow.policySha256).toBe(policy.sha256);
+  });
+});
+
+describe("policy revisions", () => {
+  test("each revision loads its own file and declares its own prompt revision", () => {
+    expect(loadPolicy("v5").revision).toBe("dom-suggestions-v5");
+    expect(loadPolicy("v6").revision).toBe("dom-suggestions-v6");
+    expect(loadPolicy("v5").sha256).not.toBe(loadPolicy("v6").sha256);
+  });
+
+  test("v6 deletes the link-menu escape hatch that decided 46% of the v5 gap", () => {
+    const v5 = loadPolicy("v5").text;
+    const v6 = loadPolicy("v6").text;
+    expect(v5).toContain("dominated by a link menu, `navigation_menu` wins");
+    expect(v6).not.toContain("dominated by a link menu, `navigation_menu` wins");
+    expect(v6).toContain("are `layout_container`. No exception.");
+  });
+
+  test("v6 gates the no-attributes abstention on the evidence being available", () => {
+    const v6 = loadPolicy("v6").text;
+    expect(v6).toContain("When attributes are unavailable, label from the tag");
+    expect(v6).toContain("img, no attributes available (capture packet)         -> image");
+  });
+
+  test("v6 defines the pairs v5 left undefined", () => {
+    const v6 = loadPolicy("v6").text;
+    expect(v6).toContain("`image` versus `media`");
+    expect(v6).toContain("the item is a `card`, the wrapper is a `list`");
+  });
+
+  test("v6 deliberately leaves the <main> rule alone", () => {
+    const rule =
+      "label it\n`layout_container` when it only wraps the page's sections, and\n`content_section` when it is itself the single body of content";
+    expect(loadPolicy("v6").text).toContain(rule);
+    expect(loadPolicy("v5").text).toContain(rule);
+  });
+
+  test("an unknown revision is refused rather than silently defaulted", () => {
+    expect(() => loadPolicy("v7" as never)).toThrow("unknown policy revision");
   });
 });
 
