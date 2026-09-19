@@ -41,6 +41,8 @@ export const JEV_MODEL_V5 = "jev-1.13.0";
 // promptRevision drifts from this module is a type error rather than a string.
 export const PROMPT_REVISION_V5 = "dom-suggestions-v5" as const;
 export const PACKET_REVISION_V5 = "runtime-dom-text-v2";
+/** Packets built from full HTML, which carry attributes a capture cannot hold. */
+export const HTML_PACKET_REVISION_V5 = "runtime-dom-html-v1";
 export const PAGE_PACKET_REVISION_V5 = "dom-page-text-v2";
 export const POLICY_PATH = join(import.meta.dir, "..", "v2", "labels", "policy-v5.md");
 
@@ -99,6 +101,32 @@ export type NodeEvidence = {
   depth: number;
   text: string;
   emptyText: boolean;
+  /**
+   * True only when the source was full HTML. A legacy capture holds no element
+   * attributes, so the fields below are absent there and are never guessed. The
+   * flag travels on the packet because a labelling rule that depends on `alt`
+   * is unanswerable without it, which is exactly how the v5 pilot turned 25
+   * usable `image` labels into abstentions.
+   */
+  attributesAvailable: boolean;
+  /** `alt`, `title`, `aria-label`, `role`, `type`, `name`, `placeholder`. */
+  attributes?: Record<string, string>;
+  /** `same-site`, a provider slug such as `youtube`, or `other-third-party`. */
+  srcCategory?: string | null;
+  /** Media inside the node, so an empty wrapper still describes its content. */
+  mediaDescendants?: Array<{
+    tag: string;
+    attributes: Record<string, string>;
+    srcCategory: string | null;
+  }>;
+  linkCount?: number;
+  /** `same_site`/`external`/`anchor` counts over direct child links. */
+  linkCategories?: Record<string, number>;
+  /** How many siblings share this node's tag-and-children shape; the `card` signal. */
+  repeatedSiblingPatternCount?: number;
+  /** Curated, secret-filtered class and id tokens. See the caution in the docs. */
+  classTokens?: string[];
+  idTokens?: string[];
 };
 
 function finite(value: number | undefined): number {
@@ -155,22 +183,133 @@ export function nodeEvidence(page: CapturedPage, node: CapturedNode): NodeEviden
     depth: finite(node.depth),
     text,
     emptyText: text.length === 0,
+    attributesAvailable: false,
   };
 }
 
-/** The one evidence rendering both annotators read. Jev gets the same fields as state. */
+/** One `extractPage` candidate, as far as this module reads it. */
+export type ExtractedCandidate = {
+  tag: string;
+  roles?: string[];
+  ancestorTags?: string[];
+  siblingPosition?: number;
+  siblingCount?: number;
+  childTags?: string[];
+  structureSummary?: string;
+  text?: string;
+  emptyText?: boolean;
+  semanticAttributes?: Record<string, string>;
+  srcCategory?: string | null;
+  mediaDescendants?: Array<{
+    tag: string;
+    attributes: Record<string, string>;
+    srcCategory: string | null;
+  }>;
+  linkCount?: number;
+  linkCategories?: Record<string, number>;
+  repeatedSiblingPatternCount?: number;
+  classTokens?: string[];
+  idTokens?: string[];
+  locator?: string;
+};
+
+/**
+ * Node evidence from **full HTML**, via the current `extract-dom.ts`.
+ *
+ * The next labelling corpus is featurized from full HTML rather than from the
+ * frozen captures, so `alt`, `aria-label`, `role`, the `src` category and the
+ * repeated-sibling count are all available. That is what makes the media and
+ * card rules answerable: a product photo, a logo and a tracking pixel stop
+ * being the same input.
+ *
+ * No hostname is carried. `srcCategory` reduces a URL to `same-site`, a known
+ * provider slug or `other-third-party`, and class and id tokens arrive already
+ * filtered by the extractor's secret-word denylist.
+ *
+ * Geometry is absent by construction: HTML has no layout, so `size` is omitted
+ * rather than faked. Packets from the two sources are therefore not
+ * byte-comparable, which is why they carry different revision strings.
+ */
+export function nodeEvidenceFromHtml(
+  candidate: ExtractedCandidate,
+  nodeId: string,
+  options: { includeClassTokens?: boolean } = {},
+): NodeEvidence {
+  const text = cleanText(candidate.text ?? "");
+  const includeClassTokens = options.includeClassTokens ?? true;
+  return {
+    nodeId,
+    tag: candidate.tag.toLowerCase(),
+    role: candidate.roles?.[0]?.toLowerCase() ?? candidate.semanticAttributes?.role ?? null,
+    ancestors: (candidate.ancestorTags ?? []).map((tag) => tag.toLowerCase()),
+    siblingPosition: Math.max(0, candidate.siblingPosition ?? 0),
+    siblingCount: Math.max(1, candidate.siblingCount ?? 1),
+    childTags: (candidate.childTags ?? []).slice(0, 12).map((tag) => tag.toLowerCase()),
+    subtree: candidate.structureSummary ?? "",
+    width: 0,
+    height: 0,
+    depth: (candidate.ancestorTags ?? []).length,
+    text,
+    emptyText: text.length === 0,
+    attributesAvailable: true,
+    attributes: candidate.semanticAttributes ?? {},
+    srcCategory: candidate.srcCategory ?? null,
+    mediaDescendants: (candidate.mediaDescendants ?? []).slice(0, 6),
+    linkCount: candidate.linkCount ?? 0,
+    linkCategories: candidate.linkCategories ?? {},
+    repeatedSiblingPatternCount: candidate.repeatedSiblingPatternCount ?? 1,
+    ...(includeClassTokens
+      ? { classTokens: candidate.classTokens ?? [], idTokens: candidate.idTokens ?? [] }
+      : {}),
+  };
+}
+
+function attributePairs(attributes: Record<string, string> | undefined): string {
+  const entries = Object.entries(attributes ?? {});
+  return entries.length
+    ? entries.map(([name, value]) => `${name}="${value.replaceAll('"', "'")}"`).join(" ")
+    : "none";
+}
+
+/**
+ * The one evidence rendering both annotators read. Jev gets the same fields as
+ * state. A capture-sourced packet stops after `text=`; an HTML-sourced packet
+ * adds the attribute lines and declares a different revision, so a reader can
+ * never mistake a missing `alt` for an absent one.
+ */
 export function serializeNodePacket(evidence: NodeEvidence): string {
-  return [
-    PACKET_REVISION_V5,
+  const lines = [
+    evidence.attributesAvailable ? HTML_PACKET_REVISION_V5 : PACKET_REVISION_V5,
     `tag=${evidence.tag}`,
     `role=${evidence.role ?? "none"}`,
     `ancestors=${evidence.ancestors.join(">") || "none"}`,
     `position=${evidence.siblingPosition + 1} of ${Math.max(1, evidence.siblingCount)}`,
-    `size=${evidence.width}x${evidence.height}`,
+  ];
+  if (!evidence.attributesAvailable) lines.push(`size=${evidence.width}x${evidence.height}`);
+  lines.push(
     `children=${evidence.childTags.join(",") || "none"}`,
     `subtree=${evidence.subtree || "none"}`,
-    `text=${evidence.emptyText ? EMPTY_TEXT : evidence.text}`,
-  ].join("\n");
+  );
+  if (evidence.attributesAvailable) {
+    lines.push(
+      `attributes=${attributePairs(evidence.attributes)}`,
+      `src=${evidence.srcCategory ?? "none"}`,
+      `media=${
+        (evidence.mediaDescendants ?? [])
+          .map(
+            (item) =>
+              `${item.tag}[${attributePairs(item.attributes)}|${item.srcCategory ?? "none"}]`,
+          )
+          .join(" ") || "none"
+      }`,
+      `links=${evidence.linkCount ?? 0} ${JSON.stringify(evidence.linkCategories ?? {})}`,
+      `repeatedSiblings=${evidence.repeatedSiblingPatternCount ?? 1}`,
+    );
+    if (evidence.classTokens) lines.push(`classTokens=${evidence.classTokens.join(",") || "none"}`);
+    if (evidence.idTokens) lines.push(`idTokens=${evidence.idTokens.join(",") || "none"}`);
+  }
+  lines.push(`text=${evidence.emptyText ? EMPTY_TEXT : evidence.text}`);
+  return lines.join("\n");
 }
 
 export type PageEvidence = {

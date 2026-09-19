@@ -34,6 +34,7 @@ def _load(name: str):
 build_pilot = _load("build_pilot_v5")
 luna_v5 = _load("luna_v5_batch")
 score = _load("score_pilot_v5")
+reviewer_b = _load("reviewer_b_batch")
 
 LABELS = Path(__file__).resolve().parents[1] / "v2" / "labels"
 
@@ -267,6 +268,71 @@ def test_page_type_schema_offers_exactly_one_label() -> None:
     assert page_schema["properties"]["labels"]["maxItems"] == 1
 
 
+# --- reviewer B -----------------------------------------------------------
+
+
+def test_retarget_model_rewrites_a_hardcoded_model_literal() -> None:
+    text = "model exactly `gpt-5.6-luna`, labelingMethod exactly x"
+    result = reviewer_b.retarget_model(text, "gpt-5.6-luna")
+    assert reviewer_b.REVIEWER_MODEL in result
+    assert "gpt-5.6-luna" not in result
+
+
+def test_retarget_model_accepts_a_prompt_that_already_names_reviewer_b() -> None:
+    """v5 interpolates the module constant, so no substitution is needed there."""
+    text = f"model exactly `{reviewer_b.REVIEWER_MODEL}`"
+    assert reviewer_b.retarget_model(text, "gpt-5.6-luna") == text
+
+
+def test_retarget_model_refuses_a_prompt_that_names_neither() -> None:
+    with pytest.raises(ValueError, match="does not name reviewer B"):
+        reviewer_b.retarget_model("no model named here", "gpt-5.6-luna")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"records": [1]}',
+        '```json\n{"records": [1]}\n```',
+        'Here is the result:\n{"records": [1]}\nLet me know if you need more.',
+    ],
+)
+def test_extract_json_tolerates_fences_and_prose(raw: str) -> None:
+    assert json.loads(reviewer_b.extract_json(raw)) == {"records": [1]}
+
+
+def test_extract_json_rejects_a_reply_with_no_object() -> None:
+    with pytest.raises(ValueError, match="no JSON object"):
+        reviewer_b.extract_json("I cannot label these packets.")
+
+
+def test_both_revisions_produce_a_prompt_naming_reviewer_b_only() -> None:
+    for name, row in (("v4", packet(packetId="pkt_1", taxonomyRevision="dom-taxonomy-v2")), ("v5", packet())):
+        revision = reviewer_b.Revision(name)
+        prompt = revision.prompt([row])
+        assert reviewer_b.REVIEWER_MODEL in prompt
+        assert "gpt-5.6-luna" not in prompt
+        # Blindness is inherited from the reviewer-A modules, not reimplemented.
+        for secret in ("page_1", "node_1", "sha256:c"):
+            assert secret not in prompt
+
+
+def test_the_v5_prompt_carries_the_policy_and_the_v4_prompt_does_not() -> None:
+    policy, _ = luna_v5.load_policy()
+    marker = "label the site-wide chrome `layout_container`"
+    assert marker in reviewer_b.Revision("v5").prompt([packet()])
+    v4_row = packet(packetId="pkt_1", taxonomyRevision="dom-taxonomy-v2")
+    assert marker not in reviewer_b.Revision("v4").prompt([v4_row])
+    assert policy.startswith("# Shared annotation policy")
+
+
+def test_the_two_revisions_offer_different_page_type_vocabularies() -> None:
+    v4 = reviewer_b.Revision("v4")
+    v5 = reviewer_b.Revision("v5")
+    assert len(v4.allowed["pageTypes"]) > 60
+    assert len(v5.allowed["pageType"]) == 11
+
+
 # --- scoring --------------------------------------------------------------
 
 
@@ -341,6 +407,35 @@ def test_abstention_scopes_to_the_records_the_axis_applies_to() -> None:
         "emptySet": 0.0,
         "omitted": 0.0,
     }
+
+
+def test_positive_claims_keep_an_incomplete_observation() -> None:
+    """The exact-set view drops these rows; the overlap view must not."""
+    parsed = score.positive_claims(
+        {
+            "observedAxes": {
+                "regions": {"complete": False, "labels": ["footer"]},
+                "componentType": {"complete": True, "labels": ["card"]},
+            }
+        }
+    )
+    assert parsed == {"regions": {"footer"}}
+
+
+def test_positive_claims_drop_the_unknown_singleton() -> None:
+    assert score.positive_claims(
+        {"observedAxes": {"regions": {"complete": True, "labels": ["unknown"]}}}
+    ) == {"regions": set()}
+
+
+def test_multi_label_overlap_uses_rows_exact_set_would_discard() -> None:
+    left = {("v", "p", "n1"): {"regions": {"footer", "site_header"}}}
+    right = {("v", "p", "n1"): {"regions": {"footer"}}}
+    result = score.multi_label_overlap(left, right, "regions")
+    assert result["rows"] == 1
+    assert result["microPrecision"] == 0.5
+    assert result["microRecall"] == 1.0
+    assert score.agreement(left, right, "regions")["rate"] == 0.0
 
 
 def test_abstention_reports_an_axis_the_annotator_omitted() -> None:

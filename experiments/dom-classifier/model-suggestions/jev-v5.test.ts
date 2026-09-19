@@ -4,9 +4,13 @@ import {
   cleanText,
   COMPONENT_TYPES_V5,
   evaluateWithBackoff,
+  HTML_PACKET_REVISION_V5,
   loadPolicy,
   looksLikeCode,
   nodeEvidence,
+  nodeEvidenceFromHtml,
+  PACKET_REVISION_V5,
+  type ExtractedCandidate,
   PAGE_TYPES_V5,
   pageEvidence,
   PROMPT_REVISION_V5,
@@ -17,6 +21,7 @@ import {
   toRowsV5,
 } from "./jev-v5.ts";
 import type { CapturedNode, CapturedPage } from "../labeler/types.ts";
+import { extractPage } from "../extract-dom.ts";
 
 function node(overrides: Partial<CapturedNode> & { id: string }): CapturedNode {
   return {
@@ -78,6 +83,66 @@ describe("looksLikeCode", () => {
     ["Pricing starts at $10 per month (billed annually).", false],
   ])("%s", (value, expected) => {
     expect(looksLikeCode(value as string)).toBe(expected);
+  });
+});
+
+describe("packets from full HTML", () => {
+  const html = `<!doctype html><html><body>
+<header class="site-header"><a href="/"><img src="/logo.svg" alt="Northwind Coffee"></a>
+<nav><ul><li><a href="/shop">Shop</a></li><li><a href="/about">About</a></li></ul></nav></header>
+<main><figure><iframe src="https://www.youtube.com/embed/abc" title="How we roast"></iframe><figcaption>Inside the roastery</figcaption></figure></main>
+</body></html>`;
+
+  function candidateFor(tag: string) {
+    const { candidates } = extractPage(html, "https://northwind.example/shop");
+    return candidates.find((item) => (item as { tag: string }).tag === tag) as ExtractedCandidate;
+  }
+
+  test("an HTML packet declares its own revision and carries attributes", () => {
+    const evidence = nodeEvidenceFromHtml(candidateFor("header"), "node_h");
+    const packet = serializeNodePacket(evidence);
+    expect(evidence.attributesAvailable).toBe(true);
+    expect(packet.split("\n")[0]).toBe(HTML_PACKET_REVISION_V5);
+    // The logo is the whole reason the media rule is answerable from HTML.
+    expect(packet).toContain('media=img[alt="Northwind Coffee"|same-site]');
+    expect(packet).toContain("classTokens=site-header");
+  });
+
+  test("a third-party embed arrives as a provider slug, never a hostname", () => {
+    const packet = serializeNodePacket(nodeEvidenceFromHtml(candidateFor("figure"), "node_f"));
+    expect(packet).toContain("|youtube]");
+    expect(packet).not.toContain("youtube.com");
+    expect(packet).not.toContain("northwind.example");
+  });
+
+  test("class tokens can be withheld, since the policy forbids labelling from them alone", () => {
+    const evidence = nodeEvidenceFromHtml(candidateFor("header"), "node_h", {
+      includeClassTokens: false,
+    });
+    expect(evidence.classTokens).toBeUndefined();
+    expect(serializeNodePacket(evidence)).not.toContain("classTokens=");
+  });
+
+  test("a capture packet and an HTML packet are never confused for one another", () => {
+    const captured = page([node({ id: "n1", tag: "header", text: "Shop About" })]);
+    const fromCapture = serializeNodePacket(nodeEvidence(captured, captured.nodes[0]));
+    const fromHtml = serializeNodePacket(nodeEvidenceFromHtml(candidateFor("header"), "node_h"));
+    expect(fromCapture.split("\n")[0]).toBe(PACKET_REVISION_V5);
+    expect(fromHtml.split("\n")[0]).toBe(HTML_PACKET_REVISION_V5);
+    // HTML has no layout, so geometry is omitted rather than faked.
+    expect(fromCapture).toContain("size=");
+    expect(fromHtml).not.toContain("size=");
+  });
+
+  test("extractPage yields only container tags, so rare component classes are unreachable", () => {
+    const { candidates } = extractPage(html, "https://northwind.example/shop");
+    const tags = new Set(candidates.map((item) => (item as { tag: string }).tag));
+    // This is a corpus-design constraint, not a bug in this module: a labelling
+    // set sampled straight from extractPage can contain no image, card, link,
+    // button or video_player node, which are exactly the classes with zero
+    // support today. The corpus builder has to widen the filter first.
+    for (const tag of ["img", "li", "a", "iframe", "button"]) expect(tags.has(tag)).toBe(false);
+    expect(tags.has("header")).toBe(true);
   });
 });
 
