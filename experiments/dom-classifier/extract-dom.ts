@@ -724,7 +724,7 @@ export function extractPage(
   };
 }
 
-export { stripStyleResidue, semanticAttributes, srcCategory, structureSummary, text };
+export { shape, stripStyleResidue, semanticAttributes, srcCategory, structureSummary, text };
 
 // Guarded so the pure helpers above can be imported by tests without this
 // module consuming stdin at import time.

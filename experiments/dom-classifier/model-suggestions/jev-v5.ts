@@ -30,7 +30,7 @@ import {
   type CapturedNode,
   type CapturedPage,
 } from "../labeler/types.ts";
-import { stripStyleResidue, structureSummary } from "../extract-dom.ts";
+import { extractPage, stripStyleResidue, structureSummary } from "../extract-dom.ts";
 import type { JevQuestion, JevRequest, JevResponse, TypeSafeTransport } from "./jev-adapter.ts";
 import { validateResponse } from "./jev-adapter.ts";
 import pageTypeMap from "../v2/labels/page-type-map-v5.json" with { type: "json" };
@@ -404,6 +404,86 @@ export function serializePagePacket(evidence: PageEvidence): string {
   ].join("\n");
 }
 
+/**
+ * Page evidence from full HTML, for labelling a page type at corpus scale.
+ *
+ * The same shape and the same bounds as the capture path, so a page packet
+ * reads identically whichever source it came from. What a page type needs is
+ * the title, the URL path and some body prose; the host is dropped by
+ * `safePath` and script, JSON-LD and minified bundles by `looksLikeCode`.
+ *
+ * Schema.org markup is deliberately NOT read here. The silver page labels are
+ * derived from JSON-LD, og:type and microdata, so a model that saw those would
+ * agree with them by construction and could say nothing about the pages that
+ * carry no markup at all, which are 57% of the holdout split and the whole
+ * reason this labelling exists.
+ */
+export function pageEvidenceFromHtml(
+  html: string,
+  pageUrl: string,
+  pageId: string,
+): PageEvidence {
+  const { candidates } = extractPage(html, pageUrl);
+  const rank = (tag: string) => {
+    const index = PROSE_TAGS.indexOf(tag.toLowerCase());
+    return index < 0 ? PROSE_TAGS.length : index;
+  };
+  const lines = (candidates as Array<{ tag: string; text?: string }>)
+    .map((item) => ({ rank: rank(item.tag), text: cleanText(item.text ?? "") }))
+    .filter((item) => item.text.length >= 40 && !looksLikeCode(item.text))
+    .sort((left, right) => left.rank - right.rank)
+    .map((item) => item.text)
+    .filter((text, index, all) => all.indexOf(text) === index)
+    .slice(0, MAX_PAGE_EVIDENCE);
+  const title = /<title[^>]*>([\s\S]{0,400}?)<\/title>/i.exec(html)?.[1] ?? "";
+  return { pageId, title: cleanText(title, MAX_TITLE), path: safePath(pageUrl), lines };
+}
+
+/**
+ * One Choice over the eleven page-type classes, and nothing else.
+ *
+ * Page type is the axis where v4's sixty-five-Noul battery agreed 1.3% of the
+ * time and v7's single Choice agrees 87%. At corpus scale the single question
+ * is also what makes the run affordable: one judgment per page instead of
+ * seventy-nine.
+ */
+export function buildPageTypeRequest(
+  evidence: PageEvidence,
+  policy: PolicyDocument,
+): { request: JevRequest; packet: string } {
+  const packet = serializePagePacket(evidence);
+  const state = {
+    policy: { revision: policy.revision, sha256: policy.sha256, text: policy.text },
+    page: {
+      pageId: evidence.pageId,
+      title: evidence.title,
+      path: evidence.path,
+      evidence: evidence.lines,
+      packet,
+    },
+  };
+  return {
+    request: {
+      model: JEV_MODEL_V5,
+      state: state as unknown as JevRequest["state"],
+      questions: {
+        page_type: {
+          type: "choice",
+          instructions: {
+            judgment:
+              "What is this page primarily for? Choose exactly one class. Section 4 of `policy.text` defines every class and the tie-breaks; navigation labels and footer links are not evidence about this page.",
+            evidence: "page.packet",
+          },
+          criteria: Object.fromEntries(
+            PAGE_TYPES_V5.map((label) => [label, definitionFor("section 4 pageType", label)]),
+          ),
+        },
+      },
+    },
+    packet,
+  };
+}
+
 export type PolicyDocument = { text: string; sha256: string; revision: PromptRevision };
 
 /**
@@ -457,19 +537,27 @@ export type JevStateV5 = {
  * purpose Nouls and one component Choice, plus one page Choice: the question
  * count falls with the vocabulary, not with the evidence.
  */
-export function buildRequestV5(
-  page: CapturedPage,
-  nodes: CapturedNode[],
+/**
+ * The request, assembled from evidence that is already built.
+ *
+ * Both sources land here: a capture supplies `nodeEvidence`, full HTML supplies
+ * `nodeEvidenceFromHtml`, and neither one gets to re-decide the questions. That
+ * matters for the div-soup evaluation, where the packets must be built from
+ * HTML but must ask exactly the questions the pilot measured.
+ */
+export function buildRequestFromEvidence(
+  pageEvidenceValue: PageEvidence,
+  nodeEvidences: NodeEvidence[],
   policy: PolicyDocument,
   options: { includePage?: boolean } = {},
 ): { request: JevRequest; candidates: V5Candidate[]; pagePacket: string } {
   const includePage = options.includePage ?? true;
-  const evidence = pageEvidence(page);
+  const evidence = pageEvidenceValue;
   const pagePacket = serializePagePacket(evidence);
-  const candidates = nodes.map((node) => {
-    const value = nodeEvidence(page, node);
-    return { evidence: value, packet: serializeNodePacket(value) };
-  });
+  const candidates = nodeEvidences.map((value) => ({
+    evidence: value,
+    packet: serializeNodePacket(value),
+  }));
   const questions: Record<string, JevQuestion> = {};
   if (includePage) {
     questions.page_type = {
@@ -537,6 +625,21 @@ export function buildRequestV5(
     candidates,
     pagePacket,
   };
+}
+
+/** The capture-shaped entry point, unchanged for every existing caller. */
+export function buildRequestV5(
+  page: CapturedPage,
+  nodes: CapturedNode[],
+  policy: PolicyDocument,
+  options: { includePage?: boolean } = {},
+): { request: JevRequest; candidates: V5Candidate[]; pagePacket: string } {
+  return buildRequestFromEvidence(
+    pageEvidence(page),
+    nodes.map((node) => nodeEvidence(page, node)),
+    policy,
+    options,
+  );
 }
 
 export function snapshotHash(state: unknown): string {
