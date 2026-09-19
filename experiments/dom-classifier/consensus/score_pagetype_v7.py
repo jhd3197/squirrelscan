@@ -54,7 +54,22 @@ def main() -> None:
         "promptRevision": None,
         "splits": {},
     }
-    reviewer = {row["pageId"]: row for row in read_jsonl(args.dir / "reviewer-b-audit.jsonl")}
+    def reviewer_choice(row: dict[str, Any]) -> str | None:
+        """The reviewer records a label under observedAxes, not as a flat field.
+
+        Reading a flat `pageType` off these rows silently yields None for every
+        one of them, which scores as 0% agreement rather than as a missing field.
+        """
+        axis = (row.get("observedAxes") or {}).get("pageType") or {}
+        labels = axis.get("labels")
+        if isinstance(labels, list):
+            return labels[0] if labels else None
+        return labels if isinstance(labels, str) else None
+
+    reviewer = {
+        row["pageId"]: {**row, "pageType": reviewer_choice(row)}
+        for row in read_jsonl(args.dir / "reviewer-b-audit.jsonl")
+    }
     audit_agreed = audit_total = 0
     audit_confusions: Counter[tuple[str, str]] = Counter()
     cost = {"inputTokens": 0, "pages": 0}
