@@ -111,6 +111,23 @@ export function componentSiteOrigin(pageUrl: string): string {
  * One ancestor of a faulty element, described so the report stage can decide
  * whether that subtree is a component shared across pages.
  */
+/**
+ * A short, human-recognisable description of a component's root, so a reader
+ * sees `in the "Install squirrel" block` rather than `div:1 > a:1`.
+ *
+ * This is site content in evidence, so it is deliberately three short fields
+ * and nothing else, each sanitised and bounded. Field names match what the
+ * renderers read, in their preference order: heading, then ariaLabel, then id.
+ */
+export interface RootHint {
+  tag: string;
+  /** Omitted when it looks generated: digits-only or hash-like. */
+  id?: string;
+  ariaLabel?: string;
+  /** Nearest heading inside the root, else the closest preceding one. */
+  heading?: string;
+}
+
 export interface SubtreeCandidate {
   /** Ancestors above the faulty element; the parent is 1. */
   level: number;
@@ -122,6 +139,8 @@ export interface SubtreeCandidate {
   /** This ancestor's share of the region's text, 0..1 to 2dp. A candidate that
    * is most of the region is the page's own content, not a shared block. */
   textShareOfRegion: number;
+  /** What this ancestor looks like to a person. Absent when nothing is legible. */
+  rootHint?: RootHint;
 }
 
 export interface ComponentOccurrence {

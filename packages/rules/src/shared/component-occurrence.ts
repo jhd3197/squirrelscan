@@ -1,6 +1,7 @@
 import {
   componentSiteOrigin,
   type ComponentOccurrence,
+  type RootHint,
   type SubtreeCandidate,
 } from "@squirrelscan/core-contracts";
 import type { Element } from "linkedom";
@@ -234,6 +235,16 @@ export class ComponentOccurrenceCache {
   readonly textLengths = new WeakMap<Element, number>();
   /** Skeleton string -> digest; bounded by the page's distinct subtree shapes. */
   readonly signatureBySkeleton = new Map<string, string>();
+  /** Hints are per ancestor and every element in a block walks the same ones. */
+  readonly rootHints = new WeakMap<Element, RootHint | null>();
+
+  rootHint(element: Element): RootHint | undefined {
+    const cached = this.rootHints.get(element);
+    if (cached !== undefined) return cached ?? undefined;
+    const value = rootHint(element) ?? null;
+    this.rootHints.set(element, value);
+    return value ?? undefined;
+  }
   subtreeSignatureBuilds = 0;
 
   /**
@@ -346,6 +357,64 @@ const SUBTREE_ROOT_LEVELS = 4;
 const MAX_ANCESTOR_WALK = 64;
 
 /**
+ * Values that must never ride along in a hint. A heading or aria-label is page
+ * text, so it is filtered the way any other emitted text is: addresses, phone
+ * numbers, URLs and token-shaped strings are dropped rather than truncated.
+ */
+const SENSITIVE_HINT_TEXT =
+  /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b|\bhttps?:\/\/\S+|\b\+?\d[\d(). -]{7,}\d\b|\b(?:bearer|token|key|secret)\b\s*[:=]?\s*\S{6,}/i;
+const HINT_MAX = 60;
+
+/** Bounded, single-line, and dropped entirely when it carries anything sensitive. */
+function hintText(value: string | null | undefined): string | undefined {
+  const text = (value ?? "").replace(/\s+/g, " ").trim();
+  if (!text || SENSITIVE_HINT_TEXT.test(text)) return undefined;
+  return text.length > HINT_MAX ? `${text.slice(0, HINT_MAX - 1)}\u2026` : text;
+}
+
+/**
+ * An id a human would recognise, not `sp-ppork3` or `wp-block-3f8a91`.
+ *
+ * Every hyphen/underscore token must be all letters or all digits. A token that
+ * MIXES them is a generated suffix: one real theme emitted `sp-ppork3`, which a
+ * digit-count rule happily accepted and which says nothing to a reader.
+ */
+function stableId(value: string | null): string | undefined {
+  const id = (value ?? "").trim();
+  if (!id || id.length > 40) return undefined;
+  const tokens = id.split(/[-_]+/).filter(Boolean);
+  if (tokens.length === 0) return undefined;
+  if (!tokens.every((token) => /^[A-Za-z]+$/.test(token) || /^\d+$/.test(token))) return undefined;
+  if (!tokens.some((token) => /^[A-Za-z]{2,}$/.test(token))) return undefined;
+  return hintText(id);
+}
+
+/**
+ * Describe `element` for a person: its own labelling first, then the nearest
+ * heading inside it, then the closest heading before it. The inside-first order
+ * matters because a block's own heading names the block, while a preceding one
+ * only names the section it sits in.
+ */
+function rootHint(element: Element): RootHint | undefined {
+  const hint: RootHint = { tag: tag(element) };
+  const id = stableId(element.getAttribute("id"));
+  if (id) hint.id = id;
+  const label = hintText(element.getAttribute("aria-label"));
+  if (label) hint.ariaLabel = label;
+  // Only headings INSIDE the root. A preceding heading names whatever section
+  // the block happens to sit after, not the block: on one storefront the
+  // fallback labelled a sticky product bar "Recent post". A wrong label is
+  // worse than none, so there is no fallback.
+  let heading: string | undefined;
+  for (const node of Array.from(element.querySelectorAll("h1,h2,h3,h4,h5,h6")) as Element[]) {
+    heading = hintText(node.textContent);
+    if (heading) break;
+  }
+  if (heading) hint.heading = heading;
+  return hint.id || hint.ariaLabel || hint.heading ? hint : undefined;
+}
+
+/**
  * The ladder's root when there is no landmark at all.
  *
  * A theme with no header/nav/main/footer gives every element `no-region`, which
@@ -413,6 +482,7 @@ function subtreeCandidates(
       skeletonSignature: cache.subtreeSignature(ancestor),
       locatorFromRoot: path,
       textShareOfRegion: Math.round((cache.textLength(ancestor) / regionText) * 100) / 100,
+      ...(cache.rootHint(ancestor) ? { rootHint: cache.rootHint(ancestor) } : {}),
     });
   }
   return candidates;

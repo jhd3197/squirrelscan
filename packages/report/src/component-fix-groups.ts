@@ -2,7 +2,7 @@
 // These are additive report views: `occurrences` stays the immutable observed
 // evidence; a group only says the supplied component and defect identities agree.
 
-import type { ComponentOccurrence } from "@squirrelscan/core-contracts";
+import type { ComponentOccurrence, RootHint } from "@squirrelscan/core-contracts";
 import type { CheckResult } from "./types";
 
 export type ComponentFixAttribution = "observed-component-evidence" | "repeated-subtree";
@@ -41,6 +41,28 @@ export interface ComponentFixGroup {
    * rule, check or defect, which callers supply alongside it.
    */
   componentRootKey: string;
+  /**
+   * The component FAMILY, one step looser than the root key: the same landmark
+   * rendered in more than one variant still shares it.
+   *
+   * A theme's main nav can differ between page templates (one site: 827 nodes /
+   * 3,565 chars against 847 / 3,663), which splits the variant and so the root
+   * key, while the defective link sits in the SAME slot in both. Groups sharing
+   * this key plus a defect are one repair presented as "(2 variants)"; they
+   * stay separate groups, and no signature is loosened to produce it.
+   *
+   * For a promoted group the repeated subtree IS the family, so this equals
+   * `componentRootKey` rather than falling back to a page-scoped family key.
+   */
+  componentFamilyKey: string;
+  /**
+   * What the component's root looks like to a person, when the pages agree.
+   *
+   * The hint is page content, so one page's stale heading must not be stated
+   * for a whole group: the most common value across the group's pages wins and
+   * a tie or a disagreement drops it entirely. Absent is the honest answer.
+   */
+  rootHint?: RootHint;
   affectedPages: string[];
   affectedPageCount: number;
   /** Safe repair-target context from the representative observed element. */
@@ -162,7 +184,27 @@ type GroupEntry = {
   semanticSlot?: string;
   /** Set only for a promoted group: the subtree root it was promoted on. */
   promotedRoot?: { level: number; skeletonSignature: string };
+  /** One hint per page, in arrival order; reduced to a modal value at the end. */
+  hints?: Array<{ pageUrl: string; hint: RootHint }>;
 };
+
+/**
+ * The hint the group's pages agree on, or nothing.
+ *
+ * One value per PAGE, so a block with seven defective links does not let one
+ * page outvote six others. A tie is a disagreement and drops the hint.
+ */
+function modalHint(hints: GroupEntry["hints"]): RootHint | undefined {
+  if (!hints?.length) return undefined;
+  const perPage = new Map<string, string>();
+  for (const entry of hints) if (!perPage.has(entry.pageUrl)) perPage.set(entry.pageUrl, stable(entry.hint));
+  const counts = new Map<string, number>();
+  for (const value of perPage.values()) counts.set(value, (counts.get(value) ?? 0) + 1);
+  const ranked = [...counts.entries()].sort(([leftKey, left], [rightKey, right]) => right - left || compare(leftKey, rightKey));
+  const [best, bestCount] = ranked[0]!;
+  if (ranked.length > 1 && ranked[1]![1] === bestCount) return undefined;
+  return hints.find((entry) => stable(entry.hint) === best)?.hint;
+}
 
 /**
  * Identity of the component a group sits in.
@@ -194,6 +236,23 @@ function componentRootKey(
           variant: representative.variant.key,
         });
   return `component-root:${componentFixGroupDigest(identity)}`;
+}
+
+function componentFamilyKey(
+  attribution: ComponentFixAttribution,
+  representative: ComponentOccurrence,
+  rootKey: string,
+): string {
+  // A promoted group's family.key is page-scoped by construction, so it would
+  // make every page its own family. Its repeated subtree is the family.
+  if (attribution === "repeated-subtree") return rootKey;
+  return `component-family:${componentFixGroupDigest(
+    stable({
+      origin: representative.siteOrigin,
+      region: representative.region.role,
+      family: representative.family.key,
+    }),
+  )}`;
 }
 
 /**
@@ -277,7 +336,10 @@ function promoteRepeatedSubtrees(
           level: candidate.level,
           skeletonSignature: candidate.skeletonSignature,
         },
+        hints: [],
       };
+      if (candidate.rootHint)
+        entry.hints?.push({ pageUrl: occurrence.pageUrl, hint: candidate.rootHint });
       entry.occurrences.push(occurrence);
       promoted.set(identity, entry);
     }
@@ -388,12 +450,15 @@ export function componentFixGroups(ruleId: string, checks: CheckResult[]): Compo
       const attribution: ComponentFixAttribution = promotedIdentities.has(identity)
         ? "repeated-subtree"
         : "observed-component-evidence";
+      const rootKey = componentRootKey(attribution, representative, entry.promotedRoot);
       return {
         id: idByIdentity.get(identity)!,
         ruleId,
         check: entry.check,
         attribution,
-        componentRootKey: componentRootKey(attribution, representative, entry.promotedRoot),
+        componentRootKey: rootKey,
+        componentFamilyKey: componentFamilyKey(attribution, representative, rootKey),
+        ...(modalHint(entry.hints) ? { rootHint: modalHint(entry.hints) } : {}),
         affectedPages,
         affectedPageCount: affectedPages.length,
         region: representative.region,

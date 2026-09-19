@@ -272,3 +272,57 @@ describe("depth inside a block does not decide which component it belongs to", (
     expect(overlap.length).toBeGreaterThan(0);
   });
 });
+
+describe("a component root says what it is, or says nothing", () => {
+  function hintFor(body: string): Record<string, unknown> | undefined {
+    const { document } = parseHTML(`<html>${body}</html>`);
+    const link = document.querySelector("a") as unknown as Element;
+    const occurrence = componentOccurrence(
+      {
+        pageUrl: `${ORIGIN}/p`,
+        rendered: false,
+        element: link,
+        kind: "link-text-generic",
+        values: { normalizedText: "download" },
+      },
+      new ComponentOccurrenceCache(),
+    );
+    const rungs = occurrence.subtreeCandidates ?? [];
+    return rungs.map((rung) => rung.rootHint).find(Boolean) as Record<string, unknown> | undefined;
+  }
+
+  test("uses a heading inside the root", () => {
+    expect(hintFor(`<body><main><section><h2>Install squirrel</h2><div><a href="/d">Download</a></div></section></main></body>`))
+      .toMatchObject({ heading: "Install squirrel" });
+  });
+
+  test("uses aria-label and a word-shaped id when there is no heading", () => {
+    const hint = hintFor(`<body><main><section id="install-panel" aria-label="Install options"><div><a href="/d">Download</a></div></section></main></body>`);
+    expect(hint).toMatchObject({ ariaLabel: "Install options", id: "install-panel" });
+  });
+
+  test("drops a generated id rather than showing it", () => {
+    // `sp-ppork3` is a real theme's id: a digit-count rule accepted it and it
+    // tells a reader nothing.
+    const hint = hintFor(`<body><main><section id="sp-ppork3"><div><a href="/d">Download</a></div></section></main></body>`);
+    expect(hint?.id).toBeUndefined();
+  });
+
+  test("never borrows a heading from outside the root", () => {
+    // The fallback to a PRECEDING heading labelled a sticky product bar
+    // "Recent post" on a real storefront. A wrong label is worse than none.
+    const hint = hintFor(`<body><main><h2>Recent post</h2><section><div><a href="/d">Download</a></div></section></main></body>`);
+    expect(hint).toBeUndefined();
+  });
+
+  test("drops text that carries an address, a number or a link", () => {
+    for (const heading of ["Mail us at sales@example.test", "Call +1 555 0134 now", "See https://example.test/x"])
+      expect(hintFor(`<body><main><section><h2>${heading}</h2><div><a href="/d">Download</a></div></section></main></body>`))
+        .toBeUndefined();
+  });
+
+  test("bounds a long heading", () => {
+    const hint = hintFor(`<body><main><section><h2>${"word ".repeat(40)}</h2><div><a href="/d">Download</a></div></section></main></body>`);
+    expect(String(hint?.heading).length).toBeLessThanOrEqual(60);
+  });
+});

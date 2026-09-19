@@ -401,3 +401,58 @@ describe("componentRootKey identifies the block, not the slot inside it", () => 
     expect(promotedKey).toMatch(/^component-root:[0-9a-f]{32}$/);
   });
 });
+
+describe("componentFamilyKey rolls variants of one landmark together", () => {
+  const pages = ["/a", "/b", "/c", "/d"];
+
+  /** The same nav, rendered in two variants across page templates. */
+  function navLink(page: string, variant: string, slot: string): ComponentOccurrence {
+    return {
+      ...occurrence({ page, slot, destination: "login", text: "log in", ladder: [[1, "row", 0.05]] }),
+      groupable: true,
+      confidence: "observed",
+      uncertainReason: undefined,
+      region: { role: "navigation", nestedIn: "none", structuralSignature: `s128:region-${variant}` },
+      family: { key: "s128:nav-family", structuralSignature: "s128:nf" },
+      variant: { key: `s128:nav-variant-${variant}`, structuralSignature: `s128:nv-${variant}`, contentHash: `s128:nc-${variant}` },
+      element: { locator: `nav>${slot}`, structuralSignature: "s128:el" },
+      subtreeCandidates: undefined,
+    };
+  }
+
+  test("two variants of one nav are two groups with one family key", () => {
+    const groups = componentFixGroups(RULE, [
+      check([
+        ...pages.slice(0, 2).map((page) => navLink(page, "wide", "a:1")),
+        ...pages.slice(2).map((page) => navLink(page, "narrow", "a:1")),
+      ]),
+    ]);
+    expect(groups).toHaveLength(2);
+    // Two variants: two root keys, because the region structure really differs.
+    expect(new Set(groups.map((group) => group.componentRootKey)).size).toBe(2);
+    // One nav: one family key, which is what a "(2 variants)" line keys on.
+    expect(new Set(groups.map((group) => group.componentFamilyKey)).size).toBe(1);
+    expect(groups.every((group) => group.componentFamilyKey.startsWith("component-family:"))).toBe(true);
+  });
+
+  test("a different landmark keeps a different family key", () => {
+    const groups = componentFixGroups(RULE, [
+      check([
+        ...pages.map((page) => navLink(page, "wide", "a:1")),
+        ...pages.map((page) => ({
+          ...navLink(page, "wide", "a:1"),
+          region: { role: "footer" as const, nestedIn: "none" as const, structuralSignature: "s128:foot" },
+          family: { key: "s128:footer-family", structuralSignature: "s128:ff" },
+          element: { locator: "footer>a:1", structuralSignature: "s128:el2" },
+        })),
+      ]),
+    ]);
+    expect(new Set(groups.map((group) => group.componentFamilyKey)).size).toBe(2);
+  });
+
+  test("a promoted group's family key is its root key", () => {
+    const groups = groupsFor(pages.map((page) => blockLadder("div:1>a:1", page)));
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.componentFamilyKey).toBe(groups[0]?.componentRootKey);
+  });
+});

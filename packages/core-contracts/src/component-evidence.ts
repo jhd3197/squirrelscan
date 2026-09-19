@@ -115,13 +115,19 @@ export function packComponentOccurrences(
     let ladderLocators: string[] | undefined;
     const candidates = occurrence.subtreeCandidates;
     if (candidates && candidates.length > 0) {
-      const rungs = candidates.map(({ level, skeletonSignature, textShareOfRegion }) => ({
+      const rungs = candidates.map(({ level, skeletonSignature, textShareOfRegion, rootHint }) => ({
         level,
         skeletonSignature,
         textShareOfRegion,
+        ...(rootHint ? { rootHint } : {}),
       }));
       const ladderKey = rungs
-        .map((rung) => `${rung.level}\u0001${rung.skeletonSignature}\u0001${rung.textShareOfRegion}`)
+        .map(
+          (rung) =>
+            `${rung.level}\u0001${rung.skeletonSignature}\u0001${rung.textShareOfRegion}\u0001${
+              rung.rootHint ? JSON.stringify(rung.rootHint) : ""
+            }`,
+        )
         .join("\u0000");
       let ladderIndex = ladderIndexByKey.get(ladderKey);
       if (ladderIndex === undefined) {
