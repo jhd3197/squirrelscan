@@ -1,8 +1,9 @@
 // The HTML report is the one humans open, and it showed none of the
-// component-aware findings (#2307). These pin the policy it now shares with
-// markdown/llm/text: a group REPLACES the legacy page list rather than adding
-// to it, a one-page group is not a group, and a report with nothing to say
-// renders exactly as it did before.
+// component-aware findings (#2307). These pin the policy it shares with
+// markdown/llm/text/console: a group REPLACES the legacy page list rather than
+// adding to it, a one-page group is not a group, a report with nothing to say
+// renders as it did before the feature existed, and — the one HTML nearly got
+// wrong — the sentence is the SHARED sentence, not one this renderer assembled.
 
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -11,6 +12,7 @@ import { describe, expect, test } from "bun:test";
 import type { AuditReport, CheckResult, ComponentOccurrence, ReportRuleResult } from "../src/types";
 import type { ComponentFixGroup } from "../src/component-fix-groups";
 import { FixGroupCards, renderHtml } from "../src/output/html";
+import { renderMarkdown } from "../src/output/markdown";
 
 function occurrence(
   pageUrl: string,
@@ -34,6 +36,35 @@ function occurrence(
     },
     ...overrides,
   };
+}
+
+/** An occurrence the rules could not judge, carrying the ladder that promotes it. */
+function promotable(
+  pageUrl: string,
+  slot: string,
+  text: string,
+  heading?: string,
+): ComponentOccurrence {
+  return occurrence(pageUrl, {
+    groupable: false,
+    confidence: "uncertain",
+    uncertainReason: "region-main",
+    region: { role: "main", nestedIn: "none", structuralSignature: "s128:main" },
+    defect: {
+      kind: "link-text-generic",
+      values: { normalizedText: text },
+      valueHashes: { normalizedText: "s128:ffff" },
+    },
+    subtreeCandidates: [
+      {
+        level: 2,
+        skeletonSignature: "s128:block",
+        locatorFromRoot: slot,
+        textShareOfRegion: 0.2,
+        ...(heading ? { rootHint: { tag: "section", heading } } : {}),
+      },
+    ],
+  });
 }
 
 function check(pageUrl: string, evidence?: ComponentOccurrence[]): CheckResult {
@@ -92,15 +123,104 @@ function bodyOf(html: string): string {
   return html.slice(html.indexOf("<body>"));
 }
 
+function decodeEntities(value: string): string {
+  return value
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+/** What each card's sentence says, as text: markup stripped, entities decoded. */
+function cardSentences(html: string): string[] {
+  return [...html.matchAll(/<p class="fix-group-line">(.*?)<\/p>/g)].map((match) =>
+    decodeEntities(match[1]!.replace(/<[^>]+>/g, "")),
+  );
+}
+
+/** The same sentences as markdown prints them, bold markers removed. */
+function markdownSentences(markdown: string): string[] {
+  return [...markdown.matchAll(/^\*\*((?:Fix once|Likely one shared block).*?)\*\*$/gm)].map(
+    (match) => match[1]!,
+  );
+}
+
+describe("the sentence is the shared sentence, not one HTML assembled", () => {
+  // The regression this file exists to catch: html.tsx used to compose its own
+  // line from the region and the defect, which silently dropped the block name
+  // the grouping stage had worked out. Comparing TEXT (not markup) against the
+  // markdown surface is what makes a private sentence builder impossible.
+  const cases: Array<[string, AuditReport]> = [
+    ["observed, no block name", report(PAGES.map((page) => check(page, [occurrence(page)])))],
+    [
+      "repeated subtree with a block name",
+      report(PAGES.map((page) => check(page, [promotable(page, "div:1>a:1", "download", "Downloads")]))),
+    ],
+    [
+      "repeated subtree with no legible name",
+      report(PAGES.map((page) => check(page, [promotable(page, "div:1>a:1", "download")]))),
+    ],
+    [
+      "a rollup: two slots in one block",
+      report(
+        PAGES.map((page) =>
+          check(page, [
+            promotable(page, "div:1>a:1", "download", "Downloads"),
+            promotable(page, "div:1>a:2", "get it", "Downloads"),
+          ]),
+        ),
+      ),
+    ],
+    [
+      "a rollup of observed slots in one footer",
+      report(
+        PAGES.map((page) =>
+          check(page, [
+            occurrence(page),
+            occurrence(page, {
+              element: { locator: "footer:1>footer>ul:1>a:3", structuralSignature: "s128:e3" },
+              defect: {
+                kind: "link-text-generic",
+                values: { normalizedText: "more" },
+                valueHashes: {},
+              },
+            }),
+          ]),
+        ),
+      ),
+    ],
+  ];
+
+  for (const [name, input] of cases) {
+    test(`${name}: html text === markdown text`, () => {
+      const sentences = cardSentences(renderHtml(input));
+      expect(sentences.length).toBeGreaterThan(0);
+      expect(sentences).toEqual(markdownSentences(renderMarkdown(input)));
+    });
+  }
+
+  test("the block name is rendered as a name, and only inside the sentence", () => {
+    const html = renderHtml(
+      report(PAGES.map((page) => check(page, [promotable(page, "div:1>a:1", "download", "Downloads")]))),
+    );
+    expect(html).toContain('<span class="fix-group-name">&quot;Downloads&quot;</span>');
+    expect(cardSentences(html)[0]).toContain('Likely one shared block ("Downloads") in the main content');
+  });
+
+  test("a group with no name renders the sentence with no name markup", () => {
+    const html = renderHtml(report(PAGES.map((page) => check(page, [occurrence(page)]))));
+    expect(bodyOf(html)).not.toContain("fix-group-name");
+    expect(cardSentences(html)[0]).toStartWith("Fix once in the site footer");
+  });
+});
+
 describe("full coverage: the card replaces the legacy page list", () => {
   const full = report(PAGES.map((page) => check(page, [occurrence(page)])));
   const html = renderHtml(full);
 
-  test("one card, worded exactly as the other surfaces word it", () => {
-    expect(html).toContain(
-      '<span class="fix-badge">Fix once</span>Fix once in the site footer: ' +
-        "link text &quot;click here&quot; is generic, 3 pages",
-    );
+  test("one card, badged for what the evidence supports", () => {
+    expect(html).toContain('<span class="fix-badge">Fix once</span>');
     expect(countOccurrences(html, '<li class="fix-group"')).toBe(1);
   });
 
@@ -122,20 +242,17 @@ describe("full coverage: the card replaces the legacy page list", () => {
     expect(html).not.toContain("component-fix:");
   });
 
-  test("the locator appears once, as a muted developer hint", () => {
-    expect(countOccurrences(html, 'class="fix-group-slot"')).toBe(1);
-    expect(html).toContain('<div class="fix-group-slot">ul:1 &gt; a:2</div>');
-  });
-
   test("no em-dashes in the rendered copy", () => {
-    const body = html.slice(html.indexOf("<body>"));
-    expect(body).not.toContain("—");
+    expect(bodyOf(html)).not.toContain("—");
   });
 });
 
 describe("partial coverage: the remainder is labelled, never hidden", () => {
   const html = renderHtml(
-    report([...PAGES.map((page) => check(page, [occurrence(page)])), check("https://example.test/legal")]),
+    report([
+      ...PAGES.map((page) => check(page, [occurrence(page)])),
+      check("https://example.test/legal"),
+    ]),
   );
 
   test("the uncovered page keeps a list of its own, explicitly named", () => {
@@ -152,7 +269,7 @@ describe("partial coverage: the remainder is labelled, never hidden", () => {
   });
 
   test("the fix card is still there", () => {
-    expect(html).toContain("Fix once in the site footer");
+    expect(cardSentences(html)[0]).toStartWith("Fix once in the site footer");
   });
 });
 
@@ -168,36 +285,12 @@ describe("a one-page group is not a group", () => {
 });
 
 describe("attribution changes what the card claims", () => {
-  // A block repeating inside main content, promoted on cross-page evidence.
-  // The rule stays uncertain; the group carries the weaker attribution.
-  const repeated = report(
-    ["https://example.test/", "https://example.test/api", "https://example.test/guides"].map(
-      (page) =>
-        check(page, [
-          occurrence(page, {
-            groupable: false,
-            confidence: "uncertain",
-            uncertainReason: "region-main",
-            region: { role: "main", nestedIn: "none", structuralSignature: "s128:aaaa" },
-            subtreeCandidates: [
-              {
-                level: 2,
-                skeletonSignature: "s128:block",
-                locatorFromRoot: "div:1>a:1",
-                textShareOfRegion: 0.2,
-              },
-            ],
-          }),
-        ]),
-    ),
+  const html = renderHtml(
+    report(PAGES.map((page) => check(page, [promotable(page, "div:1>a:1", "download")]))),
   );
-  const html = renderHtml(repeated);
 
   test("it reads as an observation, not an instruction", () => {
-    expect(html).toContain(
-      "Likely one shared block in the main content: " +
-        "link text &quot;click here&quot; is generic, seen on 3 pages",
-    );
+    expect(cardSentences(html)[0]).toStartWith("Likely one shared block in the main content");
     expect(html).not.toContain("Fix once");
   });
 
@@ -206,11 +299,10 @@ describe("attribution changes what the card claims", () => {
     expect(html).toContain('class="fix-group fix-group-weak"');
   });
 
-  test("an unknown attribution renders no card and keeps the legacy list", () => {
-    const legacy = report(PAGES.map((page) => check(page)));
-    // `ruleFixCoverage` drops an unknown attribution upstream (mode "none").
-    // If one ever reaches the card renderer anyway, it must render NOTHING
-    // rather than narrate a future signal with borrowed confidence.
+  test("an unknown attribution renders no card at all", () => {
+    // Attribution is assigned by the grouping stage, so this drives the card
+    // renderer directly: a future signal this build cannot phrase must never be
+    // narrated with borrowed confidence.
     const markup = renderToStaticMarkup(
       React.createElement(FixGroupCards, {
         coverage: {
@@ -225,7 +317,11 @@ describe("attribution changes what the card claims", () => {
               affectedPageCount: 3,
               region: { role: "footer", nestedIn: "none", structuralSignature: "s128:aaaa" },
               semanticSlot: "footer:1>footer>ul:1>a:2",
-              defect: { kind: "link-text-generic", values: { normalizedText: "x" }, valueHashes: {} },
+              defect: {
+                kind: "link-text-generic",
+                values: { normalizedText: "x" },
+                valueHashes: {},
+              },
               occurrences: [],
             } as unknown as ComponentFixGroup,
           ],
@@ -234,113 +330,117 @@ describe("attribution changes what the card claims", () => {
       }),
     );
     expect(markup).toBe("");
-    // And the report it came from still renders the pages the legacy way.
-    expect(renderHtml(legacy)).toContain("<summary>3 pages affected</summary>");
   });
 });
 
-describe("a rollup is one card, however many faulty elements the block holds", () => {
+describe("a rollup is one card, however many slots the block holds", () => {
   // squirrelscan.com's install block: seven platform links, one component, 14
-  // pages. The groups are built here rather than crawled into existence: the
-  // whole grouping stage would have to run to reach the one rendering branch
-  // that differs, and `componentRootKey` is the only input that decides it.
+  // pages, which read as seven findings before the rollup existed.
   const ROLLUP_PAGES = Array.from({ length: 14 }, (_, i) => `https://example.test/r/${i}`);
-  const groups = ["download", "get it", "install", "grab", "fetch", "copy", "run"].map(
-    (text, index) =>
-      ({
-        id: `component-fix:${index}`,
-        ruleId: "a11y/link-text",
-        check: { name: "generic-link-text", status: "warn" },
-        attribution: "repeated-subtree",
-        affectedPages: ROLLUP_PAGES,
-        affectedPageCount: ROLLUP_PAGES.length,
-        region: { role: "main", nestedIn: "none", structuralSignature: "s128:aaaa" },
-        element: { locator: "main:1>div:1>a:1", structuralSignature: "s128:eeee" },
-        semanticSlot: `div:1>a:${index + 1}`,
-        defect: {
-          kind: "link-text-generic",
-          values: { normalizedText: text },
-          valueHashes: {},
-        },
-        occurrences: ROLLUP_PAGES.map(() => ({}) as ComponentOccurrence),
-        componentRootKey: "s128:install-block",
-      }) as unknown as ComponentFixGroup,
+  const SLOTS = ["download", "get it", "install", "grab", "fetch", "copy", "run"];
+  const rolled = report(
+    ROLLUP_PAGES.map((page) =>
+      check(
+        page,
+        SLOTS.map((text, index) => promotable(page, `div:1>a:${index + 1}`, text, "Install squirrel")),
+      ),
+    ),
   );
+  const html = renderHtml(rolled);
 
-  const markup = renderToStaticMarkup(
-    React.createElement(FixGroupCards, {
-      coverage: { mode: "full" as const, groups, uncoveredPages: [] },
-    }),
-  );
-
-  test("seven groups collapse into one card naming the block, not the buttons", () => {
-    expect(countOccurrences(markup, "<li class=")).toBe(1);
-    // The defect clause is `describeRollupDefect`, the same one markdown, text,
-    // llm and the console print, so the five surfaces cannot drift. It counts
-    // distinct element SLOTS (7), not the 98 occurrences those slots produced
-    // across 14 pages: 98 describes the evidence, 7 is the number of links to
-    // edit. The "in one shared block" suffix is gone because this prefix
-    // already says it.
-    expect(markup).toContain(
-      "Likely one shared block in the main content: 7 links with generic text " +
-        "&quot;download&quot;, &quot;get it&quot;, &quot;install&quot; (+4 more), seen on 14 pages",
+  test("seven slots collapse into one card naming the block, not the buttons", () => {
+    expect(countOccurrences(html, "<li class=")).toBe(1);
+    expect(cardSentences(html)[0]).toBe(
+      'Likely one shared block ("Install squirrel") in the main content: ' +
+        '7 links with generic text "run", "grab", "copy" (+4 more), ' +
+        "seen on 14 pages: /r/0, /r/1, /r/10 (+11 more)",
     );
+    // Word for word what markdown prints for the same audit.
+    expect(cardSentences(html)).toEqual(markdownSentences(renderMarkdown(rolled)));
   });
 
-  test("the card lists all 14 pages, collapsed", () => {
-    expect(markup).toContain("<summary>Affected pages (14)</summary>");
-    expect(countOccurrences(markup, 'href="https://example.test/r/')).toBe(14);
+  test("the card lists all 14 pages, collapsed, and the legacy list is gone", () => {
+    expect(html).toContain("<summary>Affected pages (14)</summary>");
+    const card = html.slice(html.indexOf('<li class="fix-group'), html.indexOf("</li>"));
+    expect(countOccurrences(card, 'href="https://example.test/r/')).toBe(14);
+    expect(html).not.toContain("<summary>14 pages affected</summary>");
   });
 
   test("without a component root the groups stay separate cards", () => {
-    const separate = groups.map((group) => {
-      const { componentRootKey: _root, ...rest } = group as ComponentFixGroup & {
-        componentRootKey: string;
-      };
-      return rest as ComponentFixGroup;
-    });
-    const plain = renderToStaticMarkup(
+    // What a build before Terra's root key produced, and what a group the
+    // rollup declines to merge still gets: its own card, never a merge this
+    // renderer inferred.
+    const groups = SLOTS.map(
+      (text, index) =>
+        ({
+          id: `component-fix:${index}`,
+          ruleId: "a11y/link-text",
+          check: { name: "generic-link-text", status: "warn" },
+          attribution: "repeated-subtree",
+          affectedPages: ROLLUP_PAGES,
+          affectedPageCount: ROLLUP_PAGES.length,
+          region: { role: "main", nestedIn: "none", structuralSignature: "s128:main" },
+          element: { locator: "main:1>div:1>a:1", structuralSignature: "s128:eeee" },
+          semanticSlot: `div:1>a:${index + 1}`,
+          defect: {
+            kind: "link-text-generic",
+            values: { normalizedText: text },
+            valueHashes: {},
+          },
+          occurrences: ROLLUP_PAGES.map(() => ({}) as ComponentOccurrence),
+        }) as unknown as ComponentFixGroup,
+    );
+    const markup = renderToStaticMarkup(
       React.createElement(FixGroupCards, {
-        coverage: { mode: "full" as const, groups: separate, uncoveredPages: [] },
+        coverage: { mode: "full" as const, groups, uncoveredPages: [] },
       }),
     );
-    expect(countOccurrences(plain, "<li class=")).toBe(7);
+    expect(countOccurrences(markup, "<li class=")).toBe(7);
   });
 });
 
 describe("site-controlled strings are neutralised", () => {
   const hostile = "\"><script>alert(1)</script>";
-  const html = renderHtml(
-    report(
-      PAGES.map((page) =>
-        check(page, [
-          occurrence(page, {
-            defect: {
-              kind: "link-text-generic",
-              values: { normalizedText: hostile },
-              valueHashes: { normalizedText: "s128:ffff" },
-            },
-          }),
-        ]),
-      ),
-    ),
-  );
 
   test("a defect value cannot open a tag or break out of an attribute", () => {
+    const html = renderHtml(
+      report(
+        PAGES.map((page) =>
+          check(page, [
+            occurrence(page, {
+              defect: {
+                kind: "link-text-generic",
+                values: { normalizedText: hostile },
+                valueHashes: { normalizedText: "s128:ffff" },
+              },
+            }),
+          ]),
+        ),
+      ),
+    );
     expect(html).toContain("&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;");
     expect(html).not.toContain("<script>alert(1)</script>");
   });
 
+  test("a block name from the page cannot inject markup either", () => {
+    const html = renderHtml(
+      report(PAGES.map((page) => check(page, [promotable(page, "div:1>a:1", "download", hostile)]))),
+    );
+    expect(html).toContain('<span class="fix-group-name">');
+    expect(html).not.toContain("<script>alert(1)</script>");
+    expect(cardSentences(html)[0]).toContain(`"${hostile}"`);
+  });
+
   test("a javascript: page URL never reaches an href", () => {
     const evil = "javascript:alert(1)";
-    const withEvilPage = renderHtml(
+    const html = renderHtml(
       report([
         ...PAGES.map((page) => check(page, [occurrence(page)])),
         { ...check(evil), pages: [evil], pageUrl: evil },
       ]),
     );
-    expect(withEvilPage).not.toContain('href="javascript:');
-    expect(withEvilPage).toContain('href="#"');
+    expect(html).not.toContain('href="javascript:');
+    expect(html).toContain('href="#"');
   });
 });
 
@@ -351,7 +451,11 @@ describe("no component evidence: nothing changes", () => {
     const withEvidence = report(
       PAGES.map((page) =>
         check(page, [
-          occurrence(page, { groupable: false, confidence: "uncertain", uncertainReason: "no-region" }),
+          occurrence(page, {
+            groupable: false,
+            confidence: "uncertain",
+            uncertainReason: "no-region",
+          }),
         ]),
       ),
     );

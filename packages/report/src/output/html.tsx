@@ -22,18 +22,13 @@ import {
 } from "../constants";
 import { groupIssuesByCategory, flattenIssuesBySeverity, type GroupedCategory } from "../grouping";
 import {
-  describeDefect,
-  describeRegion,
-  describeSlot,
+  describeRoot,
+  fixRollupLine,
+  fixUnits,
   isRenderableFixGroup,
   ruleFixCoverage,
   type FixCoverage,
 } from "../component-presentation";
-import {
-  componentFixRollups,
-  describeRollupDefect,
-  type ComponentFixRollup,
-} from "../component-fix-rollup";
 import { entitySummaryLine } from "../entities";
 import {
   ENTITY_VIEWER_STYLES,
@@ -247,10 +242,11 @@ a.group-circle:hover { border-color: oklch(0.52 0.12 145 / 0.5); }
 .fix-group { background: ${THEME.colors.card}; border: 1px solid ${THEME.colors.border}; border-left: 3px solid ${THEME.colors.primary}; padding: 0.6rem 0.85rem; }
 .fix-group + .fix-group { margin-top: 0.5rem; }
 .fix-group-weak { border-left-color: ${THEME.colors.border}; }
-.fix-group-line { font-size: 0.9rem; margin: 0; overflow-wrap: break-word; }
+.fix-group-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.35rem 0.5rem; }
+.fix-group-line { flex: 1 1 14rem; min-width: 0; font-size: 0.9rem; margin: 0; overflow-wrap: break-word; }
+.fix-group-name { font-weight: 600; color: ${THEME.colors.foreground}; }
 .fix-badge { display: inline-block; font-size: 0.62rem; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: ${THEME.colors.primary}; border: 1px solid ${THEME.colors.primary}; padding: 0.05rem 0.35rem; margin-right: 0.5rem; vertical-align: middle; white-space: nowrap; }
 .fix-badge-weak { color: ${THEME.colors.mutedForeground}; border-color: ${THEME.colors.border}; font-weight: 600; }
-.fix-group-slot { font-family: ${THEME.fonts.mono}; font-size: 0.7rem; color: ${THEME.colors.mutedForeground}; margin-top: 0.3rem; word-break: break-all; }
 
 details { margin: 0.5rem 0; }
 details > summary { cursor: pointer; color: ${THEME.colors.primary}; font-size: 0.875rem; }
@@ -847,23 +843,30 @@ function PagesList({
 }
 
 /**
- * The one sentence a fix card exists to say (#2307).
+ * The shared sentence, with the block's own name lifted out for emphasis.
  *
- * Wording tracks the ATTRIBUTION, matching the markdown/llm/text surfaces word
- * for word (the clauses come from the same shared helpers): observed landmark
- * evidence supports an instruction, a repeated subtree supports an observation
- * only. The page sample the other surfaces carry inline is left out here — HTML
- * can afford the complete list, and it renders below as real links.
+ * The STRING comes from `fixRollupLine`, the one the markdown, text, llm and
+ * console surfaces print, called with the same page limit and the same path
+ * formatter markdown uses — so the five cannot drift, and this file decides
+ * nothing about wording. The only thing done here is presentational: the label
+ * `describeRoot` produced is located in that finished sentence and wrapped, so
+ * the most useful token in the card ("Downloads") reads as a name. Splitting a
+ * string into two text nodes cannot change its text, so the card still says
+ * exactly what markdown says, and a label the sentence does not contain (or no
+ * label at all) renders the sentence untouched.
  */
-function fixCardSentence(rollup: ComponentFixRollup): string {
-  const group = rollup.representative;
-  // A rolled-up card describes the whole block ("7 links with generic text …");
-  // a single group is worded exactly as it is everywhere else.
-  const defect = rollup.groups.length > 1 ? describeRollupDefect(rollup) : describeDefect(group);
-  const pages = `${rollup.affectedPageCount} page${rollup.affectedPageCount === 1 ? "" : "s"}`;
-  return group.attribution === "repeated-subtree"
-    ? `Likely one shared block in the ${describeRegion(group)}: ${defect}, seen on ${pages}`
-    : `Fix once in the ${describeRegion(group)}: ${defect}, ${pages}`;
+function FixSentence({ unit }: { unit: ReturnType<typeof fixUnits>[number] }) {
+  const sentence = fixRollupLine(unit, REPORT_SOURCE_PAGES_PREVIEW, (page) => getPathname(page) || "/");
+  const label = describeRoot(unit);
+  const at = label ? sentence.indexOf(label) : -1;
+  if (!label || at < 0) return <>{sentence}</>;
+  return (
+    <>
+      {sentence.slice(0, at)}
+      <span className="fix-group-name">{label}</span>
+      {sentence.slice(at + label.length)}
+    </>
+  );
 }
 
 /**
@@ -875,11 +878,11 @@ function fixCardSentence(rollup: ComponentFixRollup): string {
  * same repair once per merged row. They sit directly above the check list they
  * replace.
  *
- * Every string here is site-controlled (defect values are crawled text, pages
- * are crawled URLs) and reaches the page as a React text child or through
- * `sanitizeUrl` inside PagesList. No hashes, signatures or family/variant keys:
- * `describeSlot` is the humane tail of the locator, kept as a small muted
- * developer hint. Exported so a test can hand it a rolled-up component
+ * Every string here is site-controlled (defect values are crawled text, block
+ * names and pages are crawled too) and reaches the page as a React text child
+ * or through `sanitizeUrl` inside PagesList. No hashes, signatures or
+ * family/variant keys: the element slot the sentence carries is the humane tail
+ * of the locator. Exported so a test can hand it a rolled-up component
  * directly, rather than reconstructing a seven-slot block through the whole
  * grouping stage to reach the one branch that differs.
  */
@@ -891,23 +894,30 @@ export function FixGroupCards({ coverage }: { coverage: FixCoverage }) {
   if (groups.length === 0) return null;
   return (
     <ul className="fix-groups">
-      {componentFixRollups(groups).map((rollup) => {
-        const group = rollup.representative;
+      {/* Rolled up the same way and in the same order as every other surface,
+          including the family level: one block with two structural variants is
+          one card that says so, never two cards this file merged itself. */}
+      {fixUnits(groups).map((unit) => {
+        const group = unit.representative;
         const repeated = group.attribution === "repeated-subtree";
         return (
           <li className={`fix-group${repeated ? " fix-group-weak" : ""}`} key={group.id}>
-            <p className="fix-group-line">
+            <div className="fix-group-head">
               <span className={`fix-badge${repeated ? " fix-badge-weak" : ""}`}>
                 {repeated ? "Likely shared block" : "Fix once"}
               </span>
-              {fixCardSentence(rollup)}
-            </p>
+              {/* The paragraph holds the shared sentence and NOTHING else, so
+                  its text can be compared with markdown's, character for
+                  character, by a test. */}
+              <p className="fix-group-line">
+                <FixSentence unit={unit} />
+              </p>
+            </div>
             <PagesList
-              pages={rollup.affectedPages}
-              count={rollup.affectedPageCount}
+              pages={unit.affectedPages}
+              count={unit.affectedPageCount}
               summary={(total) => `Affected pages (${total})`}
             />
-            <div className="fix-group-slot">{describeSlot(group)}</div>
           </li>
         );
       })}
