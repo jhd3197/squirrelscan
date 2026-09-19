@@ -1,0 +1,141 @@
+{
+  "note": "Hand-checked silver labels for the synthetic fixtures. `regions` is keyed by the element's id attribute; ids not listed are not asserted. `url` is what build-dataset would pass in, and it matters: the page-type rule reads the path for the homepage case.",
+  "pages": {
+    "landmark-site.html": {
+      "url": "https://example.com/",
+      "pageType": { "label": "unlabelled", "source": "none", "leakProne": false },
+      "divSoup": false,
+      "landmarkKinds": [
+        "dialog",
+        "footer",
+        "main_content",
+        "navigation",
+        "search",
+        "sidebar",
+        "site_header"
+      ],
+      "regions": {
+        "site-header": "site_header",
+        "primary-nav": "navigation",
+        "header-search": "search",
+        "main": "main_content",
+        "hero": "content_block",
+        "features": "content_block",
+        "sidebar": "sidebar",
+        "site-footer": "footer",
+        "footer-nav": "navigation",
+        "consent": "dialog"
+      },
+      "containers": {
+        "primary-nav": "site_header",
+        "footer-nav": "footer",
+        "hero": "main_content"
+      }
+    },
+    "div-soup-site.html": {
+      "url": "https://example.com/",
+      "pageType": { "label": "unlabelled", "source": "none", "leakProne": false },
+      "divSoup": true,
+      "landmarkKinds": [],
+      "regions": {
+        "site-header": "unlabelled",
+        "primary-nav": "unlabelled",
+        "main": "unlabelled",
+        "site-footer": "unlabelled",
+        "consent": "unlabelled"
+      },
+      "containers": {}
+    },
+    "article.html": {
+      "url": "https://example.com/blog/how-we-test-crawlers",
+      "pageType": { "label": "article", "source": "jsonld", "leakProne": false },
+      "divSoup": false,
+      "landmarkKinds": ["footer", "main_content", "navigation", "site_header"],
+      "regions": {
+        "site-header": "site_header",
+        "primary-nav": "navigation",
+        "main": "main_content",
+        "post": "content_block",
+        "article-header": "article_header",
+        "article-footer": "article_footer",
+        "comments": "content_block",
+        "site-footer": "footer"
+      },
+      "containers": {
+        "article-header": "main_content",
+        "article-footer": "main_content"
+      }
+    },
+    "product.html": {
+      "url": "https://example.com/products/blue-widget",
+      "pageType": { "label": "product_detail", "source": "jsonld", "leakProne": false },
+      "divSoup": false,
+      "landmarkKinds": ["footer", "form", "main_content", "navigation", "site_header"],
+      "regions": {
+        "site-header": "site_header",
+        "main": "main_content",
+        "gallery": "content_block",
+        "buy-box": "content_block",
+        "add-form": "form",
+        "specs": "content_block",
+        "site-footer": "footer"
+      },
+      "containers": { "add-form": "main_content" }
+    },
+    "docs.html": {
+      "url": "https://example.com/docs/config",
+      "pageType": { "label": "docs", "source": "jsonld", "leakProne": false },
+      "divSoup": false,
+      "landmarkKinds": ["footer", "main_content", "navigation", "site_header"],
+      "regions": {
+        "site-header": "site_header",
+        "primary-nav": "navigation",
+        "docs-nav": "navigation",
+        "main": "main_content",
+        "breadcrumb": "navigation",
+        "site-footer": "footer"
+      },
+      "containers": { "breadcrumb": "main_content", "docs-nav": "" }
+    },
+    "product-listing.html": {
+      "url": "https://example.com/collections/all",
+      "pageType": { "label": "product_listing", "source": "jsonld", "leakProne": false },
+      "divSoup": false,
+      "landmarkKinds": ["footer", "main_content", "navigation", "site_header"],
+      "regions": {
+        "site-header": "site_header",
+        "main": "main_content",
+        "grid": "content_block",
+        "pager": "navigation",
+        "site-footer": "footer"
+      },
+      "containers": { "pager": "main_content" }
+    },
+    "homepage.html": {
+      "url": "https://example.com/",
+      "pageType": { "label": "homepage", "source": "jsonld+url_root", "leakProne": true },
+      "divSoup": false,
+      "landmarkKinds": ["footer", "main_content", "navigation", "site_header"],
+      "regions": {
+        "site-header": "site_header",
+        "main": "main_content",
+        "hero": "content_block",
+        "site-footer": "footer"
+      },
+      "containers": {}
+    },
+    "microdata-about.html": {
+      "url": "https://example.com/about",
+      "pageType": { "label": "about", "source": "microdata", "leakProne": false },
+      "divSoup": false,
+      "landmarkKinds": ["footer", "main_content", "navigation", "site_header"],
+      "regions": {
+        "site-header": "site_header",
+        "primary-nav": "navigation",
+        "main": "main_content",
+        "site-footer": "footer"
+      },
+      "containers": { "primary-nav": "site_header" }
+    }
+  }
+}

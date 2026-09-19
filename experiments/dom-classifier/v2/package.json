@@ -1,0 +1,23 @@
+{
+  "name": "@squirrelscan/dom-classifier-v2",
+  "private": true,
+  "type": "module",
+  "description": "The one featurizer + silver labeller for DOM classifier v2 (#2307). Experiment code: not published, not imported by the CLI yet.",
+  "scripts": {
+    "test": "bun test featurize.test.ts silver-labels.test.ts",
+    "typecheck": "tsgo --noEmit -p tsconfig.json",
+    "lint": "oxlint .",
+    "format": "oxfmt --write *.ts",
+    "format:check": "oxfmt --check *.ts",
+    "build-dataset": "bun run build-dataset.ts"
+  },
+  "dependencies": {
+    "linkedom": "^0.18.12",
+    "tldts": "^7.4.9"
+  },
+  "notes": [
+    "linkedom is reached through ../../../packages/parser/src/dom.ts, which is the SAME parse entry the CLI uses (attribute-case patch included). It resolves from packages/parser/node_modules, so nothing needs installing here.",
+    "tldts is used ONLY by build-dataset.ts, for the registrable domain that keys the train/val/holdout split. It resolves from a local node_modules symlink into packages/crawler/node_modules; run `ln -s ../../../../packages/crawler/node_modules/tldts node_modules/tldts` if it is missing.",
+    "Nothing here is installed with bun install: an install in this directory re-resolves the workspace."
+  ]
+}
