@@ -30,7 +30,8 @@ import {
   type CapturedNode,
   type CapturedPage,
 } from "../labeler/types.ts";
-import { extractPage, stripStyleResidue, structureSummary } from "../extract-dom.ts";
+import { stripStyleResidue, structureSummary } from "../extract-dom.ts";
+import { parseHTML } from "../../../packages/parser/src/dom.ts";
 import type { JevQuestion, JevRequest, JevResponse, TypeSafeTransport } from "./jev-adapter.ts";
 import { validateResponse } from "./jev-adapter.ts";
 import pageTypeMap from "../v2/labels/page-type-map-v5.json" with { type: "json" };
@@ -63,6 +64,12 @@ const MAX_TEXT = 320;
 const MAX_TITLE = 240;
 const MAX_PAGE_EVIDENCE = 12;
 const EMPTY_TEXT = "[empty]";
+/** Tags whose text is never page prose; mirrors the extractor's text walk. */
+const PAGE_TEXT_SKIP: ReadonlySet<string> = new Set([
+  "script", "style", "template", "noscript", "svg", "canvas", "iframe", "object",
+  "embed", "head", "title", "link", "meta", "base", "math", "map", "area",
+  "track", "source", "param",
+]);
 
 const tokenPattern = /(?:bearer\s+|api[_-]?key\s*[=:]\s*|password\s*[=:]\s*)[^\s,;]+/gi;
 const emailPattern = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
@@ -423,14 +430,43 @@ export function pageEvidenceFromHtml(
   pageUrl: string,
   pageId: string,
 ): PageEvidence {
-  const { candidates } = extractPage(html, pageUrl);
-  const rank = (tag: string) => {
-    const index = PROSE_TAGS.indexOf(tag.toLowerCase());
-    return index < 0 ? PROSE_TAGS.length : index;
-  };
-  const lines = (candidates as Array<{ tag: string; text?: string }>)
-    .map((item) => ({ rank: rank(item.tag), text: cleanText(item.text ?? "") }))
-    .filter((item) => item.text.length >= 40 && !looksLikeCode(item.text))
+  // A single linear walk collecting each element's OWN text. Going through
+  // `extractPage` instead would shape every candidate, and shaping runs
+  // `querySelectorAll` over each node's subtree: quadratic in page size, which
+  // on the largest pages in the corpus stalls a run that only ever needed the
+  // prose. Own text also avoids the duplication subtree text produces, where a
+  // section and its paragraphs each contribute the same sentences.
+  const { document } = parseHTML(html);
+  const body = (document as { body?: unknown }).body as
+    | { firstChild: unknown; nextSibling: unknown; nodeType: number; localName?: string; nodeName: string }
+    | null
+    | undefined;
+  const collected: Array<{ rank: number; text: string }> = [];
+  if (body) {
+    const stack = [body];
+    while (stack.length > 0 && collected.length < MAX_PAGE_EVIDENCE * 8) {
+      const element = stack.pop()!;
+      const tag = (element.localName ?? element.nodeName.toLowerCase()).toLowerCase();
+      if (PAGE_TEXT_SKIP.has(tag)) continue;
+      let own = "";
+      const children: typeof stack = [];
+      for (
+        let child = element.firstChild as (typeof body & { data?: string }) | null;
+        child;
+        child = child.nextSibling as (typeof body & { data?: string }) | null
+      ) {
+        if (child.nodeType === 3) own += ` ${child.data ?? ""}`;
+        else if (child.nodeType === 1) children.push(child);
+      }
+      const index = PROSE_TAGS.indexOf(tag);
+      const text = cleanText(own);
+      if (text.length >= 40 && !looksLikeCode(text))
+        collected.push({ rank: index < 0 ? PROSE_TAGS.length : index, text });
+      for (let position = children.length - 1; position >= 0; position--)
+        stack.push(children[position]!);
+    }
+  }
+  const lines = collected
     .sort((left, right) => left.rank - right.rank)
     .map((item) => item.text)
     .filter((text, index, all) => all.indexOf(text) === index)
