@@ -177,7 +177,8 @@ def evaluate(reference: dict, x: np.ndarray) -> np.ndarray:
     return exp / exp.sum(axis=1, keepdims=True)
 
 
-def head(model_path: Path, columns_path: Path | None, classes: list[str], threshold: float):
+def head(model_path: Path, columns_path: Path | None, classes: list[str], threshold: float,
+         class_thresholds: list[float] | None = None):
     import lightgbm as lgb
 
     booster = lgb.Booster(model_file=str(model_path))
@@ -190,6 +191,10 @@ def head(model_path: Path, columns_path: Path | None, classes: list[str], thresh
         "classes": classes,
         "featureColumns": columns,
         "confidenceThreshold": threshold,
+        # Per class, chosen on val for precision >= 0.95 on the non-declared
+        # population. A value above 1 means the class abstains: the model
+        # cannot call it reliably, so it never fires.
+        "classThresholds": class_thresholds,
         "numClass": len(classes),
         "numTrees": len(dumped["tree_info"]),
         "trees": base64.b64encode(blob).decode("ascii"),
@@ -235,11 +240,18 @@ def main() -> None:
         0.7,
     )
 
+    class_threshold_path = models / "region" / "class-thresholds.json"
+    class_thresholds = (
+        json.loads(class_threshold_path.read_text())["thresholds"]
+        if class_threshold_path.exists()
+        else None
+    )
     region_booster, region_head, region_ref = head(
         models / "region" / "region-model.txt",
         models / "region" / "columns-model.npy",
         region_report["classes"],
         region_threshold,
+        class_thresholds,
     )
     page_booster, page_head, page_ref = head(
         page_dir / "pagetype-model.txt",
@@ -312,6 +324,7 @@ def main() -> None:
                 "artifactBytes": size,
                 "artifactMB": round(size / 1e6, 3),
                 "regionThreshold": region_threshold,
+                "regionClassThresholds": class_thresholds,
                 "regionTrees": region_head["numTrees"],
                 "pageTypeTrees": page_head["numTrees"],
                 "float32VsLightGBM": {

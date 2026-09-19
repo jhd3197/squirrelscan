@@ -27,6 +27,8 @@ export interface HeadJson {
   classes: string[];
   featureColumns: number[] | null;
   confidenceThreshold: number;
+  /** Per class, or null. A value above 1 means that class abstains. */
+  classThresholds: number[] | null;
   numClass: number;
   numTrees: number;
   trees: string;
@@ -45,6 +47,10 @@ export interface ArtifactJson {
 
 export interface Head {
   classes: string[];
+  /** Per-class confidence thresholds, chosen on val for precision >= 0.95 on
+   *  the non-declared population. Falls back to `confidenceThreshold` for every
+   *  class when the artifact carries none. */
+  classThresholds: Float64Array;
   /** Indices into the featurizer's full vector, or null for "all of it". */
   featureColumns: Int32Array | null;
   confidenceThreshold: number;
@@ -125,8 +131,17 @@ function decodeHead(json: HeadJson): Head {
   offset += totalLeaves * 4;
   if (offset > buffer.byteLength) throw new ArtifactError("tree block is truncated");
 
+  const perClass = new Float64Array(numClass).fill(json.confidenceThreshold);
+  if (json.classThresholds) {
+    if (json.classThresholds.length !== numClass) {
+      throw new ArtifactError("classThresholds length does not match numClass");
+    }
+    perClass.set(json.classThresholds);
+  }
+
   return {
     classes: json.classes,
+    classThresholds: perClass,
     featureColumns: json.featureColumns ? Int32Array.from(json.featureColumns) : null,
     confidenceThreshold: json.confidenceThreshold,
     numClass,

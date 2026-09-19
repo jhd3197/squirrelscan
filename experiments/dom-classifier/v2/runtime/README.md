@@ -88,21 +88,37 @@ uncertain is unknown is page-scoped. Do not map it to a default class.
 
 ## Thresholds, and where they came from
 
-The artifact carries `confidenceThreshold` per head. The region head ships
-**0.7**, chosen on the holdout coverage table as the lowest threshold at or
-above 0.5 whose covered accuracy clears 0.98:
+The region head carries **one threshold per class**, in `classThresholds`, each
+chosen on VAL as the lowest value at or above 0.5 reaching **precision >= 0.95**
+on the NON-DECLARED population — the nodes the runtime actually asks the model
+about, since markup answers the rest. A class with fewer than 50 val
+predictions, or that cannot reach 0.95 at any threshold, gets a threshold above
+1 and **abstains permanently**.
 
-| threshold | coverage | accuracy on covered | macro-F1 on covered |
+| class | threshold | val P / R | holdout P / R |
 |---|---|---|---|
-| 0.0 | 100% | 0.968 | 0.790 |
-| 0.6 | 98.1% | 0.976 | 0.812 |
-| **0.7** | **96.6%** | **0.981** | **0.820** |
-| 0.8 | 94.4% | 0.986 | 0.838 |
-| 0.9 | 90.2% | 0.993 | 0.884 |
+| content_block | 0.50 | .981 / .887 | .980 / .885 |
+| sidebar | 0.66 | .951 / .218 | .899 / .199 |
+| site_header | 0.87 | .954 / .304 | .933 / .269 |
+| footer | 0.87 | .952 / .649 | .956 / .662 |
+| navigation | 0.90 | .955 / .461 | .951 / .436 |
+| dialog | 0.95 | .958 / .079 | .867 / .058 |
+| main_content, article_chrome, form, search | — | abstain | abstain |
 
-The 0.5 floor matters: without it the rule selects 0.0, because accuracy at full
-coverage already clears any bar that a truncated model clears trivially — which
-would ship a threshold that never falls back at all.
+Coverage on non-declared nodes: **76.5%** at **0.976** accuracy when firing.
+
+A single global threshold was tried first and was the wrong instrument. The rule
+that picked it (lowest value whose covered accuracy clears 0.98) selected 0.95
+once inherited nodes entered the training population, leaving 31.6% coverage:
+two thirds of nodes unnamed, including classes the model is good at. Ten classes
+whose precision curves differ by 40 points cannot share one number.
+
+When the model's answer is below its class's threshold the node comes back
+`label: "unknown"`, `source: "model"`, `confidence: 0`, carrying `rawLabel` and
+`rawConfidence` for debugging **only**. Those two fields are below the precision
+bar by definition and must never be displayed or used to name a fix. The source
+is `"model"` and not `"rules"` because the model was asked and declined; calling
+it `"rules"` would claim the deterministic path had looked and found nothing.
 
 Every other choice (class-weight exponent, feature set, tree count, boosting
 cut) was made on **val**. Holdout was read once per reported number. The splits

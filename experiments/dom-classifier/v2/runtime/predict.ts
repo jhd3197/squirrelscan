@@ -34,6 +34,14 @@ export interface Prediction<T extends string> {
   label: T;
   confidence: number;
   source: Source;
+  /**
+   * What the model said before the per-class threshold rejected it. Present
+   * ONLY on an abstention (`label: "unknown"`, `source: "model"`), and only for
+   * debugging: it is below the precision bar the thresholds enforce, so it must
+   * not be displayed to a user or used to name a fix.
+   */
+  rawLabel?: string;
+  rawConfidence?: number;
 }
 
 export interface NodePrediction extends Prediction<RegionLabel> {
@@ -178,7 +186,10 @@ export function classifyDocument(
     previousTokens = node.tokens;
     scoreRow(usable.region, values, scores);
     const { index, probability } = softmax(scores);
-    const threshold = options.threshold ?? usable.region.confidenceThreshold;
+    // Per class, not global. One threshold cannot serve ten classes whose
+    // precision curves differ by 40 points, and the single value the old rule
+    // selected (0.95) left two thirds of nodes unnamed.
+    const threshold = options.threshold ?? usable.region.classThresholds[index]!;
     if (probability >= threshold) {
       nodes.push({
         nodeRef,
@@ -187,7 +198,17 @@ export function classifyDocument(
         source: "model",
       });
     } else {
-      nodes.push({ nodeRef, ...withRules(node, byId), confidence: probability });
+      // The model was asked and declined. That is a MODEL answer of "unknown",
+      // not a rules answer: saying `source: "rules"` here would claim the
+      // deterministic path had looked and found nothing, which it has not.
+      nodes.push({
+        nodeRef,
+        label: "unknown",
+        confidence: 0,
+        source: "model",
+        rawLabel: usable.region.classes[index],
+        rawConfidence: probability,
+      });
     }
   }
 

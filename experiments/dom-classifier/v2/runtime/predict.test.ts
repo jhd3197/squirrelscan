@@ -131,11 +131,17 @@ describe.if(HAS_ARTIFACT)("with the real artifact", () => {
       expect(node.confidence).toBeGreaterThanOrEqual(0);
       expect(node.confidence).toBeLessThanOrEqual(1);
     }
-    // A threshold of 1.01 can never be met, so everything must degrade to
-    // rules while keeping the identical shape.
+    // A threshold of 1.01 can never be met. Every node is then answered either
+    // by the markup (a declared landmark, source "rules") or by the model
+    // declining (source "model", label "unknown") -- never by a rules guess
+    // dressed up as a model answer.
     const forced = classifyPage(PAGE, URL, { model, threshold: 1.01 });
-    expect(forced.nodes.every((n) => n.source === "rules")).toBe(true);
     expect(forced.nodes.length).toBe(out.nodes.length);
+    for (const node of forced.nodes) {
+      if (node.source === "model") expect(node.label).toBe("unknown");
+      else expect(node.source).toBe("rules");
+    }
+    expect(forced.nodes.some((n) => n.source === "rules")).toBe(true);
   });
 
   test("a featurizer-version mismatch degrades instead of predicting nonsense", () => {
@@ -250,5 +256,35 @@ describe("page-type rules", () => {
 
   test("malformed JSON-LD does not throw", () => {
     expect(() => label(withJson("{not json"))).not.toThrow();
+  });
+});
+
+describe.if(HAS_ARTIFACT)("per-class thresholds", () => {
+  test("the artifact carries one threshold per class, and abstentions are above 1", () => {
+    const model = loadModel(artifactJson());
+    expect(model.region.classThresholds.length).toBe(model.region.numClass);
+    for (const t of model.region.classThresholds) expect(t).toBeGreaterThan(0);
+    // At least one class abstains; its threshold can never be met.
+    expect([...model.region.classThresholds].some((t) => t > 1)).toBe(true);
+  });
+
+  test("a rejected prediction is an `unknown` from the MODEL, carrying the raw answer", () => {
+    const soup = `<!doctype html><html><head><title>T</title></head><body>${Array.from(
+      { length: 40 },
+      (_, i) =>
+        `<div class="row r${i}"><p>Block ${i} with enough text to be a candidate.</p></div>`,
+    ).join("")}</body></html>`;
+    const { model } = tryLoadModel(artifactJson());
+    // A threshold of 1.01 rejects everything the model says.
+    const out = classifyPage(soup, URL, { model, threshold: 1.01 });
+    const rejected = out.nodes.filter((n) => n.label === "unknown" && n.source === "model");
+    expect(rejected.length).toBeGreaterThan(0);
+    for (const node of rejected) {
+      // Saying "rules" here would claim the deterministic path had looked.
+      expect(node.source).toBe("model");
+      expect(node.confidence).toBe(0);
+      expect(typeof node.rawLabel).toBe("string");
+      expect(node.rawConfidence).toBeGreaterThan(0);
+    }
   });
 });
