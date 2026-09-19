@@ -34,11 +34,14 @@ import {
 /** Bounded page sample per fix group in LLM output. */
 const LLM_FIX_GROUP_PAGES = 5;
 import { LLM_REPORT } from "@squirrelscan/core-contracts/limits";
+import { formatSiteWideItem, siteWideContext, siteWideItem } from "../site-wide-items";
 import { stripControlChars } from "@squirrelscan/core-contracts/control-chars";
 import { AUDIT_FAILURE_NEXT_STEP_THIRD } from "@squirrelscan/core-contracts/failure-reason";
 import { reportFailureReasonCode } from "../failure-notice";
 
 export interface LlmRenderOptions {
+  /** Collapse site-wide items into one line (default true). */
+  siteWideCollapse?: boolean;
   version?: string;
 }
 
@@ -105,6 +108,7 @@ export function serializeMetaValue(value: unknown): string {
 
 export function renderLlm(report: AuditReport, options?: LlmRenderOptions): string {
   const lines: string[] = [];
+  const siteWide = siteWideContext(report, options?.siteWideCollapse !== false);
   const version = options?.version ?? "0.0.0";
 
   let baseOrigin = "";
@@ -447,12 +451,43 @@ export function renderLlm(report: AuditReport, options?: LlmRenderOptions): stri
       }
   
       if (allItems.length > 0 && coverage.mode !== "full") {
-        const sampledItems = allItems.slice(0, LLM_REPORT.maxItems);
-        lines.push(
-          sampledItems.length < allItems.length
-            ? `${indent(2)}Items (${sampledItems.length}/${allItems.length}):`
-            : `${indent(2)}Items (${allItems.length}):`,
-        );
+        // Collapse first: an item that is the same resource on nearly every
+        // page becomes ONE line with no page list, and does not consume a slot
+        // in the bounded sample below.
+        const collapsed: string[] = [];
+        const remaining: CheckItem[] = [];
+        for (const item of allItems) {
+          const info = siteWideItem(item, siteWide.total, siteWide.pageUrls);
+          if (info) {
+            const label = item.label && item.label !== item.id ? item.label : item.id;
+            const shown = label.startsWith("http") ? compressUrl(label, baseOrigin) : label;
+            collapsed.push(
+              formatSiteWideItem(shown, info, (page) => compressUrl(page, baseOrigin)),
+            );
+          } else {
+            remaining.push(item);
+          }
+        }
+        // Collapsed lines count against the SAME budget as ordinary items.
+        // Emitting them on top of it let a rule with many site-wide items grow
+        // the output instead of shrinking it, which is the opposite of the point.
+        const shownCollapsed = collapsed.slice(0, LLM_REPORT.maxItems);
+        for (const line of shownCollapsed) lines.push(`${indent(2)}${escapeXml(line)}`);
+        if (collapsed.length > shownCollapsed.length) {
+          lines.push(
+            `${indent(2)}Site-wide items (${shownCollapsed.length}/${collapsed.length} shown)`,
+          );
+        }
+
+        const itemBudget = Math.max(0, LLM_REPORT.maxItems - shownCollapsed.length);
+        const sampledItems = remaining.slice(0, itemBudget);
+        if (sampledItems.length > 0) {
+          lines.push(
+            sampledItems.length < remaining.length
+              ? `${indent(2)}Items (${sampledItems.length}/${remaining.length}):`
+              : `${indent(2)}Items (${remaining.length}):`,
+          );
+        }
   
         for (const item of sampledItems) {
           const itemId = item.id.startsWith("http") ? compressUrl(item.id, baseOrigin) : item.id;

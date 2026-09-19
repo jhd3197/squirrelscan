@@ -8,6 +8,7 @@ import { reportFailureReasonCode } from "../failure-notice";
 import { getScoreGrade } from "../scoring";
 import { REPORT_SOURCE_PAGES_PREVIEW, REPORT_PAGES_HARD_CAP } from "../constants";
 import { fixGroupLine, ruleFixCoverage } from "../component-presentation";
+import { formatSiteWideItem, siteWideContext, siteWideItem } from "../site-wide-items";
 import { groupIssuesByCategory, flattenIssuesBySeverity } from "../grouping";
 import { entityMarkdownSection } from "../entities";
 import { groupTechnologies, techChangeSummary, techIconUrl } from "../technologies";
@@ -34,6 +35,8 @@ import { getPathname } from "../url";
 import { lockedRulesMessage } from "../locked-rules";
 
 export interface MarkdownRenderOptions {
+  /** Collapse site-wide items into one line (default true). */
+  siteWideCollapse?: boolean;
   version?: string;
   /** White-label branding (#810) — Team orgs drop the squirrelscan header/footer. */
   branding?: ReportBranding;
@@ -115,6 +118,7 @@ function formatRateLimitedHosts(hosts: string[]): string {
 
 export function renderMarkdown(report: AuditReport, options?: MarkdownRenderOptions): string {
   const lines: string[] = [];
+  const siteWide = siteWideContext(report, options?.siteWideCollapse !== false);
   const version = options?.version ?? "";
   const whiteLabel = options?.branding?.whiteLabel ?? false;
 
@@ -481,6 +485,13 @@ export function renderMarkdown(report: AuditReport, options?: MarkdownRenderOpti
               item.id.startsWith("https://") ||
               item.id.startsWith("/");
             const display = isUrl ? `[${label}](${item.id})` : label;
+            const siteWideInfo = siteWideItem(item, siteWide.total, siteWide.pageUrls);
+            if (siteWideInfo) {
+              lines.push(
+                `- ${formatSiteWideItem(display, siteWideInfo, (page) => getPathname(page) || "/")}`,
+              );
+              continue;
+            }
             lines.push(`- ${display}`);
             if (item.sourcePages && item.sourcePages.length > 0) {
               for (const src of item.sourcePages.slice(0, REPORT_SOURCE_PAGES_PREVIEW)) {

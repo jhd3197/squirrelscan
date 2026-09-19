@@ -8,6 +8,7 @@ import { reportFailureReasonCode } from "../failure-notice";
 import { getScoreGrade } from "../scoring";
 import { REPORT_TEXT_WRAP_WIDTH } from "../constants";
 import { fixGroupLine, ruleFixCoverage } from "../component-presentation";
+import { formatSiteWideItem, siteWideContext, siteWideItem } from "../site-wide-items";
 import { groupIssuesByCategory, flattenIssuesBySeverity } from "../grouping";
 import { affectedPages } from "../affected-pages";
 import {
@@ -35,6 +36,8 @@ import { lockedRulesMessage } from "../locked-rules";
 import { stripControlChars } from "@squirrelscan/core-contracts/control-chars";
 
 export interface TextRenderOptions {
+  /** Collapse site-wide items into one line (default true). */
+  siteWideCollapse?: boolean;
   version?: string;
   /** White-label branding (#810) — Team orgs drop the squirrelscan header/footer. */
   branding?: ReportBranding;
@@ -113,6 +116,7 @@ function componentEvidenceReason(
 
 export function renderText(report: AuditReport, options?: TextRenderOptions): string {
   const lines: string[] = [];
+  const siteWide = siteWideContext(report, options?.siteWideCollapse !== false);
   const version = options?.version ?? "";
   const whiteLabel = options?.branding?.whiteLabel ?? false;
   const write = (line = "") => {
@@ -351,6 +355,14 @@ export function renderText(report: AuditReport, options?: TextRenderOptions): st
         if (check.items && check.items.length > 0 && coverage.mode !== "full") {
           for (const item of check.items) {
             const label = item.label ?? item.id;
+            // One line, no page list: the list IS the noise for an item that is
+            // the same resource on effectively every page.
+            const info = siteWideItem(item, siteWide.total, siteWide.pageUrls);
+            if (info) {
+              write(`        -> ${formatSiteWideItem(label, info, pathOnly)}`);
+              if (item.snippet) write(`           ${item.snippet}`);
+              continue;
+            }
             write(`        -> ${label}`);
             if (item.snippet) write(`           ${item.snippet}`);
             if (item.sourcePages && item.sourcePages.length > 0) {

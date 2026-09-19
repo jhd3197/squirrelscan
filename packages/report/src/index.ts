@@ -65,6 +65,17 @@ export {
   ruleFixCoverage,
 } from "./component-presentation";
 export type { FixCoverage, FixCoverageMode, PageSample } from "./component-presentation";
+// Site-wide item collapse: one shared resource on nearly every page.
+export {
+  SITE_WIDE_MAX_EXCEPTIONS,
+  SITE_WIDE_MIN_PAGES,
+  SITE_WIDE_MIN_PAGE_RATIO,
+  auditedPageTotal,
+  formatSiteWideItem,
+  siteWideContext,
+  siteWideItem,
+} from "./site-wide-items";
+export type { SiteWideItem } from "./site-wide-items";
 
 // Scoring
 export { getScoreGrade, getScoreColor, getGroupColor, GROUP_COLORS } from "./scoring";

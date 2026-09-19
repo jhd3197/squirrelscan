@@ -19,6 +19,7 @@ import { componentOccurrenceKey } from "../component-fix-groups";
 import type { GroupedCheck } from "../grouping";
 
 import { REPORT_PAGES_HARD_CAP } from "../constants";
+import { siteWideContext, siteWideItem } from "../site-wide-items";
 import { reportFailureReasonCode } from "../failure-notice";
 import { getScoreGrade } from "../scoring";
 import { getGroupName } from "../categories";
@@ -196,7 +197,12 @@ interface SlimJsonReport {
       affectedPages: string[];
       affectedPagesCount: number;
       affectedPagesHasMore: boolean;
-      items?: CheckItem[];
+      /**
+       * Every item and every sourcePage, unchanged. Items the human renderers
+       * collapse carry a `siteWide` flag so an agent gets the same collapse
+       * without re-deriving the threshold.
+       */
+      items?: Array<CheckItem & { siteWide?: { pages: number; of: number } }>;
       details?: Record<string, unknown>;
       /**
        * Complete raw evidence, and the ONLY copy in this document: fix groups
@@ -270,6 +276,7 @@ interface SlimJsonReport {
 }
 
 function buildSlimReport(report: AuditReport, version: string): SlimJsonReport {
+  const siteWide = siteWideContext(report);
   const categoryIssues = groupIssuesByCategory(report.ruleResults);
   const es = editorSummaryView(report.editorSummary);
   const refusedSeedRedirect = seedRedirect(report);
@@ -383,7 +390,10 @@ function buildSlimReport(report: AuditReport, version: string): SlimJsonReport {
         affectedPages: ap.sample,
         affectedPagesCount: ap.count,
         affectedPagesHasMore: ap.hasMore,
-        items: check.items,
+        items: check.items?.map((item) => {
+          const info = siteWideItem(item, siteWide.total, siteWide.pageUrls);
+          return info ? { ...item, siteWide: { pages: info.pages, of: info.of } } : item;
+        }),
         details: check.details,
         ...(check.componentOccurrences?.length
           ? (() => {
