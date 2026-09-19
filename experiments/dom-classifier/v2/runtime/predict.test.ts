@@ -116,7 +116,9 @@ describe.if(HAS_ARTIFACT)("with the real artifact", () => {
     const bytes = statSync(ARTIFACT).size;
     expect(bytes).toBeLessThanOrEqual(2_000_000);
     expect(model!.region.numClass).toBe(10);
-    expect(model!.pageType.numClass).toBe(7);
+    // 11 page-type classes since the head moved to Jev labels: the schema-derived
+    // set could not express legal or pricing at all.
+    expect(model!.pageType.numClass).toBe(11);
   });
 
   test("predictions carry a source, and low confidence falls back to rules", () => {

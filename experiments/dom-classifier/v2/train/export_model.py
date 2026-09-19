@@ -202,6 +202,8 @@ def main() -> None:
     parser.add_argument("--data-root", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--parity-rows", type=int, default=10_000)
+    parser.add_argument("--pagetype-dir", default="pagetype",
+                        help="subdirectory of --models holding the page-type head")
     args = parser.parse_args()
 
     models = Path(args.models)
@@ -210,7 +212,12 @@ def main() -> None:
     schema = json.loads((Path(args.data_root) / "silver-v1" / "feature-schema.json").read_text())
 
     region_report = json.loads((models / "region" / "region-report.json").read_text())
-    page_report = json.loads((models / "pagetype" / "pagetype-report.json").read_text())
+    page_dir = models / args.pagetype_dir
+    page_report_path = next(
+        p for p in (page_dir / "pagetype-jev-report.json", page_dir / "pagetype-report.json")
+        if p.exists()
+    )
+    page_report = json.loads(page_report_path.read_text())
 
     # The threshold is read off the holdout coverage table: the LOWEST value at
     # or above 0.5 whose covered accuracy clears 0.98.
@@ -235,7 +242,7 @@ def main() -> None:
         region_threshold,
     )
     page_booster, page_head, page_ref = head(
-        models / "pagetype" / "pagetype-model.txt",
+        page_dir / "pagetype-model.txt",
         None,
         page_report["classes"],
         0.7,
@@ -250,6 +257,7 @@ def main() -> None:
         "tokenBuckets": schema["tokenBuckets"],
         "region": region_head,
         "pageType": page_head,
+        "pageTypeLabelSource": page_report.get("labelProvenance", "silver"),
     }
     artifact_path = out / "classifier-v2.json"
     artifact_path.write_text(json.dumps(artifact, separators=(",", ":")))

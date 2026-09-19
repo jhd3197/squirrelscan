@@ -29,6 +29,12 @@ export type RegionLabel =
   | "dialog"
   | "unknown";
 
+/** The 11 classes the model head emits, plus "unknown" for the rules path.
+ *
+ * `legal` and `pricing` are model-only: no schema.org type maps to either, so
+ * the deterministic path can never produce them. That gap is exactly why the
+ * page-type head was retrained on Jev labels instead of schema-derived ones --
+ * 40% of schema-less holdout pages are legal or pricing. */
 export type PageTypeLabel =
   | "article"
   | "listing_index"
@@ -36,7 +42,10 @@ export type PageTypeLabel =
   | "product_detail"
   | "about"
   | "contact"
+  | "legal"
+  | "pricing"
   | "homepage"
+  | "product_listing"
   | "other"
   | "unknown";
 

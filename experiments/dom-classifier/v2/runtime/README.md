@@ -128,9 +128,32 @@ Measured on 500 holdout pages, 82 candidate nodes per page on average, artifact
 
 Cold artifact load: 3.2 ms.
 
+### The budget is p95 <= 10 ms, and why
+
+PLAN.md originally said "< ~5 ms per page". That number was arbitrary, and it is
+the wrong shape of budget for where this runs: the linkedom parse of a large
+page is ~76 ms, and the fetch that produced the page is hundreds of milliseconds.
+A classifier that adds single-digit milliseconds to that is not what makes an
+audit slow. **G4 is therefore p95 <= 10 ms per page** (team lead, 2026-09-20).
+
 p95 is driven by pages that hit the 400-node candidate cap; p50 is a typical
-page. The tree count is the available lever and it is close to linear: 300 trees
-instead of 550 gives p95 6.36 ms for macro-F1 0.7745 instead of 0.7904.
+page. The tree count is the lever and it is close to linear in tree-node visits:
+
+| trees | p95 tree-node visits | val macro-F1 | holdout macro-F1 |
+|---|---|---|---|
+| 550 (shipped) | 1.05M | .7611 | .7947 |
+| 300 | 572k | .7535 | .7753 |
+| 200 | 381k | .7441 | .7622 |
+
+A content_block **cascade** was tried and rejected: a 40-round binary gate in
+front of the head skips 87% of nodes and cuts visits to 0.17x, but holdout
+macro-F1 fell 0.0138 against a 0.005 budget. The val-selected threshold did not
+transfer — val lost 0.003 where holdout lost 0.014 — which is a reason to
+distrust re-tuning it rather than an invitation to.
+
+Wall-clock figures above were taken when the machine was quiet. When load
+average is above 2 they are not reproducible on this box and only the visit
+counts are reported; the counts are exact and load-independent.
 
 ## What the labels are
 
