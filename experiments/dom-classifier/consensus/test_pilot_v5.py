@@ -35,6 +35,7 @@ build_pilot = _load("build_pilot_v5")
 luna_v5 = _load("luna_v5_batch")
 score = _load("score_pilot_v5")
 reviewer_b = _load("reviewer_b_batch")
+cohort = _load("build_cohort_v6")
 
 LABELS = Path(__file__).resolve().parents[1] / "v2" / "labels"
 
@@ -481,3 +482,36 @@ def test_abstention_reports_an_axis_the_annotator_omitted() -> None:
     keys = {("v", "p1", "n1"), ("v", "p2", "n2")}
     rows = {("v", "p1", "n1"): {"componentType": "card"}, ("v", "p2", "n2"): {}}
     assert score.abstention(rows, "componentType", "unknown", keys)["omitted"] == 0.5
+
+
+# --- adjudication cohort --------------------------------------------------
+
+
+def test_boundary_names_the_pair_a_human_has_to_settle() -> None:
+    assert cohort.boundary_of("layout_container", "navigation_menu") == "chrome_vs_menu"
+    assert cohort.boundary_of("card", "list") == "item_vs_wrapper"
+    assert cohort.boundary_of("image", "media") == "still_vs_timebased"
+    assert cohort.boundary_of("hero", "banner") == "other"
+    assert cohort.boundary_of({"footer"}, {"site_header"}) == "multi_label"
+
+
+def test_refused_prediction_files_names_what_it_will_not_open(tmp_path: Path) -> None:
+    """A blind eval set's predictions must not reach a labelling cohort."""
+    (tmp_path / "nodes.jsonl").write_text("{}\n")
+    (tmp_path / "model-predictions.jsonl").write_text("{}\n")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "eval-out.json").write_text("{}")
+    refused = cohort.refused_prediction_files(tmp_path)
+    assert refused == ["eval-out.json", "model-predictions.jsonl"]
+    assert "nodes.jsonl" not in refused
+
+
+def test_observed_reads_only_completed_axes() -> None:
+    assert cohort.observed(
+        {
+            "observedAxes": {
+                "componentType": {"complete": True, "labels": ["card"]},
+                "regions": {"complete": False, "labels": ["footer"]},
+            }
+        }
+    ) == {"componentType": "card"}
