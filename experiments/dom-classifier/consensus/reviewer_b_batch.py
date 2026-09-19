@@ -39,6 +39,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+class UsageLimitReached(RuntimeError):
+    """The reviewer account is out of quota. Stop; do not retry in a loop.
+
+    Marking every remaining batch as rejected would burn the whole queue against
+    an error that will not clear for hours and would leave a rejected-batches
+    file that looks like a data problem.
+    """
+
+
 REVIEWER = "B"
 REVIEWER_MODEL = "claude-sonnet-5"
 CLI_MODEL_ALIAS = "sonnet"
@@ -211,6 +220,19 @@ def run_cli(prompt: str, log_path: Path, timeout_s: float) -> tuple[str, float, 
     latency_ms = int((time.monotonic() - started) * 1000)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(completed.stdout)
+    # The limit is reported *inside* a successful envelope: returncode 0,
+    # subtype "success", is_error true, and the text in `result`. Checking only
+    # stderr or the exit code misses it, and the run then marks every remaining
+    # batch rejected against an error that will not clear for hours. 114 batches
+    # went that way before this matched the actual wording.
+    combined = f"{completed.stdout}\n{completed.stderr}".lower()
+    if any(
+        phrase in combined
+        for phrase in ("session limit", "usage limit", "rate limit", "quota", "limit reached")
+    ):
+        raise UsageLimitReached(
+            "reviewer account limit reached; rerun the same command to resume"
+        )
     if completed.returncode != 0:
         raise RuntimeError(
             f"reviewer B exited {completed.returncode}: {completed.stderr.strip()[:300]}"
@@ -283,12 +305,15 @@ def main() -> None:
 
     accepted = list(prior)
     rejected: list[dict[str, Any]] = []
+    stopped: list[str] = []
     costs: list[float] = []
     latencies: list[int] = []
     lock = threading.Lock()
 
     def work(item: tuple[int, list[dict[str, Any]]]) -> None:
         number, batch = item
+        if stopped:
+            return
         prompt = revision.prompt(batch)
         batch_dir = args.runs_dir / f"batch-{number:04d}"
         batch_dir.mkdir(parents=True, exist_ok=True)
@@ -297,6 +322,10 @@ def main() -> None:
             reply, cost, latency_ms = run_cli(
                 prompt, batch_dir / "cli-envelope.json", args.timeout_s
             )
+        except UsageLimitReached as error:
+            with lock:
+                stopped.append(str(error))
+            return
         except Exception as error:  # noqa: BLE001 - recorded, never silently dropped
             with lock:
                 rejected.append({"batch": number, "reason": str(error), "packets": len(batch)})
@@ -372,6 +401,7 @@ def main() -> None:
                 "promptRevision": revision.revision_id,
                 "accepted": len(accepted),
                 "rejectedBatches": len(rejected),
+                "stoppedOnUsageLimit": stopped[:1],
                 "batchesRun": len(batches),
                 "totalCostUsd": round(sum(costs), 4),
                 "medianBatchLatencyMs": sorted(latencies)[len(latencies) // 2]
