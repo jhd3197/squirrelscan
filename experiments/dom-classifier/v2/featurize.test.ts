@@ -382,7 +382,7 @@ describe("the feature vectors", () => {
 });
 
 describe("cost", () => {
-  test("a 20k-element page featurizes in under 300 ms", () => {
+  test("a 20k-element page featurizes well inside the smoke ceiling", () => {
     const blocks = Array.from(
       { length: 2000 },
       (_, i) =>
@@ -396,14 +396,35 @@ describe("cost", () => {
     // because the CLI already holds a parsed document when it calls this: the
     // linkedom parse of a 2 MB page is several seconds and is not a cost this
     // file can do anything about.
+    // This is a SMOKE ceiling, not the performance bound. The real number,
+    // measured on an idle machine, is ~40 ms of featurizer for 22k elements
+    // against ~76 ms for the linkedom parse the CLI pays anyway. The ceiling
+    // here is 30x that, because a wall-clock assertion on a shared machine
+    // measures the scheduler: the same code read 43 ms repeatedly on an idle
+    // box and 1883 ms while three other lanes were building.
+    //
+    // Two things were tried and rejected. A tighter absolute bound flaked
+    // roughly one run in three under load. Calibrating against a parse of the
+    // same page in the measurement loop was WORSE than useless: each parse
+    // allocates 22k DOM nodes, and collecting that garbage lands inside the
+    // next featurize measurement, which inflated it from 40 ms to 199 ms and
+    // made the ratio look 6x worse than it is.
+    //
+    // The guard that actually catches an algorithmic regression is the
+    // linear-scaling test below, which compares two sizes in one process with
+    // the same garbage profile.
     const { document } = parseHTML(page);
     featurizeDocument(document as never, URL); // warm
-    const start = Bun.nanoseconds();
-    const out = featurizeDocument(document as never, URL);
-    const featurizeMs = (Bun.nanoseconds() - start) / 1e6;
+    let best = Number.POSITIVE_INFINITY;
+    let out = featurizeDocument(document as never, URL);
+    for (let run = 0; run < 5; run++) {
+      const start = Bun.nanoseconds();
+      out = featurizeDocument(document as never, URL);
+      best = Math.min(best, (Bun.nanoseconds() - start) / 1e6);
+    }
     expect(out.page.elementCount).toBeGreaterThan(20000);
     expect(out.nodes.length).toBeLessThanOrEqual(400);
-    expect(featurizeMs).toBeLessThan(300);
+    expect(best).toBeLessThan(1200);
   });
 
   test("cost grows linearly, not quadratically, in element count", () => {
@@ -414,6 +435,8 @@ describe("cost", () => {
         (_, i) => `<section class="b${i}"><p>Text ${i} for the candidate gate here.</p></section>`,
       ).join("") +
       `</body></html>`;
+    // Min of five, alternating between the two sizes: a back-to-back pair on a
+    // loaded machine measures whatever else was scheduled in between.
     const time = (document: unknown): number => {
       const start = Bun.nanoseconds();
       featurizeDocument(document as never, URL);
@@ -424,7 +447,13 @@ describe("cost", () => {
     // Warm both shapes first: a cold first call measures JIT, not the algorithm.
     time(small);
     time(large);
-    const ratio = time(large) / Math.max(0.5, time(small));
+    let smallBest = Number.POSITIVE_INFINITY;
+    let largeBest = Number.POSITIVE_INFINITY;
+    for (let run = 0; run < 5; run++) {
+      smallBest = Math.min(smallBest, time(small));
+      largeBest = Math.min(largeBest, time(large));
+    }
+    const ratio = largeBest / Math.max(0.5, smallBest);
     // 8x the elements. Quadratic would be ~64x; allow generous headroom for a
     // loaded machine and still fail on anything super-linear.
     expect(ratio).toBeLessThan(20);
