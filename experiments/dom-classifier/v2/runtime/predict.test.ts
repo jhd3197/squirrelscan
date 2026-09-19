@@ -146,10 +146,38 @@ describe.if(HAS_ARTIFACT)("with the real artifact", () => {
   });
 
   test("the time budget hands the rest of the page to the rules path", () => {
+    // Div soup on purpose. PAGE is all landmarks, and a node that declares its
+    // own landmark is answered by the rules before the budget is ever
+    // consulted -- so on PAGE this test would pass for the wrong reason.
+    const soup = `<!doctype html><html><head><title>T</title></head><body>${Array.from(
+      { length: 40 },
+      (_, i) =>
+        `<div class="row r${i}"><p>Block ${i} with enough text to be a candidate.</p></div>`,
+    ).join("")}</body></html>`;
     const { model } = tryLoadModel(artifactJson());
-    const out = classifyPage(PAGE, URL, { model, budgetMs: -1 });
+    // The precondition is that the model PATH is reachable, not that the model
+    // wins the confidence threshold on this synthetic page.
+    const normal = classifyPage(soup, URL, { model });
+    expect(normal.nodes.length).toBeGreaterThan(10);
+    expect(normal.nodes.every((n) => n.nodeRef.tag === "div")).toBe(true);
+    expect(normal.degraded).toBe("");
+    const out = classifyPage(soup, URL, { model, budgetMs: -1 });
     expect(out.degraded).toContain("time budget");
     expect(out.nodes.every((n) => n.source === "rules")).toBe(true);
+  });
+
+  test("a node that declares its own landmark is answered by the markup", () => {
+    const { model } = tryLoadModel(artifactJson());
+    const out = classifyPage(PAGE, URL, { model });
+    const at = (tag: string) => out.nodes.filter((n) => n.nodeRef.tag === tag);
+    for (const tag of ["nav", "footer", "aside", "main"]) {
+      for (const node of at(tag)) {
+        expect([tag, node.source]).toEqual([tag, "rules"]);
+        expect([tag, node.confidence]).toEqual([tag, 1]);
+      }
+    }
+    expect(at("nav")[0]!.label).toBe("navigation");
+    expect(at("footer")[0]!.label).toBe("footer");
   });
 });
 

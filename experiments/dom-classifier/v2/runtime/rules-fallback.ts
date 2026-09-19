@@ -77,6 +77,19 @@ const TAG_REGION: Record<string, RegionLabel> = {
  * labeller decides them: inside sectioning content they are that section's own
  * chrome, not the site's.
  */
+/**
+ * Does this node declare its own region, as opposed to inheriting one?
+ *
+ * An explicit ARIA landmark role or a landmark tag ON THE NODE ITSELF is a
+ * statement by the page author, and the runtime treats it as ground truth
+ * rather than asking the model to second-guess it.
+ */
+export function declaresOwnRegion(node: NodeFeatures): boolean {
+  if (ROLE_REGION[node.role]) return true;
+  if (TAG_REGION[node.tag]) return true;
+  return node.tag === "header" || node.tag === "footer";
+}
+
 export function ruleRegion(
   node: NodeFeatures,
   byId: ReadonlyMap<number, NodeFeatures>,

@@ -158,9 +158,13 @@ describe("containment labels", () => {
     };
     expect(at("inside").label).toBe("content_block");
     expect(at("inside").trainable).toBe(true);
+    expect(at("inside").inherited).toBe(false);
+    expect(at("inside").weight).toBe(1);
+    // Outside every landmark there is nothing to inherit, so it stays out.
     expect(at("outside").label).toBe("unlabelled");
     expect(at("outside").trainable).toBe(false);
     expect(at("outside").labelSource).toBe("outside-landmarks");
+    expect(at("outside").weight).toBe(0);
   });
 
   test("a page with fewer than three landmark kinds gets no containment labels", () => {
@@ -191,7 +195,7 @@ describe("containment labels", () => {
     expect(regions.labels.every((l) => !l.trainable)).toBe(true);
   });
 
-  test("containerLabel records the landmark a node sits in even when unlabelled", () => {
+  test("a node inside a landmark INHERITS it, at half weight", () => {
     const html = build(
       `<header><nav><a href="/">Home</a></nav></header>
        <main><p>Body text that is long enough to count.</p></main>
@@ -203,9 +207,15 @@ describe("containment labels", () => {
     const regions = silverRegionLabels(featurized.nodes);
     const cols = featurized.nodes.find((n) => n.elementId === "cols")!;
     const label = regions.labels.find((l) => l.nodeId === cols.nodeId)!;
-    expect(label.label).toBe("unlabelled");
+    // Previously this was `unlabelled` and dropped from training, which is why
+    // the model could name a menu root and then call every item inside it a
+    // content_block: it had never been shown one.
+    expect(label.label).toBe("footer");
     expect(label.containerLabel).toBe("footer");
-    expect(label.labelSource).toBe("containment:footer");
+    expect(label.labelSource).toBe("inherited:footer");
+    expect(label.inherited).toBe(true);
+    expect(label.trainable).toBe(true);
+    expect(label.weight).toBe(0.5);
   });
 });
 
@@ -289,5 +299,60 @@ describe("page type from structured data", () => {
     expect(out.label).toBe("unlabelled");
     expect(out.source).toBe("none");
     expect(out.types).toEqual([]);
+  });
+});
+
+describe("inherited landmark labels", () => {
+  const page = `<!doctype html><html><head><title>T</title></head><body>
+    <header id="hdr"><div id="bar"><a href="/">Logo</a><a href="/x">About us here</a></div>
+      <nav id="nav"><ul id="menu"><li id="item"><a href="/a">Products and services</a></li>
+      <li><a href="/b">Pricing information</a></li></ul></nav></header>
+    <main id="main"><div id="block"><p>Body text that is long enough to count.</p></div></main>
+    <aside id="side"><div id="widget"><p>Sidebar widget text goes here.</p></div></aside>
+    <footer id="foot"><div id="col"><p>&copy; 2026 Example Inc, all rights reserved.</p></div></footer>
+  </body></html>`;
+
+  const labels = () => {
+    const { document } = parseHTML(page);
+    const featurized = featurizeDocument(document as never, "https://example.com/x");
+    const regions = silverRegionLabels(featurized.nodes);
+    const at = (elementId: string) => {
+      const node = featurized.nodes.find((n) => n.elementId === elementId)!;
+      return regions.labels.find((l) => l.nodeId === node.nodeId)!;
+    };
+    return at;
+  };
+
+  test("menu members inherit navigation from the nav they sit in", () => {
+    const at = labels();
+    expect(at("nav").label).toBe("navigation");
+    expect(at("nav").inherited).toBe(false);
+    for (const id of ["menu", "item"]) {
+      expect([id, at(id).label]).toEqual([id, "navigation"]);
+      expect([id, at(id).inherited]).toEqual([id, true]);
+      expect([id, at(id).weight]).toEqual([id, 0.5]);
+    }
+  });
+
+  test("the nearest landmark wins, not the outermost", () => {
+    // #menu is inside <nav> which is inside <header>: navigation, not site_header.
+    const at = labels();
+    expect(at("menu").label).toBe("navigation");
+    // #bar is in the header but not in the nav.
+    expect(at("bar").label).toBe("site_header");
+    expect(at("bar").inherited).toBe(true);
+  });
+
+  test("footer columns and sidebar widgets inherit too", () => {
+    const at = labels();
+    expect(at("col").label).toBe("footer");
+    expect(at("widget").label).toBe("sidebar");
+  });
+
+  test("inside main it is still content_block, at full weight", () => {
+    const at = labels();
+    expect(at("block").label).toBe("content_block");
+    expect(at("block").inherited).toBe(false);
+    expect(at("block").weight).toBe(1);
   });
 });

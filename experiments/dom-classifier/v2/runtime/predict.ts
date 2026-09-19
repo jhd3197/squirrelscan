@@ -20,6 +20,7 @@ import {
 } from "../featurize.ts";
 import { ArtifactError, loadModel, scoreRow, softmax, type Model } from "./model-format.ts";
 import {
+  declaresOwnRegion,
   isRootPath,
   rulePageType,
   ruleRegion,
@@ -149,6 +150,19 @@ export function classifyDocument(
   for (const node of featurized.nodes) {
     const nodeRef = { nodeId: node.nodeId, tag: node.tag, elementId: node.elementId };
     if (!usable || !scores || budgetSpent) {
+      nodes.push({ nodeRef, ...withRules(node, byId) });
+      continue;
+    }
+    // MARKUP WINS. A node carrying its own landmark tag or ARIA role has been
+    // told what it is by the page author, and the model is not asked. "Model
+    // primary, rules fallback" is about nodes where the markup is SILENT; it
+    // never means overriding a correct declaration.
+    //
+    // This is not a style preference, it is a measured defect: with the model
+    // consulted first, a <nav class="main-navigation"> came back content_block
+    // at 0.74 on 66 of 68 pages of a stored site, contradicting a deterministic
+    // answer that was right. See runtime/README.md.
+    if (declaresOwnRegion(node)) {
       nodes.push({ nodeRef, ...withRules(node, byId) });
       continue;
     }

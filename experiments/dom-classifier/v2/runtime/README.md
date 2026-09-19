@@ -33,6 +33,34 @@ parsed, which is what the CLI holds by the time it would ask.
 document: re-running `featurizePage(html, url)` reproduces the same nodes with
 the same ids, which is what makes a node reference storable.
 
+### Precedence: markup wins, the model fills the silence
+
+A node that carries its own landmark tag (`<nav>`, `<footer>`, `<header>`,
+`<aside>`, `<main>`, `<form>`, `<search>`, `<dialog>`) or an ARIA landmark role
+is answered by the RULES path at confidence 1.0, and the model is not consulted
+for it. The model is asked only about nodes whose markup says nothing.
+
+PLAN.md's "the model is primary, the deterministic path is the fallback" is
+about nodes where the markup is SILENT. It never meant overriding a correct
+declaration by the page author.
+
+This is a measured correction, not a preference. With the model consulted
+first, a `<nav class="main-navigation">` came back `content_block` at 0.74 on
+66 of 68 pages of a stored site, contradicting a deterministic answer that was
+right; two more nav roots on the same site failed the same way. The cause was a
+train/serve mismatch — the region head was trained on MASKED rows only, so it
+had never seen a landmark tag at training time, while the runtime feeds it true
+unmasked features. Both halves are now fixed: the training mix carries masked
+and unmasked rows, and the runtime does not ask about nodes that already told
+it the answer.
+
+The nesting rule still applies: a `<header>` inside an `<article>` or
+`<section>` is that section's chrome (`article_chrome`), not site chrome, and
+the rules path encodes that.
+
+*Decided by the coordinating agent on 2026-09-20, pending the user's
+confirmation.*
+
 ### `source` means provenance, not quality
 
 **Consumers must not branch on `source`** except to display it. Both paths

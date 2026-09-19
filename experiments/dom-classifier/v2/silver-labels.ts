@@ -63,6 +63,13 @@ export interface NodeLabel {
   /** False for rows kept only for analysis (unlabelled, or a page with too few
    *  landmarks to trust). */
   trainable: boolean;
+  /** True when the label came from the landmark this node SITS IN rather than
+   *  from the node's own markup. A menu item inside a <nav> is navigation, but
+   *  it is weaker evidence than the <nav> itself. */
+  inherited: boolean;
+  /** Training weight. Inherited rows carry half, because containment is a
+   *  weaker claim than a declaration and there are far more of them. */
+  weight: number;
 }
 
 export interface RegionLabelling {
@@ -190,6 +197,8 @@ export function silverRegionLabels(nodes: readonly NodeFeatures[]): RegionLabell
         labelSource: declared.source,
         containerLabel: container,
         trainable: regionTrainable,
+        inherited: false,
+        weight: 1,
       };
     }
     if (!containmentTrainable) {
@@ -199,6 +208,8 @@ export function silverRegionLabels(nodes: readonly NodeFeatures[]): RegionLabell
         labelSource: "none",
         containerLabel: container,
         trainable: false,
+        inherited: false,
+        weight: 0,
       };
     }
     if (container === "main_content") {
@@ -208,6 +219,25 @@ export function silverRegionLabels(nodes: readonly NodeFeatures[]): RegionLabell
         labelSource: "containment:main",
         containerLabel: container,
         trainable: true,
+        inherited: false,
+        weight: 1,
+      };
+    }
+    // A candidate inside a landmark INHERITS it. Previously these were
+    // `unlabelled` and dropped from training, which is why the model could
+    // find a menu root and then call every item inside it a content_block:
+    // it had never been shown one. DOM containment means the node's whole
+    // subtree is inside the landmark, so the claim is sound; it is weaker
+    // evidence than a declaration, so it carries half the weight.
+    if (container && container !== "article_header" && container !== "article_footer") {
+      return {
+        nodeId: node.nodeId,
+        label: container,
+        labelSource: `inherited:${container}`,
+        containerLabel: container,
+        trainable: true,
+        inherited: true,
+        weight: 0.5,
       };
     }
     return {
@@ -216,6 +246,8 @@ export function silverRegionLabels(nodes: readonly NodeFeatures[]): RegionLabell
       labelSource: container ? `containment:${container}` : "outside-landmarks",
       containerLabel: container,
       trainable: false,
+      inherited: false,
+      weight: 0,
     };
   });
 

@@ -5,9 +5,14 @@ machine with other work running, so nothing here ever holds more than one
 50k-row chunk in dense form: each chunk is converted to CSR and the dense
 buffer is reused. Peak RSS is reported by the caller through /usr/bin/time -l.
 
-Sampling policy (from the brief):
-  - masked rows only (m == 1); the unmasked twin is the tag baseline's input,
-    never the model's;
+Sampling policy:
+  - BOTH the masked and unmasked row of each node, which is 50/50 by
+    construction because the builder emits exactly one of each. Training on
+    masked rows alone was a train/serve mismatch: the model never saw a
+    landmark tag or role, while the runtime feeds it true, unmasked features.
+    That is what produced <nav class="main-navigation"> -> content_block at
+    0.74 on a stored site. The model has to learn BOTH "the tag says nav, so
+    navigation" and the structural signal for when the tag is absent;
   - `unlabelled` excluded entirely;
   - every row of every rare class kept;
   - content_block downsampled to at most CONTENT_BLOCK_RATIO x the largest
@@ -76,9 +81,11 @@ def rows(path: Path):
 
 
 def count_labels(path: Path) -> Counter:
+    """Counts NODES, not rows: the masked and unmasked rows of one node are the
+    same node, so the sampling rates are computed from the unmasked half."""
     counts: Counter = Counter()
     for row in rows(path):
-        if row["m"] != 1:
+        if row["m"] != 0:
             continue
         label = collapse(row["l"])
         if label is not None:
@@ -127,9 +134,11 @@ class ChunkedBuilder:
         self.labels: list[int] = []
         self.groups: list[str] = []
         self.refs: list[tuple[str, int]] = []
+        self.masked: list[int] = []
+        self.weights: list[float] = []
 
     def add(self, features: list[float], tokens: list[int], label: int, domain: str,
-            page_id: str, node_id: int) -> None:
+            page_id: str, node_id: int, masked: int, weight: float) -> None:
         row = self.buffer[self.fill]
         row[: self.n_numeric] = features
         for bucket in tokens:
@@ -137,6 +146,8 @@ class ChunkedBuilder:
         self.labels.append(label)
         self.groups.append(domain)
         self.refs.append((page_id, node_id))
+        self.masked.append(masked)
+        self.weights.append(weight)
         self.fill += 1
         if self.fill == CHUNK_ROWS:
             self.flush()
@@ -154,23 +165,27 @@ class ChunkedBuilder:
             (0, self.width), dtype=np.float32
         )
         self.blocks = []
-        return matrix, np.asarray(self.labels, dtype=np.int8), self.groups, self.refs
+        return (matrix, np.asarray(self.labels, dtype=np.int8), self.groups, self.refs,
+                np.asarray(self.masked, dtype=np.int8),
+                np.asarray(self.weights, dtype=np.float32))
 
 
 def build_split(path: Path, rates: dict[str, float], n_numeric: int, n_tokens: int):
     builder = ChunkedBuilder(n_numeric, n_tokens)
     kept: Counter = Counter()
     for row in rows(path):
-        if row["m"] != 1:
-            continue
         label = collapse(row["l"])
         if label is None:
             continue
+        # The keep decision is a hash of (page, node), so a node's masked and
+        # unmasked rows are kept or dropped TOGETHER and the mix stays 50/50.
         rate = rates.get(label, 1.0)
         if rate < 1.0 and keep_hash(row["p"], row["n"]) >= rate:
             continue
-        kept[label] += 1
-        builder.add(row["f"], row["k"], CLASS_INDEX[label], row["d"], row["p"], row["n"])
+        if row["m"] == 0:
+            kept[label] += 1
+        builder.add(row["f"], row["k"], CLASS_INDEX[label], row["d"], row["p"], row["n"],
+                    int(row["m"]), float(row.get("w", 1.0)))
     return (*builder.finish(), kept)
 
 
@@ -208,11 +223,13 @@ def main() -> None:
         # Only the training split is subsampled. Val and holdout are kept whole,
         # so every reported number is over the real class distribution.
         split_rates = rates if split == "train" else {}
-        matrix, labels, groups, refs, kept = build_split(
+        matrix, labels, groups, refs, masked, weights, kept = build_split(
             dataset / f"nodes-{split}.jsonl.gz", split_rates, n_numeric, n_tokens
         )
         sp.save_npz(out / f"X-{split}.npz", matrix)
         np.save(out / f"y-{split}.npy", labels)
+        np.save(out / f"m-{split}.npy", masked)
+        np.save(out / f"w-{split}.npy", weights)
         (out / f"refs-{split}.jsonl").write_text(
             "".join(
                 json.dumps({"p": p, "n": n, "d": d}) + "\n"
@@ -222,13 +239,16 @@ def main() -> None:
         by_class = Counter(REGION_CLASSES[int(i)] for i in labels)
         manifest["splits"][split] = {
             "rows": int(matrix.shape[0]),
+            "maskedRows": int((masked == 1).sum()),
+            "unmaskedRows": int((masked == 0).sum()),
+            "inheritedRows": int((weights < 1.0).sum()),
             "nnz": int(matrix.nnz),
             "domains": len(set(groups)),
             "byClass": dict(by_class),
         }
         print(f"{split}: {matrix.shape[0]} rows, {matrix.nnz} nnz, {len(set(groups))} domains",
               flush=True)
-        del matrix, labels, groups, refs, kept
+        del matrix, labels, groups, refs, masked, weights, kept
 
     (out / "sample-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print("done", flush=True)

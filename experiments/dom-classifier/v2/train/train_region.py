@@ -244,16 +244,24 @@ DEFAULT_CONFIG = {
 }
 
 
-def train_one(x_train, y_train, x_val, y_val, rounds: int, config: dict):
+def train_one(x_train, y_train, x_val, y_val, rounds: int, config: dict,
+              w_train=None, w_val=None):
+    """`w_train`/`w_val` are the PER-ROW weights: 1 for a node that declares its
+    own region, 0.5 for one that inherits it from the landmark it sits in.
+    They multiply the class weights rather than replacing them."""
     import lightgbm as lgb
 
     power = float(config["weightPower"])
-    train_set = lgb.Dataset(x_train, label=y_train, weight=class_weights(y_train, power))
+    tw = class_weights(y_train, power)
+    vw = class_weights(y_val, power)
+    if w_train is not None:
+        tw = tw * w_train
+    if w_val is not None:
+        vw = vw * w_val
+    train_set = lgb.Dataset(x_train, label=y_train, weight=tw)
     # The val set carries the SAME weighting, so early stopping optimises the
     # objective the model is being trained for rather than a different one.
-    val_set = lgb.Dataset(
-        x_val, label=y_val, weight=class_weights(y_val, power), reference=train_set
-    )
+    val_set = lgb.Dataset(x_val, label=y_val, weight=vw, reference=train_set)
     params = {
         "objective": "multiclass",
         "num_class": len(REGION_CLASSES),
@@ -297,10 +305,13 @@ def main() -> None:
 
     x_train = sp.load_npz(sample / "X-train.npz").tocsr()
     y_train = np.load(sample / "y-train.npy").astype(np.int64)
+    w_train = np.load(sample / "w-train.npy").astype(np.float64)
     x_val = sp.load_npz(sample / "X-val.npz").tocsr()
     y_val = np.load(sample / "y-val.npy").astype(np.int64)
+    w_val = np.load(sample / "w-val.npy").astype(np.float64)
     x_hold = sp.load_npz(sample / "X-holdout.npz").tocsr()
     y_hold = np.load(sample / "y-holdout.npy").astype(np.int64)
+    m_hold = np.load(sample / "m-holdout.npy").astype(np.int64)
     print(f"train {x_train.shape} val {x_val.shape} holdout {x_hold.shape}", flush=True)
 
     report: dict[str, object] = {
@@ -355,7 +366,8 @@ def main() -> None:
     best_config, best_val = None, -1.0
     for config in grid:
         xt, xv = features_for(config["featureSet"])
-        booster, seconds = train_one(xt, y_train, xv, y_val, args.rounds, config)
+        booster, seconds = train_one(xt, y_train, xv, y_val, args.rounds, config,
+                                     w_train, w_val)
         val_pred = booster.predict(xv, num_iteration=booster.best_iteration).argmax(axis=1)
         val_macro = per_class_metrics(y_val, val_pred)["macroF1"]
         leaves_total = sum(t["num_leaves"] for t in booster.dump_model()["tree_info"])
@@ -377,7 +389,8 @@ def main() -> None:
         xt, columns = select(x_train, blocks, names)
         xv, _ = select(x_val, blocks, names)
         xh, _ = select(x_hold, blocks, names)
-        booster, seconds = train_one(xt, y_train, xv, y_val, args.rounds, best_config)
+        booster, seconds = train_one(xt, y_train, xv, y_val, args.rounds, best_config,
+                                     w_train, w_val)
         probs = booster.predict(xh, num_iteration=booster.best_iteration)
         pred = probs.argmax(axis=1)
         metrics = per_class_metrics(y_hold, pred)
@@ -402,7 +415,7 @@ def main() -> None:
     xt, _ = select(x_train, blocks, ABLATIONS[best_config["featureSet"]])
     xv, _ = select(x_val, blocks, ABLATIONS[best_config["featureSet"]])
     xh, _ = select(x_hold, blocks, ABLATIONS[best_config["featureSet"]])
-    booster, _ = train_one(xt, y_train, xv, y_val, args.rounds, best_config)
+    booster, _ = train_one(xt, y_train, xv, y_val, args.rounds, best_config, w_train, w_val)
     trees = booster.dump_model()["tree_info"]
     n_class = len(REGION_CLASSES)
     curve = []
@@ -439,6 +452,15 @@ def main() -> None:
         }
     probs = booster.predict(xh, num_iteration=chosen_k)
     pred = probs.argmax(axis=1)
+    # Three readings of the same holdout, because the training mix now contains
+    # both variants and they answer different questions: unmasked is "can it
+    # read a landmark tag when there is one" (it should be near perfect), masked
+    # is the headline, fully-hidden lives in region-maskall-report.json.
+    unmasked = m_hold == 0
+    report["holdoutByVariant"] = {
+        "unmasked": per_class_metrics(y_hold[unmasked], pred[unmasked]),
+        "masked": per_class_metrics(y_hold[~unmasked], pred[~unmasked]),
+    }
     report["shipped"] = {
         "config": best_config,
         "iterations": chosen_k,

@@ -29,7 +29,7 @@ import { parseHTML } from "../../../packages/parser/src/dom.ts";
 // measuring nothing.
 // ---------------------------------------------------------------------------
 
-export const FEATURIZER_VERSION = "v2.1.0";
+export const FEATURIZER_VERSION = "v2.2.0";
 
 /** Hashed class/id token buckets. Fixed forever at this version. */
 export const TOKEN_BUCKETS = 512;

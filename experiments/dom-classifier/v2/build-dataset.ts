@@ -329,6 +329,8 @@ interface Stats {
   /** split -> label -> count, on the UNMASKED rows only (the masked rows are
    *  the same nodes, so counting both would double every number). */
   nodesByLabel: Record<Split, Record<string, number>>;
+  /** Nodes whose label came from the landmark they sit in, not their own tag. */
+  inheritedNodes: Record<Split, number>;
   trainableNodes: Record<Split, number>;
   pageTypes: Record<Split, Record<string, number>>;
   pageTypeSources: Record<string, number>;
@@ -372,6 +374,7 @@ async function build(
     domains: emptyBySplit(() => 0),
     nodeRows: emptyBySplit(() => 0),
     nodesByLabel: emptyBySplit(() => ({}) as Record<string, number>),
+    inheritedNodes: emptyBySplit(() => 0),
     trainableNodes: emptyBySplit(() => 0),
     pageTypes: emptyBySplit(() => ({}) as Record<string, number>),
     pageTypeSources: {},
@@ -483,6 +486,8 @@ async function build(
           ls: label.labelSource,
           c: label.containerLabel,
           t: label.trainable,
+          inh: label.inherited,
+          w: label.weight,
           // The true tag and role: the LABEL source, kept for the tag baseline
           // the error analysis showed beats every learned model on semantic
           // tags. NEVER a feature.
@@ -501,6 +506,7 @@ async function build(
         const counts = stats.nodesByLabel[split];
         counts[label.label] = (counts[label.label] ?? 0) + 1;
         if (label.trainable) stats.trainableNodes[split]++;
+        if (label.inherited) stats.inheritedNodes[split]++;
         if (label.label === "article_header") stats.nestedChrome.articleHeader++;
         if (label.label === "article_footer") stats.nestedChrome.articleFooter++;
         if (label.label === "site_header") stats.nestedChrome.siteHeader++;
