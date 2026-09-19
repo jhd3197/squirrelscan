@@ -1,0 +1,532 @@
+/**
+ * Prompt revision `dom-suggestions-v5`: the shared-definition rebuild of the
+ * Jev request, kept in a separate module so `jev-adapter.ts` (revision v4)
+ * stays byte-identical and every v4 output remains reproducible.
+ *
+ * Three things change, each because v4 measured a failure:
+ *
+ * 1. **Shared definitions.** `v2/labels/policy-v5.md` is read at run time,
+ *    hashed, and placed in request state. The Luna reviewer prompt embeds the
+ *    same bytes. Under v4 neither annotator had definitions at all, and 33 of
+ *    34 `layout_container`/`content_section` disagreements were `<footer>` and
+ *    `<main>` alone.
+ * 2. **One page type, not sixty-five Nouls.** v4's multi-label page-type
+ *    battery agreed 1.3% of the time on the test split. v5 asks one Choice over
+ *    the eleven collapsed classes in `v2/labels/page-type-map-v5.json`.
+ * 3. **Purposes with support only.** Fifteen of twenty-seven purposes were used
+ *    fewer than ten times across 375 pool nodes; `v2/labels/purposes-v5.json`
+ *    records which were kept and what they cost.
+ *
+ * Node evidence is built from an immutable capture and carries no hostname, no
+ * class or id token, and no attribute the capture did not already hold.
+ */
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+  COMPONENT_TYPES,
+  REGIONS,
+  TAXONOMY_REVISION,
+  type CapturedNode,
+  type CapturedPage,
+} from "../labeler/types.ts";
+import { stripStyleResidue, structureSummary } from "../extract-dom.ts";
+import type { JevQuestion, JevRequest, JevResponse, TypeSafeTransport } from "./jev-adapter.ts";
+import { validateResponse } from "./jev-adapter.ts";
+import pageTypeMap from "../v2/labels/page-type-map-v5.json" with { type: "json" };
+import purposeMap from "../v2/labels/purposes-v5.json" with { type: "json" };
+
+export const JEV_MODEL_V5 = "jev-1.13.0";
+// `as const` keeps the literal type through an object property, so a row whose
+// promptRevision drifts from this module is a type error rather than a string.
+export const PROMPT_REVISION_V5 = "dom-suggestions-v5" as const;
+export const PACKET_REVISION_V5 = "runtime-dom-text-v2";
+export const PAGE_PACKET_REVISION_V5 = "dom-page-text-v2";
+export const POLICY_PATH = join(import.meta.dir, "..", "v2", "labels", "policy-v5.md");
+
+export const PAGE_TYPES_V5 = pageTypeMap.classes as readonly string[];
+export const PAGE_TYPE_COLLAPSE = pageTypeMap.map as Record<string, string>;
+export const PURPOSES_V5 = Object.keys(purposeMap.retained).sort() as readonly string[];
+export const REGIONS_V5 = REGIONS as readonly string[];
+export const COMPONENT_TYPES_V5 = COMPONENT_TYPES as readonly string[];
+
+const MAX_TEXT = 320;
+const MAX_TITLE = 240;
+const MAX_PAGE_EVIDENCE = 12;
+const EMPTY_TEXT = "[empty]";
+
+const tokenPattern = /(?:bearer\s+|api[_-]?key\s*[=:]\s*|password\s*[=:]\s*)[^\s,;]+/gi;
+const emailPattern = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
+
+export function sha256(value: string): string {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+/**
+ * Redact, then scrub stylesheet residue with the current extractor, then bound.
+ *
+ * Order matters. `stripStyleResidue` reads brace structure, so it has to see the
+ * text before whitespace collapsing rewrites it, and the capture's own 280
+ * character truncation means a trailing declaration often arrives with its
+ * closing brace already gone. The scrubber handles that tail; it cannot recover
+ * a selector prelude that was cut mid-token, and those rows are reported as
+ * residual rather than claimed clean.
+ */
+export function cleanText(value: string, maximum = MAX_TEXT): string {
+  const redacted = value
+    .replaceAll(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "�")
+    .replace(tokenPattern, "[REDACTED]")
+    .replace(emailPattern, "[EMAIL]");
+  return stripStyleResidue(redacted)
+    .replaceAll(/\s+/g, " ")
+    .trim()
+    .slice(0, maximum)
+    .replace(/[\uD800-\uDBFF]$/, "�");
+}
+
+export type NodeEvidence = {
+  nodeId: string;
+  tag: string;
+  role: string | null;
+  ancestors: string[];
+  siblingPosition: number;
+  siblingCount: number;
+  childTags: string[];
+  /** `div*4,a*3,img` over the captured subtree; the capture is not a full DOM. */
+  subtree: string;
+  width: number;
+  height: number;
+  depth: number;
+  text: string;
+  emptyText: boolean;
+};
+
+function finite(value: number | undefined): number {
+  return Number.isFinite(value) ? Math.round(value as number) : 0;
+}
+
+/**
+ * Node evidence from an immutable capture.
+ *
+ * The frozen captures hold no HTML and no element attributes, so the extractor's
+ * `semanticAttributes` and `srcCategory` cannot be recovered here and are not
+ * invented: a packet built from a capture records `attributesAvailable: false`.
+ * What the capture does hold is the node graph, so an element that reached v4 as
+ * the bare token `[empty]` now carries its role, its position among siblings,
+ * its child tags and its subtree shape.
+ */
+export function nodeEvidence(page: CapturedPage, node: CapturedNode): NodeEvidence {
+  const byId = new Map(page.nodes.map((item) => [item.id, item]));
+  const chain: string[] = [];
+  for (let current = node.parentId ? byId.get(node.parentId) : undefined; current; ) {
+    chain.push(current.tag.toLowerCase());
+    current = current.parentId ? byId.get(current.parentId) : undefined;
+    if (chain.length >= 8) break;
+  }
+  const siblings = page.nodes.filter((item) => item.parentId === node.parentId);
+  const children = page.nodes.filter((item) => item.parentId === node.id);
+  const descendants: CapturedNode[] = [];
+  const queue = [...children];
+  while (queue.length && descendants.length < 400) {
+    const item = queue.shift()!;
+    descendants.push(item);
+    queue.push(...page.nodes.filter((child) => child.parentId === item.id));
+  }
+  const counts: Record<string, number> = {};
+  for (const item of descendants) {
+    const tag = item.tag.toLowerCase();
+    counts[tag] = (counts[tag] ?? 0) + 1;
+  }
+  const text = cleanText(node.text ?? "");
+  return {
+    nodeId: node.id,
+    tag: node.tag.toLowerCase(),
+    role: node.role ? node.role.toLowerCase() : null,
+    ancestors: chain.reverse(),
+    siblingPosition: Math.max(
+      0,
+      siblings.findIndex((item) => item.id === node.id),
+    ),
+    siblingCount: siblings.length,
+    childTags: children.slice(0, 12).map((item) => item.tag.toLowerCase()),
+    subtree: structureSummary(counts, node.tag.toLowerCase()),
+    width: finite(node.rect?.width),
+    height: finite(node.rect?.height),
+    depth: finite(node.depth),
+    text,
+    emptyText: text.length === 0,
+  };
+}
+
+/** The one evidence rendering both annotators read. Jev gets the same fields as state. */
+export function serializeNodePacket(evidence: NodeEvidence): string {
+  return [
+    PACKET_REVISION_V5,
+    `tag=${evidence.tag}`,
+    `role=${evidence.role ?? "none"}`,
+    `ancestors=${evidence.ancestors.join(">") || "none"}`,
+    `position=${evidence.siblingPosition + 1} of ${Math.max(1, evidence.siblingCount)}`,
+    `size=${evidence.width}x${evidence.height}`,
+    `children=${evidence.childTags.join(",") || "none"}`,
+    `subtree=${evidence.subtree || "none"}`,
+    `text=${evidence.emptyText ? EMPTY_TEXT : evidence.text}`,
+  ].join("\n");
+}
+
+export type PageEvidence = {
+  pageId: string;
+  title: string;
+  path: string;
+  lines: string[];
+};
+
+/** URL path only: the host identifies the site and never leaves this step. */
+export function safePath(raw: string): string {
+  try {
+    const parsed = new URL(raw);
+    return cleanText(parsed.pathname || "/", 200);
+  } catch {
+    return "/";
+  }
+}
+
+/** Tags whose text is prose a reader sees, in preference order. */
+const PROSE_TAGS = [
+  "h1",
+  "h2",
+  "h3",
+  "p",
+  "li",
+  "article",
+  "main",
+  "section",
+  "figcaption",
+  "blockquote",
+  "td",
+  "dd",
+  "header",
+  "footer",
+  "nav",
+  "a",
+];
+
+/**
+ * Script and structured-data residue that the CSS scrubber is not built to see.
+ *
+ * `stripStyleResidue` discriminates CSS from JSON deliberately, because docs
+ * pages show JSON as visible content. A page serialization spans the whole
+ * document, so it also picks up JSON-LD blocks and minified bundles that no
+ * reader sees; 9.3% of v4 page inputs carried this. Dropping a whole candidate
+ * line is safe here in a way that editing node text is not: another line takes
+ * its place.
+ */
+export function looksLikeCode(value: string): boolean {
+  const text = value.trim();
+  if (!text) return true;
+  if (/^[({[]|^!function|^var\s|^function\s*\(|^\s*<\w/.test(text)) return true;
+  if (/"@context"|"@type"|window\.|document\.|=>\s*\{|\bfunction\s*\(/.test(text)) return true;
+  const punctuation = (text.match(/[{}();=<>]/g) ?? []).length;
+  return punctuation / text.length > 0.06;
+}
+
+export function pageEvidence(page: CapturedPage): PageEvidence {
+  const rank = (tag: string) => {
+    const index = PROSE_TAGS.indexOf(tag.toLowerCase());
+    return index < 0 ? PROSE_TAGS.length : index;
+  };
+  const lines = page.nodes
+    .map((node) => ({ rank: rank(node.tag), text: cleanText(node.text ?? "") }))
+    .filter((item) => item.text.length >= 40 && !looksLikeCode(item.text))
+    .sort((left, right) => left.rank - right.rank)
+    .map((item) => item.text)
+    .filter((text, index, all) => all.indexOf(text) === index)
+    .slice(0, MAX_PAGE_EVIDENCE);
+  return {
+    pageId: page.id,
+    title: cleanText(page.title ?? "", MAX_TITLE),
+    path: safePath(page.url),
+    lines,
+  };
+}
+
+export function serializePagePacket(evidence: PageEvidence): string {
+  return [
+    PAGE_PACKET_REVISION_V5,
+    `title=${evidence.title}`,
+    `path=${evidence.path}`,
+    `text=${evidence.lines.join("\n")}`,
+  ].join("\n");
+}
+
+export type PolicyDocument = { text: string; sha256: string };
+
+export function loadPolicy(path = POLICY_PATH): PolicyDocument {
+  const text = readFileSync(path, "utf8");
+  if (!text.includes("## 1. componentType") || !text.includes("## 4. pageType"))
+    throw new Error("policy-v5.md is missing a required section");
+  return { text, sha256: sha256(text) };
+}
+
+function noul(
+  instructions: string | Record<string, unknown>,
+  yes: string,
+  no: string,
+): JevQuestion {
+  return { type: "noul", instructions, criteria: { true: yes, false: no } };
+}
+
+function definitionFor(section: string, label: string): string {
+  return `Apply the ${section} rules in \`policy.text\` exactly as written. Label: ${label}.`;
+}
+
+export type V5Candidate = { evidence: NodeEvidence; packet: string };
+
+export type JevStateV5 = {
+  policy: { revision: string; sha256: string; text: string };
+  page: {
+    pageId: string;
+    title: string;
+    path: string;
+    evidence: string[];
+    packet: string;
+  };
+  candidates: Array<NodeEvidence & { packet: string }>;
+};
+
+/**
+ * One request per page carrying only the pilot's own nodes.
+ *
+ * v4 sent six adapter-chosen candidates per page and 361 questions. v5 sends the
+ * nodes the sample asked for and, per node, nineteen region Nouls, twelve
+ * purpose Nouls and one component Choice, plus one page Choice: the question
+ * count falls with the vocabulary, not with the evidence.
+ */
+export function buildRequestV5(
+  page: CapturedPage,
+  nodes: CapturedNode[],
+  policy: PolicyDocument,
+  options: { includePage?: boolean } = {},
+): { request: JevRequest; candidates: V5Candidate[]; pagePacket: string } {
+  const includePage = options.includePage ?? true;
+  const evidence = pageEvidence(page);
+  const pagePacket = serializePagePacket(evidence);
+  const candidates = nodes.map((node) => {
+    const value = nodeEvidence(page, node);
+    return { evidence: value, packet: serializeNodePacket(value) };
+  });
+  const questions: Record<string, JevQuestion> = {};
+  if (includePage) {
+    questions.page_type = {
+      type: "choice",
+      instructions: {
+        judgment:
+          "What is this page primarily for? Choose exactly one class. Section 4 of `policy.text` defines every class and the tie-breaks; navigation labels and footer links are not evidence about this page.",
+        evidence: "page.packet",
+      },
+      criteria: Object.fromEntries(
+        PAGE_TYPES_V5.map((label) => [label, definitionFor("section 4 pageType", label)]),
+      ),
+    };
+  }
+  for (const candidate of candidates) {
+    const prefix = `node_${candidate.evidence.nodeId}`;
+    for (const label of REGIONS_V5)
+      questions[`${prefix}_region_${label}`] = noul(
+        {
+          node: candidate.evidence.nodeId,
+          judgment: `Is this node in the ${label} region?`,
+          rules: "Section 2 of `policy.text`.",
+        },
+        `The node is inside or is the ${label} region, as section 2 of \`policy.text\` defines it.`,
+        `The node is not inside the ${label} region.`,
+      );
+    for (const label of PURPOSES_V5)
+      questions[`${prefix}_purpose_${label}`] = noul(
+        {
+          node: candidate.evidence.nodeId,
+          judgment: `Does this node itself serve the ${label} purpose?`,
+          rules: "Section 3 of `policy.text`.",
+        },
+        `The node's own content or controls serve the ${label} purpose.`,
+        `The node does not serve the ${label} purpose; a neighbour doing so is not enough.`,
+      );
+    questions[`${prefix}_component_type`] = {
+      type: "choice",
+      instructions: {
+        node: candidate.evidence.nodeId,
+        judgment:
+          "What is this node's component type? Work down the precedence ladder in section 1 of `policy.text` and stop at the first rule that fires. `unknown` is a valid answer and is never penalised.",
+      },
+      criteria: Object.fromEntries(
+        COMPONENT_TYPES_V5.map((label) => [label, definitionFor("section 1 componentType", label)]),
+      ),
+    };
+  }
+  const state: JevStateV5 = {
+    policy: { revision: PROMPT_REVISION_V5, sha256: policy.sha256, text: policy.text },
+    page: {
+      pageId: evidence.pageId,
+      title: evidence.title,
+      path: evidence.path,
+      evidence: evidence.lines,
+      packet: pagePacket,
+    },
+    candidates: candidates.map((candidate) => ({
+      ...candidate.evidence,
+      packet: candidate.packet,
+    })),
+  };
+  return {
+    request: { model: JEV_MODEL_V5, state: state as unknown as JevRequest["state"], questions },
+    candidates,
+    pagePacket,
+  };
+}
+
+export function snapshotHash(state: unknown): string {
+  return sha256(JSON.stringify(state));
+}
+
+export type JevRowV5 = {
+  schemaVersion: 1;
+  provider: "typesafe";
+  modelId: string;
+  promptRevision: typeof PROMPT_REVISION_V5;
+  taxonomyRevision: typeof TAXONOMY_REVISION;
+  pageTypeMappingRevision: string;
+  purposeMappingRevision: string;
+  policySha256: string;
+  pageId: string;
+  nodeId: string | null;
+  captureHash: string;
+  snapshotHash: string;
+  input: string;
+  inputSha256: string;
+  recordType: "node" | "page";
+  split: string;
+  stratum: string;
+  rawAnswers: Record<string, unknown>;
+  observedAxes: Record<string, { complete: boolean; labels: string[] | string | null }>;
+  createdAt: string;
+  usage?: JevResponse["usage"];
+  latencyMs?: number;
+};
+
+const NOUL_THRESHOLD = 0.75;
+
+function nounSet(
+  answers: Record<string, unknown>,
+  prefix: string,
+  labels: readonly string[],
+  threshold: number,
+): string[] {
+  return labels.filter((label) => {
+    const answer = answers[`${prefix}${label}`] as { noul?: number } | undefined;
+    return typeof answer?.noul === "number" && answer.noul >= threshold;
+  });
+}
+
+/**
+ * Rows in the shape `luna-complete-800.jsonl` uses, so the two annotators join
+ * on identity and the scorer never has to know which side it is reading.
+ */
+export function toRowsV5(
+  page: CapturedPage,
+  built: ReturnType<typeof buildRequestV5>,
+  response: JevResponse,
+  context: { split: string; strata: Map<string, string>; policySha256: string; latencyMs: number },
+  includePage: boolean,
+  createdAt = new Date().toISOString(),
+): JevRowV5[] {
+  const answers = response.answers as Record<string, Record<string, unknown>>;
+  const snapshot = snapshotHash(built.request.state);
+  const base = {
+    schemaVersion: 1 as const,
+    provider: "typesafe" as const,
+    modelId: JEV_MODEL_V5,
+    promptRevision: PROMPT_REVISION_V5,
+    taxonomyRevision: TAXONOMY_REVISION,
+    pageTypeMappingRevision: pageTypeMap.mappingRevision as string,
+    purposeMappingRevision: purposeMap.mappingRevision as string,
+    policySha256: context.policySha256,
+    pageId: page.id,
+    captureHash: page.captureHash,
+    snapshotHash: snapshot,
+    split: context.split,
+    createdAt,
+  };
+  const rows: JevRowV5[] = [];
+  if (includePage) {
+    const choice = answers.page_type as { choice?: string } | undefined;
+    rows.push({
+      ...base,
+      nodeId: null,
+      recordType: "page",
+      stratum: "page",
+      input: built.pagePacket,
+      inputSha256: sha256(built.pagePacket),
+      rawAnswers: { page_type: answers.page_type },
+      observedAxes: {
+        pageType: { complete: typeof choice?.choice === "string", labels: choice?.choice ?? null },
+      },
+      usage: response.usage,
+      latencyMs: context.latencyMs,
+    });
+  }
+  for (const candidate of built.candidates) {
+    const prefix = `node_${candidate.evidence.nodeId}_`;
+    const raw = Object.fromEntries(
+      Object.entries(answers).filter(([key]) => key.startsWith(prefix)),
+    );
+    const choice = answers[`${prefix}component_type`] as { choice?: string } | undefined;
+    rows.push({
+      ...base,
+      nodeId: candidate.evidence.nodeId,
+      recordType: "node",
+      stratum: context.strata.get(candidate.evidence.nodeId) ?? "unknown",
+      input: candidate.packet,
+      inputSha256: sha256(candidate.packet),
+      rawAnswers: raw,
+      observedAxes: {
+        componentType: {
+          complete: typeof choice?.choice === "string",
+          labels: choice?.choice ?? null,
+        },
+        regions: {
+          complete: true,
+          labels: nounSet(answers, `${prefix}region_`, REGIONS_V5, NOUL_THRESHOLD),
+        },
+        purposes: {
+          complete: true,
+          labels: nounSet(answers, `${prefix}purpose_`, PURPOSES_V5, NOUL_THRESHOLD),
+        },
+      },
+    });
+  }
+  return rows;
+}
+
+/** Exponential backoff on 429/529; the pilot never runs more than four at once. */
+export async function evaluateWithBackoff(
+  transport: TypeSafeTransport,
+  request: JevRequest,
+  attempts = 5,
+): Promise<{ response: JevResponse; latencyMs: number; retries: number }> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const started = Date.now();
+    try {
+      const response = await transport(request);
+      return { response, latencyMs: Date.now() - started, retries: attempt };
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      const retryable = /HTTP (429|5\d\d)|timed out/.test(message);
+      if (!retryable || attempt === attempts - 1) break;
+      await Bun.sleep(Math.min(30_000, 1000 * 2 ** attempt) + Math.floor(Math.random() * 250));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("TypeSafe evaluation failed");
+}
+
+export { validateResponse };
