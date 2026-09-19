@@ -62,7 +62,7 @@ def load_vocabulary() -> dict[str, list[str]]:
     }
 
 
-POLICY_REVISIONS = ("v5", "v6")
+POLICY_REVISIONS = ("v5", "v6", "v7")
 
 
 def prompt_revision(revision: str = "v5") -> str:

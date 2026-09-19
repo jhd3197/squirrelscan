@@ -225,13 +225,18 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pilot", type=Path, required=True, help="label-pilot-v5 directory")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--selection",
+        default="pilot-selection.jsonl",
+        help="which record set to score; a subset file restricts every comparison to it",
+    )
     args = parser.parse_args()
 
     purposes_doc = json.loads((LABELS_DIR / "purposes-v5.json").read_text())
     page_map = json.loads((LABELS_DIR / "page-type-map-v5.json").read_text())["map"]
     retained = set(purposes_doc["retained"])
 
-    selection = read_jsonl(args.pilot / "pilot-selection.jsonl")
+    selection = read_jsonl(args.pilot / args.selection)
     wanted = {(row["split"], row["pageId"], row.get("nodeId") or "") for row in selection}
     strata = {(row["split"], row["pageId"], row.get("nodeId") or ""): row["stratum"] for row in selection}
 
@@ -246,21 +251,31 @@ def main() -> None:
         for row in read_jsonl(CORPUS / "luna-complete-800.jsonl")
         if identity(row) in wanted
     }
-    jev_v5_rows = read_jsonl(args.pilot / "jev-v5.jsonl")
+    # Every leg is restricted to the selection under test. Without this a subset
+    # run compares the new revision on its subset against the old ones on the
+    # whole pilot, which is not the same measurement and reads as a jump.
+    def scoped(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [row for row in rows if identity(row) in wanted]
+
+    jev_v5_rows = scoped(read_jsonl(args.pilot / "jev-v5.jsonl"))
     jev_v5 = {identity(row): v5_sets(row) for row in jev_v5_rows}
-    jev_v6_rows = read_jsonl(args.pilot / "jev-v6.jsonl")
+    jev_v6_rows = scoped(read_jsonl(args.pilot / "jev-v6.jsonl"))
     jev_v6 = {identity(row): v5_sets(row) for row in jev_v6_rows}
-    luna_v5_rows = read_jsonl(args.pilot / "luna-v5.jsonl")
+    jev_v7_rows = scoped(read_jsonl(args.pilot / "jev-v7.jsonl"))
+    jev_v7 = {identity(row): v5_sets(row) for row in jev_v7_rows}
+    luna_v5_rows = scoped(read_jsonl(args.pilot / "luna-v5.jsonl"))
     luna_v5 = {identity(row): v5_sets(row) for row in luna_v5_rows}
     # Reviewer B answers the same records under both revisions. Its two legs are
     # the only pair that differs in nothing but the prompt, so they carry the gate.
-    reviewer_b_v4_rows = read_jsonl(args.pilot / "reviewer-b-v4.jsonl")
-    reviewer_b_v5_rows = read_jsonl(args.pilot / "reviewer-b-v5.jsonl")
-    reviewer_b_v6_rows = read_jsonl(args.pilot / "reviewer-b-v6.jsonl")
+    reviewer_b_v4_rows = scoped(read_jsonl(args.pilot / "reviewer-b-v4.jsonl"))
+    reviewer_b_v5_rows = scoped(read_jsonl(args.pilot / "reviewer-b-v5.jsonl"))
+    reviewer_b_v6_rows = scoped(read_jsonl(args.pilot / "reviewer-b-v6.jsonl"))
+    reviewer_b_v7_rows = scoped(read_jsonl(args.pilot / "reviewer-b-v7.jsonl"))
     for rows, revision in (
         (reviewer_b_v4_rows, "v4"),
         (reviewer_b_v5_rows, "v5"),
         (reviewer_b_v6_rows, "v6"),
+        (reviewer_b_v7_rows, "v7"),
     ):
         models = {row.get("reviewerModel") for row in rows}
         revisions = {row.get("promptRevision") for row in rows}
@@ -269,6 +284,7 @@ def main() -> None:
     reviewer_b_v4 = {identity(row): luna_v4_sets(row) for row in reviewer_b_v4_rows}
     reviewer_b_v5 = {identity(row): v5_sets(row) for row in reviewer_b_v5_rows}
     reviewer_b_v6 = {identity(row): v5_sets(row) for row in reviewer_b_v6_rows}
+    reviewer_b_v7 = {identity(row): v5_sets(row) for row in reviewer_b_v7_rows}
 
     # v4 page-type sets and purpose sets projected into the v5 vocabulary, so the
     # effect of the definitions is separable from the effect of the reduction.
@@ -312,6 +328,8 @@ def main() -> None:
             "reviewerBv4": len(reviewer_b_v4),
             "reviewerBv5": len(reviewer_b_v5),
             "reviewerBv6": len(reviewer_b_v6),
+            "jevV7": len(jev_v7),
+            "reviewerBv7": len(reviewer_b_v7),
         },
         "reviewers": {
             "A": {"model": "gpt-5.6-luna", "revisions": ["v4"] + (["v5"] if luna_v5 else [])},
@@ -326,6 +344,7 @@ def main() -> None:
                         ("v4", reviewer_b_v4),
                         ("v5", reviewer_b_v5),
                         ("v6", reviewer_b_v6),
+                        ("v7", reviewer_b_v7),
                     )
                     if rows
                 ],
@@ -346,6 +365,8 @@ def main() -> None:
         comparisons["v5_reviewerB"] = (as_set(jev_v5), as_set(reviewer_b_v5))
     if reviewer_b_v6:
         comparisons["v6_reviewerB"] = (as_set(jev_v6), as_set(reviewer_b_v6))
+    if reviewer_b_v7:
+        comparisons["v7_reviewerB"] = (as_set(jev_v7), as_set(reviewer_b_v7))
     if reviewer_b_v5 and reviewer_b_v6:
         comparisons["shift_reviewerB_v5_vs_v6"] = (as_set(reviewer_b_v5), as_set(reviewer_b_v6))
     if jev_v5 and jev_v6:
@@ -366,6 +387,7 @@ def main() -> None:
         "jevV4": jev_v4_p,
         "jevV5": jev_v5,
         "jevV6": jev_v6,
+        "jevV7": jev_v7,
         "lunaV4": {
             identity(row): positive_claims(row)
             for row in read_jsonl(CORPUS / "luna-complete-800.jsonl")
@@ -374,11 +396,13 @@ def main() -> None:
         "reviewerBv4": {identity(row): positive_claims(row) for row in reviewer_b_v4_rows},
         "reviewerBv5": {identity(row): positive_claims(row) for row in reviewer_b_v5_rows},
         "reviewerBv6": {identity(row): positive_claims(row) for row in reviewer_b_v6_rows},
+        "reviewerBv7": {identity(row): positive_claims(row) for row in reviewer_b_v7_rows},
     }
     claim_pairs = {
         "v4_reviewerB": ("jevV4", "reviewerBv4"),
         "v5_reviewerB": ("jevV5", "reviewerBv5"),
         "v6_reviewerB": ("jevV6", "reviewerBv6"),
+        "v7_reviewerB": ("jevV7", "reviewerBv7"),
         "v4_reviewerA": ("jevV4", "lunaV4"),
     }
     report["multiLabelOverlap"] = {
@@ -399,7 +423,7 @@ def main() -> None:
     # The gate, stated once so no reader has to assemble it from the table. The
     # newest revision with a reviewer leg is the one under test; v4 is always the
     # baseline, because that is the revision the 57.6% headline was measured on.
-    latest = "v6" if reviewer_b_v6 else "v5" if reviewer_b_v5 else None
+    latest = next((name for name, rows in (("v7", reviewer_b_v7), ("v6", reviewer_b_v6), ("v5", reviewer_b_v5)) if rows), None)
     if reviewer_b_v4 and latest:
         before = report["agreement"]["v4_reviewerB"]["componentType"]
         after = report["agreement"][f"{latest}_reviewerB"]["componentType"]
@@ -447,6 +471,8 @@ def main() -> None:
         legs["reviewerBv5"] = reviewer_b_v5
     if reviewer_b_v6:
         legs["reviewerBv6"] = reviewer_b_v6
+    if reviewer_b_v7:
+        legs["reviewerBv7"] = reviewer_b_v7
     if jev_v6:
         legs["jevV6"] = jev_v6
     report["abstention"] = {
@@ -460,7 +486,7 @@ def main() -> None:
     }
 
     # Cost is reported for the newest Jev leg present.
-    jev_cost_rows = jev_v6_rows or jev_v5_rows
+    jev_cost_rows = jev_v7_rows or jev_v6_rows or jev_v5_rows
     node_rows = [row for row in jev_cost_rows if row["recordType"] == "node"]
     input_tokens = sum(int((row.get("usage") or {}).get("input_tokens") or 0) for row in jev_cost_rows)
     latencies = sorted(int(row["latencyMs"]) for row in jev_cost_rows if row.get("latencyMs"))
@@ -503,6 +529,7 @@ def main() -> None:
         ("reviewerBv4", reviewer_b_v4_rows),
         ("reviewerBv5", reviewer_b_v5_rows),
         ("reviewerBv6", reviewer_b_v6_rows),
+        ("reviewerBv7", reviewer_b_v7_rows),
     ):
         if not rows:
             continue

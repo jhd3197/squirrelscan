@@ -41,7 +41,7 @@ export const JEV_MODEL_V5 = "jev-1.13.0";
 // promptRevision drifts from this module is a type error rather than a string.
 export const PROMPT_REVISION_V5 = "dom-suggestions-v5" as const;
 /** Revisions this module can run. Each has its own policy file; none overwrites another. */
-export const POLICY_REVISIONS = ["v5", "v6"] as const;
+export const POLICY_REVISIONS = ["v5", "v6", "v7"] as const;
 export type PolicyRevision = (typeof POLICY_REVISIONS)[number];
 export type PromptRevision = `dom-suggestions-${PolicyRevision}`;
 export const PACKET_REVISION_V5 = "runtime-dom-text-v2";

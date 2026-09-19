@@ -335,10 +335,26 @@ def test_the_two_revisions_offer_different_page_type_vocabularies() -> None:
 
 
 def test_v6_loads_its_own_policy_and_declares_its_own_revision() -> None:
-    v5, v6 = reviewer_b.Revision("v5"), reviewer_b.Revision("v6")
-    assert v5.revision_id == "dom-suggestions-v5"
-    assert v6.revision_id == "dom-suggestions-v6"
-    assert v5.policy_sha256 != v6.policy_sha256
+    v5, v6, v7 = (reviewer_b.Revision(name) for name in ("v5", "v6", "v7"))
+    assert (v5.revision_id, v6.revision_id, v7.revision_id) == (
+        "dom-suggestions-v5",
+        "dom-suggestions-v6",
+        "dom-suggestions-v7",
+    )
+    assert len({v5.policy_sha256, v6.policy_sha256, v7.policy_sha256}) == 3
+
+
+def test_v7_scopes_the_chrome_rule_to_the_shape_axis() -> None:
+    """The v6 leak: the teacher read a componentType rule as suppressing a purpose."""
+    v6 = reviewer_b.Revision("v6").prompt([packet()])
+    v7 = reviewer_b.Revision("v7").prompt([packet()])
+    assert "This rule decides SHAPE only" not in v6
+    assert "This rule decides SHAPE only" in v7
+    assert "keeps the\n    purpose `navigation`" in v7
+    assert "never suppresses a purpose" in v7
+    # v7 is v6 plus that scoping, so everything v6 fixed is still in it.
+    for kept in ("are `layout_container`. No exception.", "When attributes are unavailable, label from the tag"):
+        assert kept in v7
 
 
 def test_the_v6_prompt_carries_the_v6_policy_not_the_v5_one() -> None:
@@ -369,7 +385,7 @@ def test_a_policy_file_that_declares_the_wrong_revision_is_refused(tmp_path: Pat
 def test_an_unknown_revision_is_refused() -> None:
     with pytest.raises(ValueError, match="unknown policy revision"):
         luna_v5.prompt_revision("v9")
-    with pytest.raises(ValueError, match="revision must be v4, v5 or v6"):
+    with pytest.raises(ValueError, match="revision must be v4, v5, v6 or v7"):
         reviewer_b.Revision("v9")
 
 

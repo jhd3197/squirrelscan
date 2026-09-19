@@ -109,8 +109,8 @@ class Revision:
     """One prompt revision's packet source, instructions and validator."""
 
     def __init__(self, name: str) -> None:
-        if name not in {"v4", "v5", "v6"}:
-            raise ValueError("revision must be v4, v5 or v6")
+        if name not in {"v4", "v5", "v6", "v7"}:
+            raise ValueError("revision must be v4, v5, v6 or v7")
         self.name = name
         if name == "v4":
             self.module = _load("luna_batch")
@@ -202,7 +202,7 @@ def run_cli(prompt: str, log_path: Path) -> tuple[str, float, int]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--packets", type=Path, required=True)
-    parser.add_argument("--revision", choices=("v4", "v5", "v6"), required=True)
+    parser.add_argument("--revision", choices=("v4", "v5", "v6", "v7"), required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--runs-dir", type=Path, required=True)
     parser.add_argument("--batch-size", type=int, default=20)

@@ -36,6 +36,24 @@ axes, so v4 and v5 outputs stay comparable. Only page types and purposes change
 vocabulary, and both changes are recorded as explicit maps rather than applied
 silently.
 
+## Frozen revision: **v7**
+
+`policy-v7.md` is the frozen labelling revision for `divsoup-eval-v1` and the
+20,000-node run. No further prompt edits without agreement.
+
+v7 is v6 plus one sentence scoping the chrome rule to the shape axis. Measured
+on the same 115 nodes (all 35 `header`, all 40 `footer`, a deterministic
+40-node control across the other strata):
+
+| within reviewer B, 115 nodes | componentType | purposes micro-F1 | regions micro-F1 |
+|---|---:|---:|---:|
+| v5 | 67.0% | 0.710 | 0.934 |
+| v6 | 88.7% | **0.187** | 0.924 |
+| **v7** | **90.3%** | **0.779** | 0.925 |
+
+The leak is closed and componentType did not pay for it: Jev's `navigation`
+purpose on `header` recovered 0 → 27 and on `footer` 0 → 37.
+
 ## Pilot result, 2026-09-19: G1 passes at v6, 84.5%
 
 200 nodes and 125 pages, stratified to oversample the measured failure
