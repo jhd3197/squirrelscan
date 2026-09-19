@@ -7,6 +7,7 @@ import { cacheReasonsLabel, cacheStatsSummaryLine } from "../cache-stats";
 import { reportFailureReasonCode } from "../failure-notice";
 import { getScoreGrade } from "../scoring";
 import { REPORT_SOURCE_PAGES_PREVIEW, REPORT_PAGES_HARD_CAP } from "../constants";
+import { fixGroupLine, ruleFixCoverage } from "../component-presentation";
 import { groupIssuesByCategory, flattenIssuesBySeverity } from "../grouping";
 import { entityMarkdownSection } from "../entities";
 import { groupTechnologies, techChangeSummary, techIconUrl } from "../technologies";
@@ -377,21 +378,12 @@ export function renderMarkdown(report: AuditReport, options?: MarkdownRenderOpti
         lines.push("");
       }
 
-      for (const fixGroup of rule.componentFixGroups ?? []) {
+      const coverage = ruleFixCoverage(rule);
+      for (const fixGroup of coverage.groups) {
+        // One actionable line per repair target. No hashes or internal keys.
         lines.push(
-          `**Actionable component fix target:** \`${fixGroup.defect.kind}\` in \`${fixGroup.region.role}\` (${fixGroup.region.nestedIn}), slot \`${fixGroup.semanticSlot}\`; ${fixGroup.affectedPageCount} affected page(s), ${fixGroup.occurrences.length} observed occurrence(s).`,
+          `**${fixGroupLine(fixGroup, REPORT_SOURCE_PAGES_PREVIEW, (page) => getPathname(page) || "/")}**`,
         );
-        lines.push("");
-        lines.push(`Safe values: \`${JSON.stringify(fixGroup.defect.values)}\``);
-        lines.push(`Value hashes: \`${JSON.stringify(fixGroup.defect.valueHashes)}\``);
-        const sample = fixGroup.affectedPages.slice(0, REPORT_SOURCE_PAGES_PREVIEW);
-        if (sample.length > 0) {
-          lines.push("");
-          for (const page of sample) lines.push(`- [${getPathname(page) || "/"}](${page})`);
-          if (sample.length < fixGroup.affectedPageCount) {
-            lines.push(`- _Showing ${sample.length} bounded URL examples of ${fixGroup.affectedPageCount} affected pages._`);
-          }
-        }
         lines.push("");
       }
 
@@ -430,13 +422,25 @@ export function renderMarkdown(report: AuditReport, options?: MarkdownRenderOpti
         // #1023 R-F: count is the AUTHORITATIVE affected-page total (from the
         // shared accessor), the listed pages are a labeled example subset.
         const ap = affectedPages(check);
-        if (ap.sample.length > 0) {
-          const materialized =
-            ap.sample.length > REPORT_PAGES_HARD_CAP
-              ? ap.sample.slice(0, REPORT_PAGES_HARD_CAP)
+        // Fully covered: the fix-once lines above already name every page, once
+        // per repair target. Repeating them per check is the noise this replaces.
+        const uncovered =
+          coverage.mode === "full"
+            ? []
+            : coverage.mode === "partial"
+              ? ap.sample.filter((page) => coverage.uncoveredPages.includes(page))
               : ap.sample;
+        if (uncovered.length > 0) {
+          const materialized =
+            uncovered.length > REPORT_PAGES_HARD_CAP
+              ? uncovered.slice(0, REPORT_PAGES_HARD_CAP)
+              : uncovered;
+          const summary =
+            coverage.mode === "partial"
+              ? `${uncovered.length} page(s) not attributed to a shared component`
+              : `${ap.count} page(s) affected`;
           lines.push(
-            `<details><summary><strong>${check.name}:</strong> ${ap.count} page(s) affected</summary>`,
+            `<details><summary><strong>${check.name}:</strong> ${summary}</summary>`,
           );
           lines.push("");
           if (ap.count > materialized.length) {

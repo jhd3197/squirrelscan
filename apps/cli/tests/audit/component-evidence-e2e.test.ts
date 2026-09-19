@@ -179,22 +179,24 @@ describe("#2307 component evidence survives the real audit pipeline", () => {
 
   test("the stored audit renders the group with a labelled page sample in llm, markdown and text", async () => {
     const llm = await cli(["report", "-f", "llm"]);
-    expect(llm).toContain("<component-fix-group");
-    expect(llm).toContain('defect_kind="stale-copyright"');
-    expect(llm).toContain('affected_pages="3"');
-    expect(llm).toMatch(
-      /<affected-page-sample bounded="true" shown="\d+" total="3">/
+    expect(llm).toContain(
+      '<fix-once pages="3">Fix once in the site footer: copyright year 2019 is behind 2026, 3 pages: /, /about, /docs [footer &gt; p:1]</fix-once>'
     );
+    // The group REPLACED the legacy lines for that rule rather than joining them.
+    expect(llm).not.toContain("Pages (3)");
+    expect(llm).not.toContain("s128:");
 
     const markdown = await cli(["report", "-f", "markdown"]);
-    expect(markdown).toContain("**Actionable component fix target:**");
-    expect(markdown).toContain("3 affected page(s)");
+    expect(markdown).toContain(
+      "**Fix once in the site footer (footer > p:1): copyright year 2019 is behind 2026, 3 pages: /, /about, /docs**"
+    );
+    expect(markdown).not.toContain("s128:");
 
     const text = await cli(["report", "-f", "text"]);
     expect(text).toContain(
-      "Actionable component fix target: stale-copyright in footer (none)"
+      "Fix once in the site footer (footer > p:1): copyright year 2019 is behind 2026, 3 pages: /, /about, /docs"
     );
-    expect(text).toContain("3 affected page(s)");
+    expect(text).not.toContain("s128:");
   }, 120_000);
 
   test("reimporting the JSON with -i keeps the evidence and re-derives the same group", async () => {
@@ -235,10 +237,9 @@ describe("#2307 component evidence survives the real audit pipeline", () => {
     expect(groups[0].id).toBe(originalGroup.id);
 
     const llm = await cli(["report", "-i", file, "-f", "llm"]);
-    expect(llm).toContain("<component-fix-group");
-    expect(llm).toContain('affected_pages="3"');
-    expect(llm).toMatch(
-      /<affected-page-sample bounded="true" shown="\d+" total="3">/
+    expect(llm).toContain('<fix-once pages="3">');
+    expect(llm).toContain(
+      "Fix once in the site footer: copyright year 2019 is behind 2026"
     );
   }, 120_000);
 });

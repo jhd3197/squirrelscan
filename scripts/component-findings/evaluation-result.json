@@ -32,6 +32,32 @@
       },
       "orderInvariant": true,
       "orderingsCompared": 4,
+      "renderedSize": {
+        "llm": {
+          "before": {
+            "lines": 13,
+            "bytes": 533,
+            "approxTokens": 133
+          },
+          "after": {
+            "lines": 13,
+            "bytes": 645,
+            "approxTokens": 161
+          }
+        },
+        "markdown": {
+          "before": {
+            "lines": 55,
+            "bytes": 1400,
+            "approxTokens": 350
+          },
+          "after": {
+            "lines": 49,
+            "bytes": 1290,
+            "approxTokens": 323
+          }
+        }
+      },
       "evidenceShape": {
         "occurrenceCount": 3,
         "allCarrySiteOrigin": true,
@@ -113,6 +139,32 @@
       },
       "orderInvariant": true,
       "orderingsCompared": 2,
+      "renderedSize": {
+        "llm": {
+          "before": {
+            "lines": 13,
+            "bytes": 519,
+            "approxTokens": 130
+          },
+          "after": {
+            "lines": 14,
+            "bytes": 753,
+            "approxTokens": 188
+          }
+        },
+        "markdown": {
+          "before": {
+            "lines": 54,
+            "bytes": 1346,
+            "approxTokens": 337
+          },
+          "after": {
+            "lines": 51,
+            "bytes": 1367,
+            "approxTokens": 342
+          }
+        }
+      },
       "evidenceShape": {
         "occurrenceCount": 2,
         "allCarrySiteOrigin": true,
@@ -200,6 +252,32 @@
       },
       "orderInvariant": true,
       "orderingsCompared": 1,
+      "renderedSize": {
+        "llm": {
+          "before": {
+            "lines": 15,
+            "bytes": 524,
+            "approxTokens": 131
+          },
+          "after": {
+            "lines": 14,
+            "bytes": 741,
+            "approxTokens": 185
+          }
+        },
+        "markdown": {
+          "before": {
+            "lines": 60,
+            "bytes": 1291,
+            "approxTokens": 323
+          },
+          "after": {
+            "lines": 58,
+            "bytes": 1350,
+            "approxTokens": 338
+          }
+        }
+      },
       "evidenceShape": {
         "occurrenceCount": 2,
         "allCarrySiteOrigin": true,
@@ -289,6 +367,32 @@
       },
       "orderInvariant": true,
       "orderingsCompared": 2,
+      "renderedSize": {
+        "llm": {
+          "before": {
+            "lines": 15,
+            "bytes": 536,
+            "approxTokens": 134
+          },
+          "after": {
+            "lines": 14,
+            "bytes": 733,
+            "approxTokens": 183
+          }
+        },
+        "markdown": {
+          "before": {
+            "lines": 62,
+            "bytes": 1375,
+            "approxTokens": 344
+          },
+          "after": {
+            "lines": 59,
+            "bytes": 1388,
+            "approxTokens": 347
+          }
+        }
+      },
       "evidenceShape": {
         "occurrenceCount": 2,
         "allCarrySiteOrigin": true,
@@ -378,6 +482,32 @@
       },
       "orderInvariant": true,
       "orderingsCompared": 2,
+      "renderedSize": {
+        "llm": {
+          "before": {
+            "lines": 15,
+            "bytes": 588,
+            "approxTokens": 147
+          },
+          "after": {
+            "lines": 13,
+            "bytes": 629,
+            "approxTokens": 157
+          }
+        },
+        "markdown": {
+          "before": {
+            "lines": 62,
+            "bytes": 1479,
+            "approxTokens": 370
+          },
+          "after": {
+            "lines": 57,
+            "bytes": 1377,
+            "approxTokens": 344
+          }
+        }
+      },
       "evidenceShape": {
         "occurrenceCount": 2,
         "allCarrySiteOrigin": true,
@@ -456,6 +586,32 @@
       },
       "orderInvariant": true,
       "orderingsCompared": 2,
+      "renderedSize": {
+        "llm": {
+          "before": {
+            "lines": 15,
+            "bytes": 535,
+            "approxTokens": 134
+          },
+          "after": {
+            "lines": 13,
+            "bytes": 605,
+            "approxTokens": 151
+          }
+        },
+        "markdown": {
+          "before": {
+            "lines": 62,
+            "bytes": 1368,
+            "approxTokens": 342
+          },
+          "after": {
+            "lines": 57,
+            "bytes": 1295,
+            "approxTokens": 324
+          }
+        }
+      },
       "evidenceShape": {
         "occurrenceCount": 3,
         "allCarrySiteOrigin": true,
@@ -537,6 +693,32 @@
       },
       "orderInvariant": true,
       "orderingsCompared": 2,
+      "renderedSize": {
+        "llm": {
+          "before": {
+            "lines": 13,
+            "bytes": 515,
+            "approxTokens": 129
+          },
+          "after": {
+            "lines": 13,
+            "bytes": 626,
+            "approxTokens": 157
+          }
+        },
+        "markdown": {
+          "before": {
+            "lines": 53,
+            "bytes": 1312,
+            "approxTokens": 328
+          },
+          "after": {
+            "lines": 49,
+            "bytes": 1271,
+            "approxTokens": 318
+          }
+        }
+      },
       "evidenceShape": {
         "occurrenceCount": 1,
         "allCarrySiteOrigin": true,
@@ -610,6 +792,32 @@
       },
       "orderInvariant": true,
       "orderingsCompared": 1,
+      "renderedSize": {
+        "llm": {
+          "before": {
+            "lines": 15,
+            "bytes": 516,
+            "approxTokens": 129
+          },
+          "after": {
+            "lines": 15,
+            "bytes": 516,
+            "approxTokens": 129
+          }
+        },
+        "markdown": {
+          "before": {
+            "lines": 60,
+            "bytes": 1275,
+            "approxTokens": 319
+          },
+          "after": {
+            "lines": 60,
+            "bytes": 1275,
+            "approxTokens": 319
+          }
+        }
+      },
       "evidenceShape": {
         "occurrenceCount": 2,
         "allCarrySiteOrigin": true,
@@ -673,6 +881,32 @@
       },
       "orderInvariant": true,
       "orderingsCompared": 1,
+      "renderedSize": {
+        "llm": {
+          "before": {
+            "lines": 15,
+            "bytes": 516,
+            "approxTokens": 129
+          },
+          "after": {
+            "lines": 15,
+            "bytes": 516,
+            "approxTokens": 129
+          }
+        },
+        "markdown": {
+          "before": {
+            "lines": 60,
+            "bytes": 1275,
+            "approxTokens": 319
+          },
+          "after": {
+            "lines": 60,
+            "bytes": 1275,
+            "approxTokens": 319
+          }
+        }
+      },
       "evidenceShape": {
         "occurrenceCount": 2,
         "allCarrySiteOrigin": true,
@@ -738,6 +972,32 @@
       },
       "orderInvariant": true,
       "orderingsCompared": 2,
+      "renderedSize": {
+        "llm": {
+          "before": {
+            "lines": 15,
+            "bytes": 540,
+            "approxTokens": 135
+          },
+          "after": {
+            "lines": 13,
+            "bytes": 605,
+            "approxTokens": 151
+          }
+        },
+        "markdown": {
+          "before": {
+            "lines": 62,
+            "bytes": 1383,
+            "approxTokens": 346
+          },
+          "after": {
+            "lines": 57,
+            "bytes": 1305,
+            "approxTokens": 326
+          }
+        }
+      },
       "evidenceShape": {
         "occurrenceCount": 2,
         "allCarrySiteOrigin": true,
@@ -814,6 +1074,32 @@
       },
       "orderInvariant": true,
       "orderingsCompared": 1,
+      "renderedSize": {
+        "llm": {
+          "before": {
+            "lines": 13,
+            "bytes": 516,
+            "approxTokens": 129
+          },
+          "after": {
+            "lines": 13,
+            "bytes": 516,
+            "approxTokens": 129
+          }
+        },
+        "markdown": {
+          "before": {
+            "lines": 53,
+            "bytes": 1314,
+            "approxTokens": 329
+          },
+          "after": {
+            "lines": 53,
+            "bytes": 1314,
+            "approxTokens": 329
+          }
+        }
+      },
       "evidenceShape": {
         "occurrenceCount": 0,
         "allCarrySiteOrigin": true,
@@ -869,6 +1155,32 @@
       },
       "orderInvariant": true,
       "orderingsCompared": 2,
+      "renderedSize": {
+        "llm": {
+          "before": {
+            "lines": 15,
+            "bytes": 544,
+            "approxTokens": 136
+          },
+          "after": {
+            "lines": 13,
+            "bytes": 607,
+            "approxTokens": 152
+          }
+        },
+        "markdown": {
+          "before": {
+            "lines": 62,
+            "bytes": 1391,
+            "approxTokens": 348
+          },
+          "after": {
+            "lines": 57,
+            "bytes": 1311,
+            "approxTokens": 328
+          }
+        }
+      },
       "evidenceShape": {
         "occurrenceCount": 4,
         "allCarrySiteOrigin": true,
@@ -954,6 +1266,32 @@
       },
       "orderInvariant": true,
       "orderingsCompared": 2,
+      "renderedSize": {
+        "llm": {
+          "before": {
+            "lines": 13,
+            "bytes": 538,
+            "approxTokens": 135
+          },
+          "after": {
+            "lines": 14,
+            "bytes": 772,
+            "approxTokens": 193
+          }
+        },
+        "markdown": {
+          "before": {
+            "lines": 54,
+            "bytes": 1340,
+            "approxTokens": 335
+          },
+          "after": {
+            "lines": 51,
+            "bytes": 1365,
+            "approxTokens": 341
+          }
+        }
+      },
       "evidenceShape": {
         "occurrenceCount": 2,
         "allCarrySiteOrigin": true,
@@ -1042,6 +1380,32 @@
       },
       "orderInvariant": true,
       "orderingsCompared": 1,
+      "renderedSize": {
+        "llm": {
+          "before": {
+            "lines": 15,
+            "bytes": 514,
+            "approxTokens": 129
+          },
+          "after": {
+            "lines": 15,
+            "bytes": 514,
+            "approxTokens": 129
+          }
+        },
+        "markdown": {
+          "before": {
+            "lines": 60,
+            "bytes": 1271,
+            "approxTokens": 318
+          },
+          "after": {
+            "lines": 60,
+            "bytes": 1271,
+            "approxTokens": 318
+          }
+        }
+      },
       "evidenceShape": {
         "occurrenceCount": 1,
         "allCarrySiteOrigin": true,
@@ -1103,6 +1467,32 @@
       },
       "orderInvariant": true,
       "orderingsCompared": 1,
+      "renderedSize": {
+        "llm": {
+          "before": {
+            "lines": 15,
+            "bytes": 518,
+            "approxTokens": 130
+          },
+          "after": {
+            "lines": 13,
+            "bytes": 593,
+            "approxTokens": 148
+          }
+        },
+        "markdown": {
+          "before": {
+            "lines": 60,
+            "bytes": 1279,
+            "approxTokens": 320
+          },
+          "after": {
+            "lines": 56,
+            "bytes": 1237,
+            "approxTokens": 309
+          }
+        }
+      },
       "evidenceShape": {
         "occurrenceCount": 2,
         "allCarrySiteOrigin": true,
@@ -1168,6 +1558,66 @@
     "readable": true,
     "conservative": true
   },
+  "renderedSizeAtScale": [
+    {
+      "pages": 12,
+      "llm": {
+        "before": {
+          "lines": 15,
+          "bytes": 564,
+          "approxTokens": 141
+        },
+        "after": {
+          "lines": 13,
+          "bytes": 620,
+          "approxTokens": 155
+        }
+      },
+      "markdown": {
+        "before": {
+          "lines": 74,
+          "bytes": 1786,
+          "approxTokens": 447
+        },
+        "after": {
+          "lines": 59,
+          "bytes": 1364,
+          "approxTokens": 341
+        }
+      }
+    },
+    {
+      "pages": 60,
+      "llm": {
+        "before": {
+          "lines": 15,
+          "bytes": 565,
+          "approxTokens": 141
+        },
+        "after": {
+          "lines": 13,
+          "bytes": 622,
+          "approxTokens": 156
+        }
+      },
+      "markdown": {
+        "before": {
+          "lines": 122,
+          "bytes": 3610,
+          "approxTokens": 903
+        },
+        "after": {
+          "lines": 59,
+          "bytes": 1365,
+          "approxTokens": 341
+        }
+      }
+    }
+  ],
+  "storedAudit": {
+    "measured": false,
+    "reason": "SQUIRREL_EVAL_AUDIT_HOME not set"
+  },
   "jsonSerialization": {
     "bytes": 6859,
     "checkOccurrenceCount": 3,
@@ -1226,9 +1676,9 @@
           "warmups": 2,
           "repeats": 7,
           "milliseconds": {
-            "min": 0.464,
-            "median": 0.596,
-            "max": 1.119
+            "min": 0.433,
+            "median": 0.538,
+            "max": 0.784
           },
           "rawReportViewSerializedBytes": {
             "checks": 2384,
@@ -1243,8 +1693,8 @@
           },
           "renderedJsonBytesAtFullWidthSignatures": 2632,
           "heap": {
-            "beforeBytes": 14806099,
-            "afterBytes": 14806099,
+            "beforeBytes": 14632980,
+            "afterBytes": 14632980,
             "deltaBytes": 0,
             "gcBeforeMeasurement": true
           }
@@ -1253,9 +1703,9 @@
           "warmups": 2,
           "repeats": 7,
           "milliseconds": {
-            "min": 4.897,
-            "median": 5.273,
-            "max": 6.991
+            "min": 4.447,
+            "median": 4.818,
+            "max": 6.141
           },
           "rawReportViewSerializedBytes": {
             "checks": 24686,
@@ -1270,9 +1720,9 @@
           },
           "renderedJsonBytesAtFullWidthSignatures": 54510,
           "heap": {
-            "beforeBytes": 14806099,
-            "afterBytes": 18515152,
-            "deltaBytes": 3709053,
+            "beforeBytes": 14632980,
+            "afterBytes": 18894352,
+            "deltaBytes": 4261372,
             "gcBeforeMeasurement": true
           }
         }
@@ -1284,9 +1734,9 @@
           "warmups": 2,
           "repeats": 7,
           "milliseconds": {
-            "min": 0.235,
-            "median": 0.241,
-            "max": 0.47
+            "min": 0.273,
+            "median": 0.411,
+            "max": 0.558
           },
           "rawReportViewSerializedBytes": {
             "checks": 1858,
@@ -1301,8 +1751,8 @@
           },
           "renderedJsonBytesAtFullWidthSignatures": 1815,
           "heap": {
-            "beforeBytes": 18515152,
-            "afterBytes": 18515152,
+            "beforeBytes": 18894352,
+            "afterBytes": 18894352,
             "deltaBytes": 0,
             "gcBeforeMeasurement": true
           }
@@ -1311,9 +1761,9 @@
           "warmups": 2,
           "repeats": 7,
           "milliseconds": {
-            "min": 1.205,
-            "median": 1.253,
-            "max": 1.488
+            "min": 1.203,
+            "median": 1.293,
+            "max": 1.678
           },
           "rawReportViewSerializedBytes": {
             "checks": 9176,
@@ -1328,8 +1778,8 @@
           },
           "renderedJsonBytesAtFullWidthSignatures": 20316,
           "heap": {
-            "beforeBytes": 18515152,
-            "afterBytes": 18515152,
+            "beforeBytes": 18894352,
+            "afterBytes": 18894352,
             "deltaBytes": 0,
             "gcBeforeMeasurement": true
           }
@@ -1342,9 +1792,9 @@
           "warmups": 2,
           "repeats": 7,
           "milliseconds": {
-            "min": 1.507,
-            "median": 1.623,
-            "max": 3.058
+            "min": 1.478,
+            "median": 1.602,
+            "max": 1.769
           },
           "rawReportViewSerializedBytes": {
             "checks": 165,
@@ -1359,8 +1809,8 @@
           },
           "renderedJsonBytesAtFullWidthSignatures": 1488,
           "heap": {
-            "beforeBytes": 18515152,
-            "afterBytes": 18515152,
+            "beforeBytes": 18894352,
+            "afterBytes": 18894352,
             "deltaBytes": 0,
             "gcBeforeMeasurement": true
           }
@@ -1369,9 +1819,9 @@
           "warmups": 2,
           "repeats": 7,
           "milliseconds": {
-            "min": 27.815,
-            "median": 32.793,
-            "max": 37.23
+            "min": 27.102,
+            "median": 32.476,
+            "max": 34.636
           },
           "rawReportViewSerializedBytes": {
             "checks": 1031083,
@@ -1386,9 +1836,9 @@
           },
           "renderedJsonBytesAtFullWidthSignatures": 1232441,
           "heap": {
-            "beforeBytes": 46453685,
-            "afterBytes": 62508236,
-            "deltaBytes": 16054551,
+            "beforeBytes": 48727080,
+            "afterBytes": 66963994,
+            "deltaBytes": 18236914,
             "gcBeforeMeasurement": true
           }
         }

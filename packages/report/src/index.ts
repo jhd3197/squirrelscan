@@ -53,6 +53,18 @@ export {
   componentOccurrenceKey,
 } from "./component-fix-groups";
 export type { ComponentFixGroup } from "./component-fix-groups";
+// Human-facing presentation of those groups. Renderers share these so llm,
+// markdown, text and console cannot drift in wording or in what they suppress.
+export {
+  describeDefect,
+  describeRegion,
+  describeSlot,
+  fixGroupLine,
+  fixGroupPages,
+  formatPageSample,
+  ruleFixCoverage,
+} from "./component-presentation";
+export type { FixCoverage, FixCoverageMode, PageSample } from "./component-presentation";
 
 // Scoring
 export { getScoreGrade, getScoreColor, getGroupColor, GROUP_COLORS } from "./scoring";

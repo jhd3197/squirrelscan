@@ -7,6 +7,7 @@ import { cacheReasonsLabel, cacheStatsSummaryLine } from "../cache-stats";
 import { reportFailureReasonCode } from "../failure-notice";
 import { getScoreGrade } from "../scoring";
 import { REPORT_TEXT_WRAP_WIDTH } from "../constants";
+import { fixGroupLine, ruleFixCoverage } from "../component-presentation";
 import { groupIssuesByCategory, flattenIssuesBySeverity } from "../grouping";
 import { affectedPages } from "../affected-pages";
 import {
@@ -310,17 +311,10 @@ export function renderText(report: AuditReport, options?: TextRenderOptions): st
         write(`  Solution: ${wrapped[0]}`);
         for (const line of wrapped.slice(1)) write(`            ${line}`);
       }
-      for (const fixGroup of rule.componentFixGroups ?? []) {
-        write(
-          `    Actionable component fix target: ${fixGroup.defect.kind} in ${fixGroup.region.role} (${fixGroup.region.nestedIn}), slot ${fixGroup.semanticSlot}; ${fixGroup.affectedPageCount} affected page(s), ${fixGroup.occurrences.length} observed occurrence(s)`,
-        );
-        write(`        Values: ${JSON.stringify(fixGroup.defect.values)}`);
-        write(`        Value hashes: ${JSON.stringify(fixGroup.defect.valueHashes)}`);
-        const sample = fixGroup.affectedPages.slice(0, 10);
-        for (const page of sample) write(`        -> ${pathOnly(page)}`);
-        if (sample.length < fixGroup.affectedPageCount) {
-          write(`        ... showing ${sample.length} bounded URL examples of ${fixGroup.affectedPageCount}`);
-        }
+      const coverage = ruleFixCoverage(rule);
+      for (const fixGroup of coverage.groups) {
+        // One actionable line. Hashes and internal keys stay in JSON.
+        write(`    ${fixGroupLine(fixGroup, 5, pathOnly)}`);
       }
       write("");
 
@@ -337,12 +331,24 @@ export function renderText(report: AuditReport, options?: TextRenderOptions): st
           );
         }
 
-        if (sample.length > 0) {
-          for (const page of sample) write(`        -> ${pathOnly(page)}`);
-          if (hasMore) write(`        ... and ${count - sample.length} more`);
+        // Fully covered: the fix-once lines above already list every page.
+        const uncovered =
+          coverage.mode === "full"
+            ? []
+            : coverage.mode === "partial"
+              ? sample.filter((page) => coverage.uncoveredPages.includes(page))
+              : sample;
+        if (uncovered.length > 0) {
+          if (coverage.mode === "partial") {
+            write(`        Not attributed to a shared component (${uncovered.length}):`);
+          }
+          for (const page of uncovered) write(`        -> ${pathOnly(page)}`);
+          if (coverage.mode === "none" && hasMore) {
+            write(`        ... and ${count - sample.length} more`);
+          }
         }
 
-        if (check.items && check.items.length > 0) {
+        if (check.items && check.items.length > 0 && coverage.mode !== "full") {
           for (const item of check.items) {
             const label = item.label ?? item.id;
             write(`        -> ${label}`);

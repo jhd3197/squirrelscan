@@ -10,6 +10,8 @@ import {
   componentOccurrenceIdentity,
 } from "../../packages/report/src/component-fix-groups.ts";
 import { renderJson } from "../../packages/report/src/output/json.ts";
+import { renderLlm } from "../../packages/report/src/output/llm.ts";
+import { renderMarkdown } from "../../packages/report/src/output/markdown.ts";
 import { packComponentOccurrences } from "../../packages/core-contracts/src/component-evidence.ts";
 import { staleCopyrightRule } from "../../packages/rules/src/content/stale-copyright.ts";
 import { linkTextRule } from "../../packages/rules/src/a11y/link-text.ts";
@@ -564,6 +566,78 @@ function benchmark(rule: Rule, pages: Page[]) {
   };
 }
 
+
+/**
+ * Output cost with and without fix-group rendering, over the SAME findings.
+ * "Before" strips the evidence, which is exactly what v0.0.96 emitted, so the
+ * delta is what the feature adds or removes rather than a guess.
+ */
+function renderedSize(rule: Rule, checks: CheckResult[]) {
+  const measure = (text: string) => ({
+    lines: text.split("\n").length,
+    bytes: Buffer.byteLength(text),
+    approxTokens: Math.round(Buffer.byteLength(text) / 4),
+  });
+  const withGroups = reportFor(rule, checks);
+  const withoutGroups = reportFor(
+    rule,
+    checks.map(({ componentOccurrences: _dropped, ...rest }) => rest),
+  );
+  return {
+    llm: { before: measure(renderLlm(withoutGroups)), after: measure(renderLlm(withGroups)) },
+    markdown: {
+      before: measure(renderMarkdown(withoutGroups)),
+      after: measure(renderMarkdown(withGroups)),
+    },
+  };
+}
+
+
+/**
+ * The scenario fix groups exist for: ONE shared component across many pages.
+ * The synthetic correctness corpus is deliberately 2-3 pages per case, where a
+ * one-line group replaces a one-line page list and the wording costs more than
+ * it saves — so measuring only that would misreport the feature as a
+ * regression. This measures the shape the feature targets.
+ */
+function renderedSizeAtScale(pageCount: number) {
+  const pages = Array.from({ length: pageCount }, (_, i) => ({
+    url: `https://example.invalid/p${i}`,
+    html: "<header><nav><a href='/'>Website</a></nav></header><main><h1>Page</h1></main>",
+  }));
+  return { pages: pageCount, ...renderedSize(current.link, run(current.link, pages)) };
+}
+
+/**
+ * A stored real audit, when `SQUIRREL_EVAL_AUDIT_HOME` points at a squirrel
+ * home directory. AFTER only: a stored audit cannot be re-rendered as the
+ * pre-feature build would have rendered it, so no before/after is claimed.
+ */
+function storedAuditSize(): unknown {
+  const home = process.env.SQUIRREL_EVAL_AUDIT_HOME;
+  if (!home) return { measured: false, reason: "SQUIRREL_EVAL_AUDIT_HOME not set" };
+  const cli = resolve(root, "apps/cli/src/cli.ts");
+  const render = (format: string) => {
+    const out = Bun.spawnSync(["bun", "run", cli, "report", "-f", format], {
+      env: { ...process.env, HOME: home, NO_COLOR: "1", NO_TELEMETRY: "1" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    if (out.exitCode !== 0) return null;
+    const text = out.stdout.toString();
+    return {
+      lines: text.split("\n").length,
+      bytes: Buffer.byteLength(text),
+      approxTokens: Math.round(Buffer.byteLength(text) / 4),
+      fixOnceLines: (text.match(/Fix once in the |<fix-once /g) ?? []).length,
+    };
+  };
+  const llm = render("llm");
+  const markdown = render("markdown");
+  if (!llm || !markdown) return { measured: false, reason: "no stored audit in that home" };
+  return { measured: true, note: "after only; a stored audit cannot be re-rendered pre-feature", llm, markdown };
+}
+
 const baseline = await loadBaseline();
 const current: Record<RuleName, Rule> = { stale: staleCopyrightRule, link: linkTextRule };
 const evaluated = cases.map((entry) => {
@@ -618,6 +692,7 @@ const evaluated = cases.map((entry) => {
     originalDetections,
     orderInvariant,
     orderingsCompared: orderings.length,
+    renderedSize: renderedSize(current[entry.rule], after),
     evidenceShape: shape,
     affectedPageCoverage: coverage,
     legacyMessageGroups,
@@ -870,6 +945,8 @@ const output = {
   },
   cases: evaluated,
   legacy,
+  renderedSizeAtScale: [renderedSizeAtScale(12), renderedSizeAtScale(60)],
+  storedAudit: storedAuditSize(),
   jsonSerialization: serialization,
   foldPageSample: foldEvidence,
   totals,

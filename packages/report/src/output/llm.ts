@@ -22,6 +22,17 @@ import {
   stableIdPercent,
 } from "../entities";
 import { seedRedirect } from "../coverage";
+import {
+  describeDefect,
+  describeRegion,
+  describeSlot,
+  fixGroupPages,
+  formatPageSample,
+  ruleFixCoverage,
+} from "../component-presentation";
+
+/** Bounded page sample per fix group in LLM output. */
+const LLM_FIX_GROUP_PAGES = 5;
 import { LLM_REPORT } from "@squirrelscan/core-contracts/limits";
 import { stripControlChars } from "@squirrelscan/core-contracts/control-chars";
 import { AUDIT_FAILURE_NEXT_STEP_THIRD } from "@squirrelscan/core-contracts/failure-reason";
@@ -371,17 +382,17 @@ export function renderLlm(report: AuditReport, options?: LlmRenderOptions): stri
   
       const messages = rule.checks.map((c) => c.message).filter((m) => m);
       if (messages.length > 0) lines.push(`${indent(2)}${escapeXml(messages.join("; "))}`);
-      for (const fixGroup of rule.componentFixGroups ?? []) {
-        const sample = fixGroup.affectedPages.slice(0, 10);
+      const coverage = ruleFixCoverage(rule);
+      for (const fixGroup of coverage.groups) {
+        // One actionable line. No hashes, no signatures, no family/variant keys:
+        // those are grouping mechanics, and an agent cannot act on them.
         lines.push(
-          `${indent(2)}<component-fix-group rule_id="${escapeXml(fixGroup.ruleId)}" check="${escapeXml(fixGroup.check.name)}" status="${fixGroup.check.status}" attribution="${fixGroup.attribution}" affected_pages="${fixGroup.affectedPageCount}" occurrences="${fixGroup.occurrences.length}" defect_kind="${escapeXml(fixGroup.defect.kind)}" region="${escapeXml(fixGroup.region.role)}" nested_in="${escapeXml(fixGroup.region.nestedIn)}" semantic_slot="${escapeXml(fixGroup.semanticSlot)}">`,
+          `${indent(2)}<fix-once pages="${fixGroup.affectedPageCount}">${escapeXml(
+            `Fix once in the ${describeRegion(fixGroup)}: ${describeDefect(fixGroup)}, ${formatPageSample(
+              fixGroupPages(fixGroup, LLM_FIX_GROUP_PAGES, (page) => compressUrl(page, baseOrigin)),
+            )} [${describeSlot(fixGroup)}]`,
+          )}</fix-once>`,
         );
-        lines.push(`${indent(3)}<defect-values>${escapeXml(JSON.stringify(fixGroup.defect.values))}</defect-values>`);
-        lines.push(`${indent(3)}<defect-value-hashes>${escapeXml(JSON.stringify(fixGroup.defect.valueHashes))}</defect-value-hashes>`);
-        lines.push(
-          `${indent(3)}<affected-page-sample bounded="true" shown="${sample.length}" total="${fixGroup.affectedPageCount}">${escapeXml(sample.map((page) => compressUrl(page, baseOrigin)).join(", "))}</affected-page-sample>`,
-        );
-        lines.push(`${indent(2)}</component-fix-group>`);
       }
       if (rule.mixedProvenanceNote) {
         lines.push(`${indent(2)}${escapeXml(rule.mixedProvenanceNote)}`);
@@ -399,12 +410,27 @@ export function renderLlm(report: AuditReport, options?: LlmRenderOptions): stri
       const totalPages = rollup.count;
       const totalLabel = `${totalPages}${rollup.hasMore ? "+" : ""}`;
   
-      if (allPages.size > 0) {
-        const sampledPages = sampleAffectedPagesBreadthFirst(Array.from(allPages), baseOrigin);
+      // A fully covered rule has already said which pages are affected, once per
+      // repair target. Repeating them as a flat list is the noise this feature
+      // was supposed to remove.
+      const legacyPages =
+        coverage.mode === "full"
+          ? new Set<string>()
+          : coverage.mode === "partial"
+            ? new Set(coverage.uncoveredPages)
+            : allPages;
+      if (legacyPages.size > 0) {
+        const sampledPages = sampleAffectedPagesBreadthFirst(Array.from(legacyPages), baseOrigin);
         const pageList = sampledPages
           .map((p) => escapeXml(compressUrl(p, baseOrigin)))
           .join(", ");
-        if (sampledPages.length < totalPages) {
+        if (coverage.mode === "partial") {
+          // Explicit: these pages were NOT attributed to a shared component, so
+          // a reader never reads the absence of a group as "not affected".
+          lines.push(
+            `${indent(2)}Pages not attributed to a shared component (${legacyPages.size}): ${pageList}`,
+          );
+        } else if (sampledPages.length < totalPages) {
           lines.push(`${indent(2)}Pages (${sampledPages.length}/${totalLabel}): ${pageList}`);
         } else {
           lines.push(`${indent(2)}Pages (${totalLabel}): ${pageList}`);
@@ -416,7 +442,7 @@ export function renderLlm(report: AuditReport, options?: LlmRenderOptions): stri
         if (check.items && check.items.length > 0) allItems.push(...check.items);
       }
   
-      if (allItems.length > 0) {
+      if (allItems.length > 0 && coverage.mode !== "full") {
         const sampledItems = allItems.slice(0, LLM_REPORT.maxItems);
         lines.push(
           sampledItems.length < allItems.length

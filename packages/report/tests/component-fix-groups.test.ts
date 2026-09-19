@@ -79,10 +79,19 @@ describe("component-aware actionable groups (#2307)", () => {
     expect(json.defect).toEqual({ kind: "link-text-generic", values: { text: "Read more" }, valueHashes: { text: "h" } });
     expect(json.region).toMatchObject({ role: "footer", nestedIn: "none" });
     expect(json.semanticSlot).toBe("footer>a:1");
-    expect(renderLlm(r)).toContain('<component-fix-group');
-    expect(renderLlm(r)).toContain('affected_pages="2"');
-    expect(renderLlm(r)).toContain('<defect-values>{&quot;text&quot;:&quot;Read more&quot;}</defect-values>');
-    expect(renderText(r)).toContain("Actionable component fix target: link-text-generic in footer (none), slot footer>a:1; 2 affected page(s)");
+    // The group REPLACES the legacy lines rather than adding to them, and
+    // carries no hashes, signatures or internal keys.
+    const llm = renderLlm(r);
+    expect(llm).toContain(
+      '<fix-once pages="2">Fix once in the site footer: link text &quot;Read more&quot; is generic, 2 pages: /a, /b [a:1]</fix-once>',
+    );
+    expect(llm).not.toContain("Pages (2)");
+    expect(llm).not.toContain("s128:");
+    expect(llm).not.toContain("structuralSignature");
+    expect(renderText(r)).toContain(
+      'Fix once in the site footer (a:1): link text "Read more" is generic, 2 pages: /a, /b',
+    );
+    expect(renderText(r)).not.toContain("s128:");
   });
 
   test("keeps variant, element, check status, and site boundaries separate", () => {

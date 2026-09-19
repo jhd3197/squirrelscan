@@ -5,6 +5,7 @@ import type { EditorSummaryView } from "@squirrelscan/report";
 import { stripControlCharsPreservingSgr } from "@squirrelscan/core-contracts/control-chars";
 import { AUDIT_FAILURE_NEXT_STEP } from "@squirrelscan/core-contracts/failure-reason";
 import { reportFailureReasonCode } from "@squirrelscan/report";
+import { fixGroupLine, ruleFixCoverage } from "@squirrelscan/report";
 import {
   carriedTag,
   coverageLine,
@@ -260,32 +261,10 @@ export function generateConsoleReport(
           )
         );
 
-        for (const fixGroup of rule.componentFixGroups ?? []) {
-          log(
-            box.line(
-              `   ${fmt.bold("Actionable component fix target:")} ${fixGroup.defect.kind} in ${fixGroup.region.role} (${fixGroup.region.nestedIn}), slot ${fixGroup.semanticSlot}; ${fixGroup.affectedPageCount} affected page(s)`
-            )
-          );
-          log(
-            box.line(
-              `     ${fmt.dim(`values: ${JSON.stringify(fixGroup.defect.values)}`)}`
-            )
-          );
-          log(
-            box.line(
-              `     ${fmt.dim(`value hashes: ${JSON.stringify(fixGroup.defect.valueHashes)}`)}`
-            )
-          );
-          const sample = fixGroup.affectedPages.slice(0, 5);
-          for (const page of sample)
-            log(box.line(`     ${fmt.dim(`→ ${pathOnly(page)}`)}`));
-          if (sample.length < fixGroup.affectedPageCount) {
-            log(
-              box.line(
-                `     ${fmt.dim(`... showing ${sample.length} bounded URL examples of ${fixGroup.affectedPageCount}`)}`
-              )
-            );
-          }
+        const coverage = ruleFixCoverage(rule);
+        for (const fixGroup of coverage.groups) {
+          // One actionable line. Hashes and internal keys stay in JSON.
+          log(box.line(`   ${fmt.bold(fixGroupLine(fixGroup, 5, pathOnly))}`));
         }
 
         for (const check of rule.checks) {
@@ -298,21 +277,43 @@ export function generateConsoleReport(
               `   ${statusIcon} ${check.name}: ${check.message}${countStr}${carried}`
             )
           );
-          // Show affected pages (for page-scope rules)
-          if (pageCount > 0) {
+          // Show affected pages (for page-scope rules). A fully covered rule
+          // already listed them once per repair target above.
+          const uncovered =
+            coverage.mode === "full"
+              ? []
+              : coverage.mode === "partial"
+                ? check.pages.filter((page) =>
+                    coverage.uncoveredPages.includes(page)
+                  )
+                : check.pages;
+          if (uncovered.length > 0) {
             const maxPages = 5;
-            const pagesToShow = check.pages.slice(0, maxPages);
+            if (coverage.mode === "partial") {
+              log(
+                box.line(
+                  `     ${fmt.dim(`not attributed to a shared component (${uncovered.length}):`)}`
+                )
+              );
+            }
+            const pagesToShow = uncovered.slice(0, maxPages);
             for (const page of pagesToShow) {
               log(box.line(`     ${fmt.dim(`→ ${pathOnly(page)}`)}`));
             }
-            if (pageCount > maxPages) {
+            if (uncovered.length > maxPages) {
               log(
-                box.line(`     ${fmt.dim(`... +${pageCount - maxPages} more`)}`)
+                box.line(
+                  `     ${fmt.dim(`... +${uncovered.length - maxPages} more`)}`
+                )
               );
             }
           }
           // Show structured items (preferred)
-          if (check.items && check.items.length > 0) {
+          if (
+            check.items &&
+            check.items.length > 0 &&
+            coverage.mode !== "full"
+          ) {
             const maxItems = 5;
             const itemsToShow = check.items.slice(0, maxItems);
             for (const item of itemsToShow) {
