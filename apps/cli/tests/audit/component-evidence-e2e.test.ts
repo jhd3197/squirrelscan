@@ -237,6 +237,20 @@ describe("#2307 component evidence survives the real audit pipeline", () => {
     expect(groups[0].id).toBe(originalGroup.id);
 
     const llm = await cli(["report", "-i", file, "-f", "llm"]);
+    // The packed evidence tables must survive the reimport: a ladder index with
+    // no table re-derives a different group id.
+    const reimportedCheck = stale.checks.find(
+      (c: { componentShapes?: unknown }) => c.componentShapes !== undefined
+    );
+    if (reimportedCheck?.componentShapes?.ladders) {
+      for (const row of reimportedCheck.componentOccurrences ?? []) {
+        if (row.ladder === undefined) continue;
+        expect(
+          reimportedCheck.componentShapes.ladders[row.ladder]
+        ).toBeDefined();
+      }
+    }
+
     expect(llm).toContain('<fix-once pages="3">');
     expect(llm).toContain(
       "Fix once in the site footer: copyright year 2019 is behind 2026"

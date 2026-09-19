@@ -7,7 +7,8 @@ import { cacheReasonsLabel, cacheStatsSummaryLine } from "../cache-stats";
 import { reportFailureReasonCode } from "../failure-notice";
 import { getScoreGrade } from "../scoring";
 import { REPORT_SOURCE_PAGES_PREVIEW, REPORT_PAGES_HARD_CAP } from "../constants";
-import { fixGroupLine, ruleFixCoverage } from "../component-presentation";
+import { fixRollupLine, ruleFixCoverage } from "../component-presentation";
+import { componentFixRollups } from "../component-fix-rollup";
 import { formatSiteWideItem, siteWideContext, siteWideItem } from "../site-wide-items";
 import { groupIssuesByCategory, flattenIssuesBySeverity } from "../grouping";
 import { entityMarkdownSection } from "../entities";
@@ -383,10 +384,10 @@ export function renderMarkdown(report: AuditReport, options?: MarkdownRenderOpti
       }
 
       const coverage = ruleFixCoverage(rule);
-      for (const fixGroup of coverage.groups) {
-        // One actionable line per repair target. No hashes or internal keys.
+      for (const rollup of componentFixRollups(coverage.groups)) {
+        // One actionable line per REPAIR, not per faulty element in a block.
         lines.push(
-          `**${fixGroupLine(fixGroup, REPORT_SOURCE_PAGES_PREVIEW, (page) => getPathname(page) || "/")}**`,
+          `**${fixRollupLine(rollup, REPORT_SOURCE_PAGES_PREVIEW, (page) => getPathname(page) || "/")}**`,
         );
         lines.push("");
       }

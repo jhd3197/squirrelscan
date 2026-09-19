@@ -7,7 +7,8 @@ import { cacheReasonsLabel, cacheStatsSummaryLine } from "../cache-stats";
 import { reportFailureReasonCode } from "../failure-notice";
 import { getScoreGrade } from "../scoring";
 import { REPORT_TEXT_WRAP_WIDTH } from "../constants";
-import { fixGroupLine, ruleFixCoverage } from "../component-presentation";
+import { fixRollupLine, ruleFixCoverage } from "../component-presentation";
+import { componentFixRollups } from "../component-fix-rollup";
 import { formatSiteWideItem, siteWideContext, siteWideItem } from "../site-wide-items";
 import { groupIssuesByCategory, flattenIssuesBySeverity } from "../grouping";
 import { affectedPages } from "../affected-pages";
@@ -316,9 +317,9 @@ export function renderText(report: AuditReport, options?: TextRenderOptions): st
         for (const line of wrapped.slice(1)) write(`            ${line}`);
       }
       const coverage = ruleFixCoverage(rule);
-      for (const fixGroup of coverage.groups) {
-        // One actionable line. Hashes and internal keys stay in JSON.
-        write(`    ${fixGroupLine(fixGroup, 5, pathOnly)}`);
+      for (const rollup of componentFixRollups(coverage.groups)) {
+        // One actionable line per REPAIR, not per faulty element in a block.
+        write(`    ${fixRollupLine(rollup, 5, pathOnly)}`);
       }
       write("");
 

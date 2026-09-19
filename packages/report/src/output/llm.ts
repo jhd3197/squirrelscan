@@ -22,14 +22,8 @@ import {
   stableIdPercent,
 } from "../entities";
 import { seedRedirect } from "../coverage";
-import {
-  describeDefect,
-  describeRegion,
-  describeSlot,
-  fixGroupPages,
-  formatPageSample,
-  ruleFixCoverage,
-} from "../component-presentation";
+import { describeSlot, fixRollupLine, ruleFixCoverage } from "../component-presentation";
+import { componentFixRollups } from "../component-fix-rollup";
 
 /** Bounded page sample per fix group in LLM output. */
 const LLM_FIX_GROUP_PAGES = 5;
@@ -387,19 +381,19 @@ export function renderLlm(report: AuditReport, options?: LlmRenderOptions): stri
       const messages = rule.checks.map((c) => c.message).filter((m) => m);
       if (messages.length > 0) lines.push(`${indent(2)}${escapeXml(messages.join("; "))}`);
       const coverage = ruleFixCoverage(rule);
-      for (const fixGroup of coverage.groups) {
-        // One actionable line. No hashes, no signatures, no family/variant keys:
-        // those are grouping mechanics, and an agent cannot act on them.
+      for (const rollup of componentFixRollups(coverage.groups)) {
+        // One actionable line per REPAIR. No hashes, no signatures, no internal
+        // keys: an agent cannot act on grouping mechanics.
+        const repeated = rollup.representative.attribution === "repeated-subtree";
+        const tag = repeated ? "likely-shared-block" : "fix-once";
         lines.push(
-          `${indent(2)}<${fixGroup.attribution === "repeated-subtree" ? "likely-shared-block" : "fix-once"} pages="${fixGroup.affectedPageCount}">${escapeXml(
-            `${
-              fixGroup.attribution === "repeated-subtree"
-                ? `Likely one shared block in the ${describeRegion(fixGroup)}: ${describeDefect(fixGroup)}, seen on `
-                : `Fix once in the ${describeRegion(fixGroup)}: ${describeDefect(fixGroup)}, `
-            }${formatPageSample(
-              fixGroupPages(fixGroup, LLM_FIX_GROUP_PAGES, (page) => compressUrl(page, baseOrigin)),
-            )} [${describeSlot(fixGroup)}]`,
-          )}</${fixGroup.attribution === "repeated-subtree" ? "likely-shared-block" : "fix-once"}>`,
+          `${indent(2)}<${tag} pages="${rollup.affectedPageCount}"${
+            // Only when groups were actually merged: a single-group rollup must
+            // serialize exactly as it did before rollups existed.
+            rollup.groups.length > 1 ? ` elements="${rollup.elementCount}"` : ""
+          }>${escapeXml(
+            `${fixRollupLine(rollup, LLM_FIX_GROUP_PAGES, (page) => compressUrl(page, baseOrigin), false)} [${describeSlot(rollup.representative)}]`,
+          )}</${tag}>`,
         );
       }
       if (rule.mixedProvenanceNote) {

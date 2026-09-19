@@ -13,6 +13,8 @@
 // not to be read. JSON keeps them; it is the machine format.
 
 import type { ComponentFixGroup } from "./component-fix-groups";
+import type { ComponentFixRollup } from "./component-fix-rollup";
+import { describeRollupDefect } from "./component-fix-rollup";
 import type { GroupedRule } from "./grouping";
 import { ruleAffectedPages } from "./affected-pages";
 
@@ -178,6 +180,31 @@ export function formatPageSample(sample: PageSample, noun = "pages"): string {
 }
 
 /**
+ * The line for a ROLLUP: one repair, however many faulty elements it contains.
+ * A single-member rollup is worded exactly like the group it wraps, so adding
+ * rollups changes nothing for reports that have no repeated blocks.
+ */
+export function fixRollupLine(
+  rollup: ComponentFixRollup,
+  limit: number,
+  format: (page: string) => string,
+  /** false when the caller appends its own trailing slot hint (llm does). */
+  includeSlot = true,
+): string {
+  const group = rollup.representative;
+  if (rollup.groups.length === 1) return fixGroupLine(group, limit, format, includeSlot);
+  const where = includeSlot
+    ? `${describeRegion(group)} (${describeSlot(group)})`
+    : describeRegion(group);
+  const sample = fixGroupPages(group, limit, format);
+  const pages = formatPageSample(sample);
+  if (group.attribution === "repeated-subtree") {
+    return `Likely one shared block in the ${where}: ${describeRollupDefect(rollup)}, seen on ${pages}`;
+  }
+  return `Fix once in the ${where}: ${describeRollupDefect(rollup)}, ${pages}`;
+}
+
+/**
  * The single actionable line a fix group exists to produce.
  *
  * The wording tracks the ATTRIBUTION, because the two say different things.
@@ -189,12 +216,14 @@ export function fixGroupLine(
   group: ComponentFixGroup,
   limit: number,
   format: (page: string) => string,
+  includeSlot = true,
 ): string {
-  const where = describeRegion(group);
-  const slot = describeSlot(group);
+  const where = includeSlot
+    ? `${describeRegion(group)} (${describeSlot(group)})`
+    : describeRegion(group);
   const sample = fixGroupPages(group, limit, format);
   if (group.attribution === "repeated-subtree") {
-    return `Likely one shared block in the ${where} (${slot}): ${describeDefect(group)}, seen on ${formatPageSample(sample)}`;
+    return `Likely one shared block in the ${where}: ${describeDefect(group)}, seen on ${formatPageSample(sample)}`;
   }
-  return `Fix once in the ${where} (${slot}): ${describeDefect(group)}, ${formatPageSample(sample)}`;
+  return `Fix once in the ${where}: ${describeDefect(group)}, ${formatPageSample(sample)}`;
 }

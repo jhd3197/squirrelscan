@@ -173,7 +173,12 @@ interface SlimJsonReport {
        * there is one source of truth rather than two that can disagree.
        */
       componentOccurrences?: unknown;
-      componentShapes?: { v: number; shapes: unknown[] };
+      /**
+       * Lookup tables for the packed occurrences above. `ladders` must survive
+       * the reimport: without it a repeated-subtree group re-derives from rows
+       * whose ladder indices resolve to nothing, and the group id changes.
+       */
+      componentShapes?: { v: number; shapes: unknown[]; ladders?: unknown[] };
       componentEvidence?: CheckResult["componentEvidence"];
       legacyValue?: string;
     }>;

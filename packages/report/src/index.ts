@@ -61,10 +61,18 @@ export {
   describeSlot,
   fixGroupLine,
   fixGroupPages,
+  fixRollupLine,
   formatPageSample,
   ruleFixCoverage,
 } from "./component-presentation";
 export type { FixCoverage, FixCoverageMode, PageSample } from "./component-presentation";
+// One block, one line: roll up groups that are demonstrably the same repair.
+export {
+  ROLLUP_MAX_DISTINCT_VALUES,
+  componentFixRollups,
+  describeRollupDefect,
+} from "./component-fix-rollup";
+export type { ComponentFixRollup } from "./component-fix-rollup";
 // Site-wide item collapse: one shared resource on nearly every page.
 export {
   SITE_WIDE_MAX_EXCEPTIONS,

@@ -13,6 +13,7 @@ import type { ComponentFixGroup } from "../component-fix-groups";
 import type {
   ComponentShape,
   PackedComponentOccurrence,
+  PackedSubtreeLadder,
 } from "@squirrelscan/core-contracts/component-evidence";
 import { packComponentOccurrences } from "@squirrelscan/core-contracts/component-evidence";
 import { componentOccurrenceKey } from "../component-fix-groups";
@@ -20,6 +21,8 @@ import type { GroupedCheck } from "../grouping";
 
 import { REPORT_PAGES_HARD_CAP } from "../constants";
 import { siteWideContext, siteWideItem } from "../site-wide-items";
+import { componentFixRollups } from "../component-fix-rollup";
+import { ruleFixCoverage } from "../component-presentation";
 import { reportFailureReasonCode } from "../failure-notice";
 import { getScoreGrade } from "../scoring";
 import { getGroupName } from "../categories";
@@ -190,6 +193,20 @@ interface SlimJsonReport {
     severity: "error" | "warning" | "info";
     /** Additive, evidence-backed actionable targets; raw occurrences are complete. */
     componentFixGroups?: SlimComponentFixGroup[];
+    /**
+     * Groups that are ONE repair, referenced by id. Individual groups above are
+     * kept in full: this is an additive view, so a consumer that does not know
+     * about rollups reads exactly what it read before.
+     */
+    componentFixRollups?: Array<{
+      groupIds: string[];
+      affectedPageCount: number;
+      elementCount: number;
+      attribution: string;
+      defectKind: string;
+      distinctValues: string[];
+      additionalValues: number;
+    }>;
     checks: Array<{
       name: string;
       status: "fail" | "warn";
@@ -214,8 +231,18 @@ interface SlimJsonReport {
        * into this array are stable, so `occurrenceRefs` still address it.
        */
       componentOccurrences?: PackedComponentOccurrence[];
-      /** Shape table for `componentOccurrences`; `v` is the layout version. */
-      componentShapes?: { v: number; shapes: ComponentShape[] };
+      /**
+       * Lookup tables for `componentOccurrences`; `v` is the layout version.
+       * `ladders` is present only when some occurrence carries a subtree
+       * ladder, and every `ladder` index on a row resolves into it. Emitting
+       * the rows' indices without this table left consumers holding `ladder`
+       * and `ladderLocators` values that pointed at nothing.
+       */
+      componentShapes?: {
+        v: number;
+        shapes: ComponentShape[];
+        ladders?: PackedSubtreeLadder[];
+      };
       componentEvidence?: CheckResult["componentEvidence"];
       legacyValue?: string;
     }>;
@@ -380,6 +407,24 @@ function buildSlimReport(report: AuditReport, version: string): SlimJsonReport {
             ),
           }
         : {}),
+      ...(() => {
+        const rollups = componentFixRollups(ruleFixCoverage(rule).groups).filter(
+          (rollup) => rollup.groups.length > 1,
+        );
+        return rollups.length > 0
+          ? {
+              componentFixRollups: rollups.map((rollup) => ({
+                groupIds: rollup.groupIds,
+                affectedPageCount: rollup.affectedPageCount,
+                elementCount: rollup.elementCount,
+                attribution: rollup.representative.attribution,
+                defectKind: rollup.representative.defect.kind,
+                distinctValues: rollup.distinctValues,
+                additionalValues: rollup.additionalValues,
+              })),
+            }
+          : {};
+      })(),
       checks: rule.checks.map((check) => {
       // #1023 R-F: affectedPages is a labeled sample; count is authoritative.
       const ap = affectedPages(check);
@@ -400,7 +445,11 @@ function buildSlimReport(report: AuditReport, version: string): SlimJsonReport {
               const packed = packComponentOccurrences(check.componentOccurrences);
               return {
                 componentOccurrences: packed.occurrences,
-                componentShapes: { v: packed.v, shapes: packed.shapes },
+                componentShapes: {
+                  v: packed.v,
+                  shapes: packed.shapes,
+                  ...(packed.ladders?.length ? { ladders: packed.ladders } : {}),
+                },
               };
             })()
           : {}),

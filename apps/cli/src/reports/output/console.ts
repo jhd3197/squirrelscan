@@ -5,7 +5,11 @@ import type { EditorSummaryView } from "@squirrelscan/report";
 import { stripControlCharsPreservingSgr } from "@squirrelscan/core-contracts/control-chars";
 import { AUDIT_FAILURE_NEXT_STEP } from "@squirrelscan/core-contracts/failure-reason";
 import { reportFailureReasonCode } from "@squirrelscan/report";
-import { fixGroupLine, ruleFixCoverage } from "@squirrelscan/report";
+import {
+  componentFixRollups,
+  fixRollupLine,
+  ruleFixCoverage,
+} from "@squirrelscan/report";
 import {
   carriedTag,
   coverageLine,
@@ -262,9 +266,9 @@ export function generateConsoleReport(
         );
 
         const coverage = ruleFixCoverage(rule);
-        for (const fixGroup of coverage.groups) {
-          // One actionable line. Hashes and internal keys stay in JSON.
-          log(box.line(`   ${fmt.bold(fixGroupLine(fixGroup, 5, pathOnly))}`));
+        for (const rollup of componentFixRollups(coverage.groups)) {
+          // One actionable line per REPAIR, not per faulty element in a block.
+          log(box.line(`   ${fmt.bold(fixRollupLine(rollup, 5, pathOnly))}`));
         }
 
         for (const check of rule.checks) {
