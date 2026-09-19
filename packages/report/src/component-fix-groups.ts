@@ -143,6 +143,13 @@ type Promotable = {
   scope: string;
 };
 
+type GroupEntry = {
+  occurrences: ComponentOccurrence[];
+  check: ComponentFixGroup["check"];
+  /** Set only for a promoted group: the slot relative to the subtree root. */
+  semanticSlot?: string;
+};
+
 /**
  * Promote occurrences the rules could not judge, using the ancestor ladders
  * they recorded.
@@ -156,7 +163,7 @@ type Promotable = {
 function promoteRepeatedSubtrees(
   ruleId: string,
   promotable: Promotable[],
-): Map<string, { occurrences: ComponentOccurrence[]; check: ComponentFixGroup["check"] }> {
+): Map<string, GroupEntry> {
   const byScope = new Map<string, Promotable[]>();
   for (const entry of promotable) {
     const bucket = byScope.get(entry.scope) ?? [];
@@ -164,10 +171,7 @@ function promoteRepeatedSubtrees(
     byScope.set(entry.scope, bucket);
   }
 
-  const promoted = new Map<
-    string,
-    { occurrences: ComponentOccurrence[]; check: ComponentFixGroup["check"] }
-  >();
+  const promoted = new Map<string, GroupEntry>();
   for (const [scope, entries] of byScope) {
     // Pages per (level, skeleton), counting only occurrences that pass the
     // text-share guard: a page where the block is most of the content simply
@@ -213,7 +217,14 @@ function promoteRepeatedSubtrees(
           locatorFromRoot: candidate.locatorFromRoot,
         },
       });
-      const entry = promoted.get(identity) ?? { occurrences: [], check };
+      // The repair target is the slot INSIDE the block, not the page path that
+      // led to it: that is what makes the same target recognisable on a page
+      // whose surrounding layout differs.
+      const entry = promoted.get(identity) ?? {
+        occurrences: [],
+        check,
+        semanticSlot: candidate.locatorFromRoot,
+      };
       entry.occurrences.push(occurrence);
       promoted.set(identity, entry);
     }
@@ -233,10 +244,7 @@ function promoteRepeatedSubtrees(
  * check evidence. Checks without this additive field retain legacy rendering.
  */
 export function componentFixGroups(ruleId: string, checks: CheckResult[]): ComponentFixGroup[] {
-  const groups = new Map<
-    string,
-    { occurrences: ComponentOccurrence[]; check: ComponentFixGroup["check"] }
-  >();
+  const groups = new Map<string, GroupEntry>();
   const promotable: Promotable[] = [];
   for (const check of checks) {
     for (const occurrence of check.componentOccurrences ?? []) {
@@ -334,7 +342,7 @@ export function componentFixGroups(ruleId: string, checks: CheckResult[]): Compo
         affectedPageCount: affectedPages.length,
         region: representative.region,
         element: representative.element,
-        semanticSlot: representative.element.locator,
+        semanticSlot: entry.semanticSlot ?? representative.element.locator,
         defect: representative.defect,
         occurrences,
       };

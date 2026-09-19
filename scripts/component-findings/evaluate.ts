@@ -39,6 +39,48 @@ type Case = {
 
 const cases: Case[] = [
   {
+    // A shared block inside <main>. Rules cannot judge it (region-main), so
+    // it arrives uncertain and the report stage promotes it on the ancestor
+    // ladder. Each page's prose differs, so only the block itself is shared.
+    id: "repeated-download-block-in-main",
+    rule: "link",
+    pages: [
+      {
+        url: "https://example.invalid/releases/1.0.1",
+        html: "<main><h1>Release 1.0.1</h1><p>Signing fixes landed for macOS builds this week.</p><div class='dl'><h2>Downloads</h2><div class='row'><span>macOS</span><a href='/d/mac'>Download</a></div><div class='row'><span>Linux</span><a href='/d/linux'>Download</a></div></div></main>",
+      },
+      {
+        url: "https://example.invalid/releases/1.0.2",
+        html: "<main><h1>Release 1.0.2</h1><p>Crawler retries are bounded and no longer starve the queue.</p><div class='dl'><h2>Downloads</h2><div class='row'><span>macOS</span><a href='/d/mac'>Download</a></div><div class='row'><span>Linux</span><a href='/d/linux'>Download</a></div></div></main>",
+      },
+      {
+        url: "https://example.invalid/releases/1.0.3",
+        html: "<main><h1>Release 1.0.3</h1><p>Report output gained a per-category summary table.</p><div class='dl'><h2>Downloads</h2><div class='row'><span>macOS</span><a href='/d/mac'>Download</a></div><div class='row'><span>Linux</span><a href='/d/linux'>Download</a></div></div></main>",
+      },
+      {
+        url: "https://example.invalid/releases/1.0.4",
+        html: "<main><h1>Release 1.0.4</h1><p>Dependency bumps only, with no behaviour change at all.</p><div class='dl'><h2>Downloads</h2><div class='row'><span>macOS</span><a href='/d/mac'>Download</a></div><div class='row'><span>Linux</span><a href='/d/linux'>Download</a></div></div></main>",
+      },
+    ],
+    // One group per button slot: two buttons in the block are two repair
+    // targets, each shared by all four pages.
+    expectedGroups: [
+      [
+        "/releases/1.0.1#main:1>main>div:1>div:1>a:1:link-text-generic",
+        "/releases/1.0.2#main:1>main>div:1>div:1>a:1:link-text-generic",
+        "/releases/1.0.3#main:1>main>div:1>div:1>a:1:link-text-generic",
+        "/releases/1.0.4#main:1>main>div:1>div:1>a:1:link-text-generic"
+      ],
+      [
+        "/releases/1.0.1#main:1>main>div:1>div:2>a:1:link-text-generic",
+        "/releases/1.0.2#main:1>main>div:1>div:2>a:1:link-text-generic",
+        "/releases/1.0.3#main:1>main>div:1>div:2>a:1:link-text-generic",
+        "/releases/1.0.4#main:1>main>div:1>div:2>a:1:link-text-generic"
+      ]
+    ],
+    expectedUncertain: [],
+  },
+  {
     id: "shared-footer-across-layouts",
     rule: "stale",
     pages: [

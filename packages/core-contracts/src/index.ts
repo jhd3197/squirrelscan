@@ -107,6 +107,23 @@ export function componentSiteOrigin(pageUrl: string): string {
  * These keys identify an observed DOM shape, not a source-code component. The
  * values are deliberately hashes where crawler content could be sensitive.
  */
+/**
+ * One ancestor of a faulty element, described so the report stage can decide
+ * whether that subtree is a component shared across pages.
+ */
+export interface SubtreeCandidate {
+  /** Ancestors above the faulty element; the parent is 1. */
+  level: number;
+  /** Tags plus stable attributes, no text and no per-page attribute values. */
+  skeletonSignature: string;
+  /** The faulty element's path relative to THIS ancestor, so the same slot in
+   * the same block matches across pages regardless of where the block sits. */
+  locatorFromRoot: string;
+  /** This ancestor's share of the region's text, 0..1 to 2dp. A candidate that
+   * is most of the region is the page's own content, not a shared block. */
+  textShareOfRegion: number;
+}
+
 export interface ComponentOccurrence {
   version: 1;
   pageUrl: string;
@@ -140,6 +157,14 @@ export interface ComponentOccurrence {
   family: { key: string; structuralSignature: string };
   variant: { key: string; structuralSignature: string; contentHash: string };
   element: { locator: string; structuralSignature: string };
+  /**
+   * Ancestor ladder for cross-page promotion, emitted only when
+   * `uncertainReason` is "region-main". Rules see one page at a time and cannot
+   * know whether a subtree repeats, so they record what each ancestor LOOKS
+   * like and the report stage decides. Additive: the occurrence it rides on is
+   * still emitted uncertain and ungroupable, and a reader may ignore this.
+   */
+  subtreeCandidates?: SubtreeCandidate[];
   defect: {
     kind: "stale-copyright" | "link-text-empty" | "link-text-generic";
     values: Record<string, string | number>;

@@ -18,10 +18,12 @@
 // reconstructRuleChecks, carriedFindingToCheck, convertSlimReport) goes through
 // these two functions.
 
-import type { ComponentOccurrence } from "./index";
+import type { ComponentOccurrence, SubtreeCandidate } from "./index";
 
 /** Bumped when the packed layout changes in a way a reader must notice. */
-export const COMPONENT_EVIDENCE_FORMAT = 1;
+export const COMPONENT_EVIDENCE_FORMAT = 2;
+/** Layouts a reader accepts. v1 predates the subtree ladder below. */
+const READABLE_FORMATS = new Set([1, COMPONENT_EVIDENCE_FORMAT]);
 
 /** The per-occurrence identity that repeats across a region's elements. */
 export interface ComponentShape {
@@ -29,6 +31,17 @@ export interface ComponentShape {
   family: ComponentOccurrence["family"];
   variant: ComponentOccurrence["variant"];
 }
+
+/**
+ * The level/skeleton/text-share rungs of a subtree ladder, without the
+ * per-element locators.
+ *
+ * Every faulty element inside one shared block walks the SAME ancestors, so
+ * these rungs repeat once per element (7 download links on a page repeated them
+ * 7 times). Only `locatorFromRoot` genuinely differs per element, so it stays on
+ * the occurrence and the rungs are hoisted here.
+ */
+export type PackedSubtreeLadder = Array<Omit<SubtreeCandidate, "locatorFromRoot">>;
 
 /** One observation, minus the shape it shares with its siblings. */
 export interface PackedComponentOccurrence {
@@ -42,12 +55,18 @@ export interface PackedComponentOccurrence {
   uncertainReason?: ComponentOccurrence["uncertainReason"];
   element: ComponentOccurrence["element"];
   defect: ComponentOccurrence["defect"];
+  /** Index into {@link PackedComponentEvidence.ladders}. */
+  ladder?: number;
+  /** One locator per rung of that ladder, in the same order. */
+  ladderLocators?: string[];
 }
 
 export interface PackedComponentEvidence {
-  v: typeof COMPONENT_EVIDENCE_FORMAT;
+  v: number;
   shapes: ComponentShape[];
   occurrences: PackedComponentOccurrence[];
+  /** Absent when no occurrence carried a subtree ladder. */
+  ladders?: PackedSubtreeLadder[];
 }
 
 /** Stable identity for a shape, used only to dedupe within one pack call. */
@@ -76,6 +95,8 @@ export function packComponentOccurrences(
 ): PackedComponentEvidence {
   const shapes: ComponentShape[] = [];
   const indexByKey = new Map<string, number>();
+  const ladders: PackedSubtreeLadder[] = [];
+  const ladderIndexByKey = new Map<string, number>();
   const packed: PackedComponentOccurrence[] = [];
 
   for (const occurrence of occurrences) {
@@ -90,6 +111,27 @@ export function packComponentOccurrences(
         variant: occurrence.variant,
       });
     }
+    let ladder: number | undefined;
+    let ladderLocators: string[] | undefined;
+    const candidates = occurrence.subtreeCandidates;
+    if (candidates && candidates.length > 0) {
+      const rungs = candidates.map(({ level, skeletonSignature, textShareOfRegion }) => ({
+        level,
+        skeletonSignature,
+        textShareOfRegion,
+      }));
+      const ladderKey = rungs
+        .map((rung) => `${rung.level}\u0001${rung.skeletonSignature}\u0001${rung.textShareOfRegion}`)
+        .join("\u0000");
+      let ladderIndex = ladderIndexByKey.get(ladderKey);
+      if (ladderIndex === undefined) {
+        ladderIndex = ladders.length;
+        ladderIndexByKey.set(ladderKey, ladderIndex);
+        ladders.push(rungs);
+      }
+      ladder = ladderIndex;
+      ladderLocators = candidates.map((candidate) => candidate.locatorFromRoot);
+    }
     packed.push({
       shape: index,
       pageUrl: occurrence.pageUrl,
@@ -100,16 +142,39 @@ export function packComponentOccurrences(
       ...(occurrence.uncertainReason ? { uncertainReason: occurrence.uncertainReason } : {}),
       element: occurrence.element,
       defect: occurrence.defect,
+      ...(ladder === undefined ? {} : { ladder, ladderLocators }),
     });
   }
 
-  return { v: COMPONENT_EVIDENCE_FORMAT, shapes, occurrences: packed };
+  return {
+    v: COMPONENT_EVIDENCE_FORMAT,
+    shapes,
+    occurrences: packed,
+    ...(ladders.length > 0 ? { ladders } : {}),
+  };
 }
 
 function isPacked(value: unknown): value is PackedComponentEvidence {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const candidate = value as Partial<PackedComponentEvidence>;
+  if (typeof candidate.v === "number" && !READABLE_FORMATS.has(candidate.v)) return false;
   return Array.isArray(candidate.shapes) && Array.isArray(candidate.occurrences);
+}
+
+/** Rejoin a hoisted ladder with this occurrence's own locators. */
+function candidatesFor(
+  packed: PackedComponentOccurrence,
+  ladders: PackedSubtreeLadder[],
+): { subtreeCandidates: SubtreeCandidate[] } | undefined {
+  if (packed.ladder === undefined) return undefined;
+  const rungs = ladders[packed.ladder];
+  if (!rungs) return undefined;
+  const locators = packed.ladderLocators ?? [];
+  const subtreeCandidates = rungs.map((rung, index) => ({
+    ...rung,
+    locatorFromRoot: locators[index] ?? "",
+  }));
+  return subtreeCandidates.length > 0 ? { subtreeCandidates } : undefined;
 }
 
 /**
@@ -131,6 +196,7 @@ export function unpackComponentOccurrences(value: unknown): ComponentOccurrence[
 
   if (!isPacked(value)) return undefined;
   const { shapes, occurrences } = value;
+  const ladders = Array.isArray(value.ladders) ? value.ladders : [];
 
   const out: ComponentOccurrence[] = [];
   for (const packed of occurrences) {
@@ -149,6 +215,9 @@ export function unpackComponentOccurrences(value: unknown): ComponentOccurrence[
       variant: shape.variant,
       element: packed.element,
       defect: packed.defect,
+      // A row written before the ladder existed, or one whose index does not
+      // resolve, simply has no candidates. Evidence is additive.
+      ...(candidatesFor(packed, ladders) ?? {}),
     });
   }
   return out.length > 0 ? out : undefined;

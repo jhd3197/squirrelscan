@@ -1,4 +1,8 @@
-import { componentSiteOrigin, type ComponentOccurrence } from "@squirrelscan/core-contracts";
+import {
+  componentSiteOrigin,
+  type ComponentOccurrence,
+  type SubtreeCandidate,
+} from "@squirrelscan/core-contracts";
 import type { Element } from "linkedom";
 import { createHash } from "node:crypto";
 
@@ -49,7 +53,26 @@ function isStateClass(token: string): boolean {
   return last !== undefined && STATE_CLASS_TOKENS.has(last);
 }
 
+/**
+ * Per-element memo for {@link stableAttributes}.
+ *
+ * It splits, filters and sorts a class list and reads six more attributes, and
+ * a skeleton calls it once per node — so a block of 1,000 rows pays for the
+ * same 3,000 nodes again on every element's ladder. Rules never mutate the DOM
+ * they are handed, so the value cannot go stale, and the map is keyed on
+ * elements from a per-run document that is released with the rule context.
+ */
+const stableAttributeCache = new WeakMap<Element, string>();
+
 function stableAttributes(element: Element): string {
+  const memoized = stableAttributeCache.get(element);
+  if (memoized !== undefined) return memoized;
+  const value = buildStableAttributes(element);
+  stableAttributeCache.set(element, value);
+  return value;
+}
+
+function buildStableAttributes(element: Element): string {
   const id = element.getAttribute("id");
   const role = element.getAttribute("role");
   const classes = (element.getAttribute("class") ?? "")
@@ -182,6 +205,42 @@ export class ComponentOccurrenceCache {
   /** Direct-child tag sequence per element; rebuilt per faulty element made a
    * 5,000-link nav quadratic (each link re-walked all 5,000 siblings). */
   readonly childTagSequences = new WeakMap<Element, string>();
+  /** Ancestor skeletons and text lengths for the subtree ladder. Every faulty
+   * element in one block walks the SAME ancestors, so without this the ladder
+   * would re-skeletonize each shared ancestor once per element. */
+  readonly subtreeSignatures = new WeakMap<Element, string>();
+  readonly textLengths = new WeakMap<Element, number>();
+  /** Skeleton string -> digest; bounded by the page's distinct subtree shapes. */
+  readonly signatureBySkeleton = new Map<string, string>();
+  subtreeSignatureBuilds = 0;
+
+  /**
+   * Structurally identical siblings produce the SAME skeleton string, so the
+   * digest is memoised by that string as well as by element. A page of 1,000
+   * identical rows hashes once instead of a thousand times, which is most of
+   * the ladder's cost on a page that has a thousand defects in one block.
+   */
+  subtreeSignature(element: Element): string {
+    const cached = this.subtreeSignatures.get(element);
+    if (cached !== undefined) return cached;
+    const skeleton = childSkeleton(element).value;
+    let value = this.signatureBySkeleton.get(skeleton);
+    if (value === undefined) {
+      value = componentHash(skeleton);
+      this.signatureBySkeleton.set(skeleton, value);
+      this.subtreeSignatureBuilds++;
+    }
+    this.subtreeSignatures.set(element, value);
+    return value;
+  }
+
+  textLength(element: Element): number {
+    const cached = this.textLengths.get(element);
+    if (cached !== undefined) return cached;
+    const value = (element.textContent ?? "").replace(/\s+/g, " ").trim().length;
+    this.textLengths.set(element, value);
+    return value;
+  }
   regionBuilds = 0;
   siblingTagIndexBuilds = 0;
   childTagSequenceBuilds = 0;
@@ -247,6 +306,55 @@ export class ComponentOccurrenceCache {
     this.regionBuilds++;
     return evidence;
   }
+}
+
+/** Deepest-first, so the report stage can pick the highest level that recurs. */
+const MAX_SUBTREE_LEVELS = 8;
+
+/**
+ * Describe each ancestor between the faulty element and its region root.
+ *
+ * Rules run one page at a time, so this cannot decide whether a subtree is
+ * shared. It records what each ancestor looks like; the report stage, which
+ * sees every page, promotes the highest level that recurs. Level 0 (the element
+ * itself) is deliberately absent: a candidate rooted at the faulty element can
+ * never match a sibling defect in the same block.
+ */
+function subtreeCandidates(
+  element: Element,
+  region: Element,
+  cache: ComponentOccurrenceCache,
+): SubtreeCandidate[] {
+  const regionText = cache.textLength(region);
+  if (regionText === 0) return [];
+  // One upward pass collects both the ancestors and the path segments. Calling
+  // elementPath per level re-walks the chain each time, which is quadratic in
+  // the ladder depth for every faulty element on the page.
+  const ancestors: Element[] = [];
+  const segments: string[] = [`${tag(element)}:${cache.siblingTagIndex(element)}`];
+  for (
+    let ancestor = element.parentElement;
+    ancestor && ancestor !== region && ancestors.length < MAX_SUBTREE_LEVELS;
+    ancestor = ancestor.parentElement
+  ) {
+    ancestors.push(ancestor);
+    if (ancestors.length < MAX_SUBTREE_LEVELS)
+      segments.push(`${tag(ancestor)}:${cache.siblingTagIndex(ancestor)}`);
+  }
+  const candidates: SubtreeCandidate[] = [];
+  for (let index = 0; index < ancestors.length; index += 1) {
+    const ancestor = ancestors[index]!;
+    // The locator for level N is the element's path through the N-1 ancestors
+    // below it, rooted at that ancestor's tag.
+    const path = [tag(ancestor), ...segments.slice(0, index + 1).reverse()].join(">");
+    candidates.push({
+      level: index + 1,
+      skeletonSignature: cache.subtreeSignature(ancestor),
+      locatorFromRoot: path,
+      textShareOfRegion: Math.round((cache.textLength(ancestor) / regionText) * 100) / 100,
+    });
+  }
+  return candidates;
 }
 
 function findRegion(element: Element): Element | undefined {
@@ -324,6 +432,13 @@ export function componentOccurrence(
     ]),
   );
 
+  // Only the region-main case: a landmark occurrence keeps exactly the evidence
+  // it has today, and an unknown or article-nested one stays page-scoped.
+  const candidates =
+    uncertainReason === "region-main" && region
+      ? subtreeCandidates(input.element, region, cache)
+      : [];
+
   return {
     version: 1,
     pageUrl: input.pageUrl,
@@ -335,6 +450,7 @@ export function componentOccurrence(
     region: { role, nestedIn: nesting, structuralSignature: componentHash(regionStructure) },
     family: { key: familyKey, structuralSignature: componentHash(familyStructure) },
     variant: { key: variantKey, structuralSignature: componentHash(variantStructure), contentHash },
+    ...(candidates.length > 0 ? { subtreeCandidates: candidates } : {}),
     element: {
       // The region slot separates two otherwise-identical footer/navigation
       // instances on one page without making a page-layout path part of family.
