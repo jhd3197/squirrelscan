@@ -21,6 +21,19 @@ import {
   REPORT_PAGES_HARD_CAP,
 } from "../constants";
 import { groupIssuesByCategory, flattenIssuesBySeverity, type GroupedCategory } from "../grouping";
+import {
+  describeDefect,
+  describeRegion,
+  describeSlot,
+  isRenderableFixGroup,
+  ruleFixCoverage,
+  type FixCoverage,
+} from "../component-presentation";
+import {
+  componentFixRollups,
+  describeRollupDefect,
+  type ComponentFixRollup,
+} from "../component-fix-rollup";
 import { entitySummaryLine } from "../entities";
 import {
   ENTITY_VIEWER_STYLES,
@@ -226,6 +239,18 @@ a.group-circle:hover { border-color: oklch(0.52 0.12 145 / 0.5); }
 .carried-tag { font-size: 0.6rem; margin-left: 0.4rem; vertical-align: middle; }
 .carried-note { font-size: 0.8rem; color: ${THEME.colors.mutedForeground}; margin: 0.15rem 0 0.5rem; }
 .carried-note-mixed { color: ${THEME.colors.primary}; }
+
+/* #2307: shared-component fix groups — one defect in one component, N pages.
+   Same palette, badge and callout treatment as .rule-solution / .carried-tag;
+   the weaker attribution differs in words and in weight, never in colour alone. */
+.fix-groups { list-style: none; margin: 0 0 1rem; padding: 0; }
+.fix-group { background: ${THEME.colors.card}; border: 1px solid ${THEME.colors.border}; border-left: 3px solid ${THEME.colors.primary}; padding: 0.6rem 0.85rem; }
+.fix-group + .fix-group { margin-top: 0.5rem; }
+.fix-group-weak { border-left-color: ${THEME.colors.border}; }
+.fix-group-line { font-size: 0.9rem; margin: 0; overflow-wrap: break-word; }
+.fix-badge { display: inline-block; font-size: 0.62rem; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: ${THEME.colors.primary}; border: 1px solid ${THEME.colors.primary}; padding: 0.05rem 0.35rem; margin-right: 0.5rem; vertical-align: middle; white-space: nowrap; }
+.fix-badge-weak { color: ${THEME.colors.mutedForeground}; border-color: ${THEME.colors.border}; font-weight: 600; }
+.fix-group-slot { font-family: ${THEME.fonts.mono}; font-size: 0.7rem; color: ${THEME.colors.mutedForeground}; margin-top: 0.3rem; word-break: break-all; }
 
 details { margin: 0.5rem 0; }
 details > summary { cursor: pointer; color: ${THEME.colors.primary}; font-size: 0.875rem; }
@@ -743,6 +768,7 @@ function PagesList({
   pages,
   carriedPages,
   count,
+  summary,
 }: {
   pages: string[];
   carriedPages?: string[];
@@ -753,6 +779,14 @@ function PagesList({
    * folded/sampled check to just its retained example set.
    */
   count?: number;
+  /**
+   * #2307: replaces the default "N pages affected" label. Used where the list
+   * is NOT the check's whole affected set — a fix group's own pages, or the
+   * remainder no group accounted for — so the summary never claims more than
+   * the list under it holds. Absent everywhere else, keeping legacy output
+   * byte-identical.
+   */
+  summary?: (total: number) => string;
 }) {
   if (pages.length === 0) return null;
   const total = Math.max(count ?? 0, pages.length);
@@ -777,7 +811,7 @@ function PagesList({
   return (
     <details open={total <= REPORT_COLLAPSE_THRESHOLD}>
       <summary>
-        {total} page{total > 1 ? "s" : ""} affected
+        {summary ? summary(total) : `${total} page${total > 1 ? "s" : ""} affected`}
       </summary>
       <div className="pages-list">
         {hasMore && (
@@ -809,6 +843,75 @@ function PagesList({
         )}
       </div>
     </details>
+  );
+}
+
+/**
+ * The one sentence a fix card exists to say (#2307).
+ *
+ * Wording tracks the ATTRIBUTION, matching the markdown/llm/text surfaces word
+ * for word (the clauses come from the same shared helpers): observed landmark
+ * evidence supports an instruction, a repeated subtree supports an observation
+ * only. The page sample the other surfaces carry inline is left out here — HTML
+ * can afford the complete list, and it renders below as real links.
+ */
+function fixCardSentence(rollup: ComponentFixRollup): string {
+  const group = rollup.representative;
+  // A rolled-up card describes the whole block ("7 links with generic text …");
+  // a single group is worded exactly as it is everywhere else.
+  const defect = rollup.groups.length > 1 ? describeRollupDefect(rollup) : describeDefect(group);
+  const pages = `${rollup.affectedPageCount} page${rollup.affectedPageCount === 1 ? "" : "s"}`;
+  return group.attribution === "repeated-subtree"
+    ? `Likely one shared block in the ${describeRegion(group)}: ${defect}, seen on ${pages}`
+    : `Fix once in the ${describeRegion(group)}: ${defect}, ${pages}`;
+}
+
+/**
+ * Shared-component fix cards (#2307) — the finding the legacy per-page list was
+ * approximating: one defect, one repair, N pages.
+ *
+ * Cards are derived per RULE, not per check: coverage arithmetic is per-rule,
+ * and checks merge by message, so keying a card to a check row would print the
+ * same repair once per merged row. They sit directly above the check list they
+ * replace.
+ *
+ * Every string here is site-controlled (defect values are crawled text, pages
+ * are crawled URLs) and reaches the page as a React text child or through
+ * `sanitizeUrl` inside PagesList. No hashes, signatures or family/variant keys:
+ * `describeSlot` is the humane tail of the locator, kept as a small muted
+ * developer hint. Exported so a test can hand it a rolled-up component
+ * directly, rather than reconstructing a seven-slot block through the whole
+ * grouping stage to reach the one branch that differs.
+ */
+export function FixGroupCards({ coverage }: { coverage: FixCoverage }) {
+  // `ruleFixCoverage` has already applied this filter; re-applying it means the
+  // card renderer cannot be made to phrase an attribution it does not know,
+  // whatever hands it a coverage.
+  const groups = coverage.groups.filter(isRenderableFixGroup);
+  if (groups.length === 0) return null;
+  return (
+    <ul className="fix-groups">
+      {componentFixRollups(groups).map((rollup) => {
+        const group = rollup.representative;
+        const repeated = group.attribution === "repeated-subtree";
+        return (
+          <li className={`fix-group${repeated ? " fix-group-weak" : ""}`} key={group.id}>
+            <p className="fix-group-line">
+              <span className={`fix-badge${repeated ? " fix-badge-weak" : ""}`}>
+                {repeated ? "Likely shared block" : "Fix once"}
+              </span>
+              {fixCardSentence(rollup)}
+            </p>
+            <PagesList
+              pages={rollup.affectedPages}
+              count={rollup.affectedPageCount}
+              summary={(total) => `Affected pages (${total})`}
+            />
+            <div className="fix-group-slot">{describeSlot(group)}</div>
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 
@@ -844,6 +947,11 @@ function IssuesByGroup({ categories }: { categories: GroupedCategory[] }) {
                 const carriedPageCount = ruleCarriedPageCount(rule.checks);
                 const carriedRollup = ruleCarriedRollupLine(carriedPageCount, totalPages);
                 const fullyCarried = carriedPageCount > 0 && carriedPageCount >= totalPages;
+                // #2307: which pages, if any, a shared-component fix already
+                // accounts for. `none` (no evidence, one-page groups, an
+                // attribution this build cannot phrase) leaves everything below
+                // exactly as it was before the feature existed.
+                const coverage = ruleFixCoverage(rule);
                 return (
                   <React.Fragment key={rule.id}>
                     <details
@@ -921,6 +1029,7 @@ function IssuesByGroup({ categories }: { categories: GroupedCategory[] }) {
                               {rule.solution}
                             </div>
                           )}
+                        <FixGroupCards coverage={coverage} />
                         <div className="issue-list">
                           {rule.checks.map((check, idx) => {
                             // #1136 review: a site-scope check (blocked-links,
@@ -935,6 +1044,20 @@ function IssuesByGroup({ categories }: { categories: GroupedCategory[] }) {
                             // #1023 R-F: `sample` is that union (a labeled example
                             // set); `count` is the authoritative affected-page total.
                             const ap = affectedPages(check);
+                            // #2307: a fully covered rule has already named
+                            // every affected page, once per repair. Repeating
+                            // them per check is the noise the cards replace.
+                            // Partial coverage keeps the remainder, explicitly
+                            // labelled, so "not grouped" never reads as "not
+                            // affected".
+                            const legacyPages =
+                              coverage.mode === "full"
+                                ? []
+                                : coverage.mode === "partial"
+                                  ? ap.sample.filter((page) =>
+                                      coverage.uncoveredPages.includes(page),
+                                    )
+                                  : ap.sample;
                             // Items already covered by the unified PagesList above
                             // (pure page-URL ids with no sourcePages) are dropped
                             // from the items block so the same URL isn't listed
@@ -972,11 +1095,22 @@ function IssuesByGroup({ categories }: { categories: GroupedCategory[] }) {
                                   {(carriedLabel || partialCarried) && (
                                     <div className="carried-note">{carriedLabel ?? partialCarried}</div>
                                   )}
-                                  {ap.sample.length > 0 && (
+                                  {legacyPages.length > 0 && (
                                     <PagesList
-                                      pages={ap.sample}
-                                      count={ap.count}
+                                      pages={legacyPages}
+                                      // Partial coverage: the authoritative
+                                      // total for THIS list is the remainder,
+                                      // not the check's whole affected set.
+                                      count={
+                                        coverage.mode === "partial" ? legacyPages.length : ap.count
+                                      }
                                       carriedPages={check.carriedPages}
+                                      {...(coverage.mode === "partial"
+                                        ? {
+                                            summary: (total: number) =>
+                                              `Pages not attributed to a shared component (${total})`,
+                                          }
+                                        : {})}
                                     />
                                   )}
                                   {hasVisibleItems && (
