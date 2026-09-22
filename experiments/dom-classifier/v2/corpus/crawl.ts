@@ -26,13 +26,17 @@ import { resolve } from "node:path";
 
 const dataRoot = process.env.DOM_CLASSIFIER_DATA_ROOT;
 if (!dataRoot) throw new Error("DOM_CLASSIFIER_DATA_ROOT must be set");
-const cliPath = process.env.SQUIRREL_CLI;
-if (!cliPath) throw new Error("SQUIRREL_CLI must point at apps/cli/src/cli.ts");
+/**
+ * The entry the children run. `corpus/crawl-entry.ts` raises the content
+ * store's byte cap and then imports the CLI, so a long crawl stops evicting
+ * its own earlier pages; `SQUIRREL_CLI` still points at the plain cli.ts for a
+ * run that does not want that.
+ */
+const entryPath =
+  process.env.SQUIRREL_CRAWL_ENTRY ?? new URL("./crawl-entry.ts", import.meta.url).pathname;
 
 const outDir = resolve(dataRoot, "corpus");
 mkdirSync(outDir, { recursive: true, mode: 0o700 });
-const ledgerPath = `${outDir}/crawl-ledger.jsonl`;
-const seedsPath = `${outDir}/seeds.jsonl`;
 
 function argument(name: string, fallback: string): string {
   const index = Bun.argv.indexOf(name);
@@ -43,6 +47,13 @@ function argument(name: string, fallback: string): string {
 }
 
 const crawlHome = resolve(argument("--home", `${dataRoot}/crawl-home`));
+// Separate ledger and seed files let a re-crawl start clean without losing the
+// record of the first one: the ledger is the resume key, so reusing it would
+// skip every domain.
+const ledgerPath = resolve(argument("--ledger", `${outDir}/crawl-ledger.jsonl`));
+const seedsPath = resolve(argument("--seeds", `${outDir}/seeds.jsonl`));
+/** Raising the store cap for THIS crawl only; see corpus/crawl-entry.ts. */
+const storeMaxBytes = argument("--store-max-bytes", String(20 * 1024 ** 3));
 const workers = Number(argument("--workers", "4"));
 const maxPages = Number(argument("--max-pages", "15"));
 const perSiteConcurrency = Number(argument("--site-concurrency", "4"));
@@ -139,7 +150,7 @@ async function crawlOne(seed: Seed): Promise<void> {
       [
         "bun",
         "run",
-        cliPath!,
+        entryPath,
         "crawl",
         seed.url,
         "-m",
@@ -150,7 +161,18 @@ async function crawlOne(seed: Seed): Promise<void> {
       {
         // A fresh HOME is the isolation: a separate ~/.squirrel, a separate
         // content store, and no chance of writing to the live one.
-        env: { ...process.env, HOME: crawlHome, NO_COLOR: "1", CI: "1" },
+        env: {
+          ...process.env,
+          HOME: crawlHome,
+          NO_COLOR: "1",
+          CI: "1",
+          // Both are REQUIRED by crawl-entry.ts. The path has to be explicit:
+          // if the CLI sets it later and it disagrees with the store already
+          // open, the singleton is rebuilt at the 1 GiB default and the raised
+          // cap is silently lost.
+          SQUIRREL_CONTENT_STORE_PATH: `${crawlHome}/.squirrel/content-store.db`,
+          SQUIRREL_CONTENT_STORE_MAX_BYTES: storeMaxBytes,
+        },
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",

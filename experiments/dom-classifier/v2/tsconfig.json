@@ -21,5 +21,9 @@
     "train/*.ts",
     "experiments/*.ts",
     "corpus/*.ts"
+  ],
+  "//exclude": "crawl-entry.ts imports apps/cli to raise the content store's byte cap before the CLI runs. Including it here would pull the entire CLI dependency graph into this experiment's typecheck and surface pre-existing errors in packages/report that this lane does not own; the CLI has its own typecheck.",
+  "exclude": [
+    "corpus/crawl-entry.ts"
   ]
 }
