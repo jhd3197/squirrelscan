@@ -161,3 +161,21 @@ def test_a_missing_noul_falls_back_to_the_threshold_not_to_zero():
     label, confidence = call(component="layout_container", regions=["footer"])
     assert label == "footer"
     assert confidence == 0.75
+
+
+def test_a_weak_nav_inside_main_still_reaches_the_fallback():
+    # The inside-main branch used to `return None` for any shape that was
+    # neither a wrapper nor content, which swallowed every downgraded shape
+    # sitting in main — the exact case step 8 exists for.
+    raw = {"node_p#1_component_type": {"choice": "navigation_menu", "confidence": 0.42}}
+    assert call(component="navigation_menu", regions=["main_content"], raw=raw) == (
+        "navigation",
+        0.42,
+    )
+
+
+def test_a_strong_wrapper_inside_main_is_still_main_content():
+    # ...and the fall-through must not change the confident cases.
+    assert call(component="layout_container", regions=["main_content"])[0] == "main_content"
+    assert call(component="card", regions=["main_content"])[0] == "content_block"
+    assert call(component="text", regions=["main_content"]) is None

@@ -183,14 +183,17 @@ def region_from_answers(
     if "article_header" in region_set:
         return "article_chrome", region_conf("article_header")
 
-    # 6 / 7. inside main: the shape decides wrapper from content
+    # 6 / 7. inside main: the shape decides wrapper from content.
+    # Falls THROUGH rather than returning, so a node inside main whose shape was
+    # downgraded at the bar above can still reach step 8. A weak
+    # `navigation_menu` inside `<main>` is a menu; returning None here would
+    # drop it for the one reason step 8 exists to avoid.
     inside_main = bool(region_set & {"main_content", "article_body"})
     if inside_main:
         if shape in WRAPPER_SHAPES:
             return "main_content", region_conf("main_content")
         if shape in CONTENT_SHAPES:
             return "content_block", shape_conf()
-        return None
 
     # A purpose of navigation with no navigation shape is weak evidence on its
     # own: a footer serves navigation and is still a footer. Not a label.
