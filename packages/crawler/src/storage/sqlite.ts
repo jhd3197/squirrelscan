@@ -64,7 +64,7 @@ export interface ContentStoreAdapter {
 // Schema version - increment when schema changes.
 // Exported so migration tests can assert "this DB reached the CURRENT version" rather than pinning a
 // literal, which turned every schema bump into two unrelated test failures.
-export const SCHEMA_VERSION = 30;
+export const SCHEMA_VERSION = 31;
 
 // Migrations to run when upgrading from older versions
 const MIGRATIONS: Record<number, string[]> = {
@@ -447,6 +447,13 @@ const MIGRATIONS: Record<number, string[]> = {
     "ALTER TABLE rule_results ADD COLUMN component_occurrences TEXT DEFAULT NULL",
     "ALTER TABLE rule_results ADD COLUMN component_evidence TEXT DEFAULT NULL",
   ],
+  // Version 31: shared site-resource evidence (#2341), for exactly the reason
+  // version 30 exists — the report is rebuilt from `rule_results`, so a
+  // CheckResult field this table does not carry is invisible to the real
+  // `squirrel audit` path while every in-memory test stays green.
+  31: [
+    "ALTER TABLE rule_results ADD COLUMN site_resource_occurrences TEXT DEFAULT NULL",
+  ],
 
 };
 
@@ -536,6 +543,7 @@ const CRAWLS_ALTER_COLUMNS: ReadonlyArray<{ name: string; type: string }> = [
 const RULE_RESULTS_ALTER_COLUMNS: ReadonlyArray<{ name: string; type: string }> = [
   { name: "component_occurrences", type: "TEXT" },
   { name: "component_evidence", type: "TEXT" },
+  { name: "site_resource_occurrences", type: "TEXT" },
 ];
 
 const SCHEMA = `
@@ -816,6 +824,7 @@ CREATE TABLE IF NOT EXISTS rule_results (
   expected TEXT,
   component_occurrences TEXT,
   component_evidence TEXT,
+  site_resource_occurrences TEXT,
   created_at INTEGER NOT NULL,
   FOREIGN KEY (crawl_id) REFERENCES crawls(id)
 );
@@ -3185,9 +3194,10 @@ export class SQLiteStorage implements CrawlStorage {
           INSERT INTO rule_results (
             crawl_id, page_url, rule_id, check_name, status, message,
             value, expected, items, details, pages, skip_reason,
-            component_occurrences, component_evidence, created_at
+            component_occurrences, component_evidence, site_resource_occurrences,
+            created_at
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
 
         const timestamp = Date.now();
@@ -3210,6 +3220,12 @@ export class SQLiteStorage implements CrawlStorage {
                 ? JSON.stringify(packComponentOccurrences(check.componentOccurrences))
                 : null,
               check.componentEvidence ? JSON.stringify(check.componentEvidence) : null,
+              // Stored unpacked: unlike component occurrences, which repeat six
+              // 128-bit digests per row, a resource occurrence is four short
+              // strings, so a shape table would cost more than it saves.
+              check.siteResourceOccurrences?.length
+                ? JSON.stringify(check.siteResourceOccurrences)
+                : null,
               timestamp
             );
           }
@@ -3610,9 +3626,10 @@ export class SQLiteStorage implements CrawlStorage {
           INSERT INTO rule_results (
             crawl_id, page_url, rule_id, check_name, status, message,
             value, expected, items, details, pages, skip_reason,
-            component_occurrences, component_evidence, created_at
+            component_occurrences, component_evidence, site_resource_occurrences,
+            created_at
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
 
         const timestamp = Date.now();
@@ -3637,6 +3654,9 @@ export class SQLiteStorage implements CrawlStorage {
                     ? JSON.stringify(packComponentOccurrences(check.componentOccurrences))
                     : null,
                   check.componentEvidence ? JSON.stringify(check.componentEvidence) : null,
+                  check.siteResourceOccurrences?.length
+                    ? JSON.stringify(check.siteResourceOccurrences)
+                    : null,
                   timestamp
                 );
               }
@@ -3960,6 +3980,14 @@ export class SQLiteStorage implements CrawlStorage {
         : undefined,
       componentEvidence: row.component_evidence
         ? (JSON.parse(row.component_evidence as string) as CheckResult["componentEvidence"])
+        : undefined,
+      // #2341, same contract: undefined on rows written before the v31 column,
+      // never an empty array, so "nothing recorded" stays distinguishable from
+      // "recorded nothing" and a legacy audit renders as it always did.
+      siteResourceOccurrences: row.site_resource_occurrences
+        ? (JSON.parse(
+            row.site_resource_occurrences as string,
+          ) as CheckResult["siteResourceOccurrences"])
         : undefined,
     };
   }
