@@ -115,8 +115,16 @@ and `layout_container` with an empty regions axis is the right answer, because
 the page has no header or footer to find. That is a fact about the corpus, not
 a failure of the annotator, and no relabelling fixes it.
 
-What does help is not sampling div-soup nodes uniformly.
-`corpus/node-sample.ts` ranks them by
+What does help is not sampling div-soup uniformly, at either level.
+
+**Which pages.** "div-soup" means fewer than two landmark kinds, which lumps
+together two populations that are not alike. A page with ZERO kinds is usually
+an app shell with no chrome to find. A page with ONE has real site chrome and
+simply did not declare the rest of it — a `<nav>` but no `<footer>` — so that is
+where an undeclared footer actually exists. `corpus/node-sample.ts` spends the
+div-soup budget on the one-landmark tier first and reports both counts.
+
+**Which nodes.** Within a page it ranks candidates by
 `max(1 - startPos, endPos) * (0.5 + min(linkDensity, 1))` — a header sits at the
 start, a footer at the end, both are link-dense — and spends two thirds of each
 page's budget at the top of that ranking. On the same pages and the same node
