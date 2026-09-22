@@ -91,12 +91,17 @@ def test_shape_confidence_is_read_from_the_component_answer():
     assert call(component="navigation_menu", regions=[], raw=raw) == ("navigation", 0.88)
 
 
-def test_a_sub_threshold_shape_is_discarded_not_trusted():
-    # run-divsoup-v7.ts filters regions and purposes at noul >= 0.75 but writes
-    # componentType as a bare argmax, so a shape the model scored 0.38 arrives
-    # looking exactly like one it scored 0.98. Below the bar it must not decide.
+def test_a_sub_threshold_shape_still_labels_when_nothing_else_does():
+    # It loses PRECEDENCE, not its vote. Discarding it outright would delete
+    # more than half the navigation labels, and navigation has no other source.
+    # The low confidence becomes the row weight.
     raw = {"node_p#1_component_type": {"choice": "navigation_menu", "confidence": 0.38}}
-    assert call(component="navigation_menu", regions=[], raw=raw) is None
+    assert call(component="navigation_menu", regions=[], raw=raw) == ("navigation", 0.38)
+
+
+def test_a_sub_threshold_shape_that_decides_nothing_still_abstains():
+    raw = {"node_p#1_component_type": {"choice": "card", "confidence": 0.3}}
+    assert call(component="card", regions=[], raw=raw) is None
 
 
 def test_a_weak_shape_does_not_suppress_a_region_that_cleared_the_bar():

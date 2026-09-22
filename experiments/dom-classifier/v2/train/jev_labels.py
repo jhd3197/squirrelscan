@@ -141,12 +141,16 @@ def region_from_answers(
     # confident in. Two of those also SUPPRESSED a `footer` that did clear 0.75,
     # because navigation_menu outranks footer on the ladder below.
     #
-    # Below the bar the shape is discarded rather than trusted, so the node
-    # falls through to the regions axis, which was filtered properly.
+    # Below the bar the shape loses its PRECEDENCE: it no longer outranks the
+    # regions axis, which was filtered properly. It is not thrown away, because
+    # discarding it outright would delete more than half the `navigation`
+    # labels, and navigation is the class with no other source at all. Instead
+    # it is tried last, at step 8, carrying its own low confidence as the row
+    # weight — which is what the weight is for. A 0.38 answer then contributes
+    # 0.38 of a row instead of either a full row or none.
     shape_confidence = raw_shape_conf()
-    shape = component_type or "unknown"
-    if shape_confidence < NOUL_THRESHOLD:
-        shape = "unknown"
+    declared_shape = component_type or "unknown"
+    shape = declared_shape if shape_confidence >= NOUL_THRESHOLD else "unknown"
 
     def shape_conf() -> float:
         return shape_confidence
@@ -192,6 +196,20 @@ def region_from_answers(
     # own: a footer serves navigation and is still a footer. Not a label.
     if "navigation" in purpose_set and shape in WRAPPER_SHAPES and not region_set:
         return None
+
+    # 8. Last: a shape the model was not confident in, now that everything the
+    # other two axes could say has been said. It cannot suppress a region label
+    # any more — that was the bug — but where nothing else decided the node, a
+    # weak answer weighted by its own confidence beats no answer.
+    if shape == "unknown" and declared_shape != "unknown":
+        if declared_shape in DIALOG_SHAPES:
+            return "dialog", shape_confidence
+        if declared_shape == "navigation_menu":
+            return "navigation", shape_confidence
+        if declared_shape == "search":
+            return "search", shape_confidence
+        if declared_shape == "form":
+            return "form", shape_confidence
     return None
 
 
