@@ -29,6 +29,12 @@ import {
   ruleFixCoverage,
   type FixCoverage,
 } from "../component-presentation";
+import {
+  ruleSiteResourceCoverage,
+  siteResourceFixLine,
+  withSiteResourceCoverage,
+  type SiteResourceCoverage,
+} from "../site-resource-presentation";
 import { entitySummaryLine } from "../entities";
 import {
   ENTITY_VIEWER_STYLES,
@@ -925,6 +931,45 @@ export function FixGroupCards({ coverage }: { coverage: FixCoverage }) {
   );
 }
 
+/**
+ * Shared-resource fix cards (#2341).
+ *
+ * Deliberately the same markup as {@link FixGroupCards}, down to the class
+ * names, because it is the same claim about a different kind of evidence: one
+ * defect, one repair, N pages. The SENTENCE comes from `siteResourceFixLine`,
+ * the one markdown, text, llm and console print, called with the same page
+ * limit and the same path formatter markdown uses — so this file decides no
+ * wording of its own and the five surfaces cannot drift.
+ */
+export function SiteResourceFixCards({ coverage }: { coverage: SiteResourceCoverage }) {
+  if (coverage.groups.length === 0) return null;
+  return (
+    <ul className="fix-groups">
+      {coverage.groups.map((group) => (
+        <li className="fix-group" key={group.id}>
+          <div className="fix-group-head">
+            <span className="fix-badge">Fix once</span>
+            {/* The paragraph holds the shared sentence and NOTHING else, so its
+                text can be compared with markdown's, character for character. */}
+            <p className="fix-group-line">
+              {siteResourceFixLine(
+                group,
+                REPORT_SOURCE_PAGES_PREVIEW,
+                (page) => getPathname(page) || "/",
+              )}
+            </p>
+          </div>
+          <PagesList
+            pages={group.affectedPages}
+            count={group.affectedPageCount}
+            summary={(total) => `Affected pages (${total})`}
+          />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 // Flat issues list in ONE global severity order (#1536): error →
 // recommendation → warning, then category priority, then rule weight. Groups
 // are no longer contiguous, so the `group-*` anchors the score circles link to
@@ -961,7 +1006,14 @@ function IssuesByGroup({ categories }: { categories: GroupedCategory[] }) {
                 // accounts for. `none` (no evidence, one-page groups, an
                 // attribution this build cannot phrase) leaves everything below
                 // exactly as it was before the feature existed.
-                const coverage = ruleFixCoverage(rule);
+                // #2341: shared-resource units narrow that coverage, so a page
+                // a resource card names is not also listed below as unattributed.
+                const siteResources = ruleSiteResourceCoverage(rule);
+                const coverage = withSiteResourceCoverage(
+                  ruleFixCoverage(rule),
+                  siteResources,
+                  rule,
+                );
                 return (
                   <React.Fragment key={rule.id}>
                     <details
@@ -1039,6 +1091,7 @@ function IssuesByGroup({ categories }: { categories: GroupedCategory[] }) {
                               {rule.solution}
                             </div>
                           )}
+                        <SiteResourceFixCards coverage={siteResources} />
                         <FixGroupCards coverage={coverage} />
                         <div className="issue-list">
                           {rule.checks.map((check, idx) => {

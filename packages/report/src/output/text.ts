@@ -8,6 +8,11 @@ import { reportFailureReasonCode } from "../failure-notice";
 import { getScoreGrade } from "../scoring";
 import { REPORT_TEXT_WRAP_WIDTH } from "../constants";
 import { fixRollupLine, fixUnits, ruleFixCoverage } from "../component-presentation";
+import {
+  ruleSiteResourceCoverage,
+  siteResourceFixLine,
+  withSiteResourceCoverage,
+} from "../site-resource-presentation";
 
 import { uncoveredItems } from "../component-presentation";
 import { formatSiteWideItem, siteWideContext, siteWideItem } from "../site-wide-items";
@@ -319,7 +324,12 @@ export function renderText(report: AuditReport, options?: TextRenderOptions): st
         write(`  Solution: ${wrapped[0]}`);
         for (const line of wrapped.slice(1)) write(`            ${line}`);
       }
-      const coverage = ruleFixCoverage(rule);
+      // #2341: resource units first, then component units, over one coverage.
+      const siteResources = ruleSiteResourceCoverage(rule);
+      const coverage = withSiteResourceCoverage(ruleFixCoverage(rule), siteResources, rule);
+      for (const group of siteResources.groups) {
+        write(`    ${siteResourceFixLine(group, 5, pathOnly)}`);
+      }
       for (const rollup of fixUnits(coverage.groups, options?.componentRollup !== false)) {
         // One actionable line per REPAIR, not per faulty element in a block.
         write(`    ${fixRollupLine(rollup, 5, pathOnly)}`);

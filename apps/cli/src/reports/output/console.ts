@@ -9,7 +9,10 @@ import {
   componentFixRollups,
   fixRollupLine,
   ruleFixCoverage,
+  ruleSiteResourceCoverage,
+  siteResourceFixLine,
   uncoveredItems,
+  withSiteResourceCoverage,
 } from "@squirrelscan/report";
 import {
   carriedTag,
@@ -266,7 +269,18 @@ export function generateConsoleReport(
           )
         );
 
-        const coverage = ruleFixCoverage(rule);
+        // #2341: resource units first, then component units, over one coverage.
+        const siteResources = ruleSiteResourceCoverage(rule);
+        const coverage = withSiteResourceCoverage(
+          ruleFixCoverage(rule),
+          siteResources,
+          rule
+        );
+        for (const group of siteResources.groups) {
+          log(
+            box.line(`   ${fmt.bold(siteResourceFixLine(group, 5, pathOnly))}`)
+          );
+        }
         for (const rollup of componentFixRollups(coverage.groups)) {
           // One actionable line per REPAIR, not per faulty element in a block.
           log(box.line(`   ${fmt.bold(fixRollupLine(rollup, 5, pathOnly))}`));

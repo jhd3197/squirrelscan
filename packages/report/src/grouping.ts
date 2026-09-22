@@ -1,7 +1,13 @@
 // Category-grouped issues derived from rule results
 
 import { PUBLISH_LIMITS } from "@squirrelscan/core-contracts/limits";
-import type { ReportRuleResult, CheckItem, CheckResult, ComponentOccurrence } from "./types";
+import type {
+  ReportRuleResult,
+  CheckItem,
+  CheckResult,
+  ComponentOccurrence,
+  SiteResourceOccurrence,
+} from "./types";
 import { KEY_SEPARATOR } from "./constants";
 import { checkOccurrences } from "./occurrences";
 import {
@@ -41,6 +47,8 @@ export interface GroupedCheck {
   details?: Record<string, unknown>;
   /** Complete raw occurrence evidence, including uncertain/page-scoped observations. */
   componentOccurrences?: ComponentOccurrence[];
+  /** Complete raw shared-resource evidence, merged across this check's pages. */
+  siteResourceOccurrences?: SiteResourceOccurrence[];
   componentEvidence?: CheckResult["componentEvidence"];
 
   // Legacy field (deprecated)
@@ -143,6 +151,32 @@ function attributeItemToPage(item: CheckItem, pageUrl: string | undefined): Chec
  * each. Identity is the full observation key (page + component + provenance),
  * so this only ever collapses the SAME observation seen twice.
  */
+/** The whole observation, as one string: page, kind, key and reference. */
+function siteResourceKey(occurrence: SiteResourceOccurrence): string {
+  return [
+    occurrence.siteOrigin,
+    occurrence.kind,
+    occurrence.pageUrl,
+    occurrence.key,
+    occurrence.source,
+  ].join("\u0000");
+}
+
+/** Drop repeated observations, preserving the first reference of each. */
+function dedupeSiteResources(
+  occurrences: readonly SiteResourceOccurrence[],
+): SiteResourceOccurrence[] {
+  const seen = new Set<string>();
+  const out: SiteResourceOccurrence[] = [];
+  for (const occurrence of occurrences) {
+    const key = siteResourceKey(occurrence);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(occurrence);
+  }
+  return out;
+}
+
 function dedupeOccurrences(occurrences: ComponentOccurrence[]): ComponentOccurrence[] {
   const seen = new Set<string>();
   const out: ComponentOccurrence[] = [];
@@ -251,6 +285,9 @@ export function groupIssuesByCategory(
       const details = (check as { details?: Record<string, unknown> }).details;
       const componentOccurrences = (check as { componentOccurrences?: ComponentOccurrence[] })
         .componentOccurrences;
+      const siteResourceOccurrences = (
+        check as { siteResourceOccurrences?: SiteResourceOccurrence[] }
+      ).siteResourceOccurrences;
       const componentEvidence = (check as CheckResult).componentEvidence;
       // A folded aggregate check (#910) stands in for `details.occurrences`
       // per-page checks — count them all so "×N" badges stay truthful.
@@ -336,6 +373,17 @@ export function groupIssuesByCategory(
             ...componentOccurrences,
           ]);
         }
+        if (siteResourceOccurrences?.length) {
+          // Same hazard as the occurrence dedupe above: a carried finding
+          // re-merged with its fresh re-observation would land twice and
+          // double-count the pages a resource is claimed to reach. Identity is
+          // the whole observation, so two genuinely different references to the
+          // same map from one page are still both kept.
+          existing.siteResourceOccurrences = dedupeSiteResources([
+            ...(existing.siteResourceOccurrences ?? []),
+            ...siteResourceOccurrences,
+          ]);
+        }
         if (componentEvidence) existing.componentEvidence = componentEvidence;
       } else {
         const itemById = new Map<string, CheckItem>();
@@ -369,6 +417,9 @@ export function groupIssuesByCategory(
           carriedPageSet: initialCarriedPageSet,
           details: details ? { ...details } : undefined,
           componentOccurrences: componentOccurrences ? [...componentOccurrences] : undefined,
+          siteResourceOccurrences: siteResourceOccurrences
+            ? dedupeSiteResources(siteResourceOccurrences)
+            : undefined,
           componentEvidence,
           value: typeof (check as { value?: unknown }).value === "string"
             ? (check as { value: string }).value
@@ -412,6 +463,16 @@ export function groupIssuesByCategory(
           // the whole observation, too expensive to rebuild inside a comparator.
           check.componentOccurrences = check.componentOccurrences
             .map((occurrence) => ({ occurrence, key: componentOccurrenceKey(occurrence) }))
+            .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+            .map((entry) => entry.occurrence);
+        }
+        if (check.siteResourceOccurrences) {
+          // Codepoint order over the canonical observation key, for the same
+          // reason as the occurrences above: `localeCompare` over a stringified
+          // object orders by ICU collation and by key insertion order, so one
+          // report could serialize two ways on two machines.
+          check.siteResourceOccurrences = check.siteResourceOccurrences
+            .map((occurrence) => ({ occurrence, key: siteResourceKey(occurrence) }))
             .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
             .map((entry) => entry.occurrence);
         }

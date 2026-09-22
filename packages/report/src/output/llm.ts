@@ -23,6 +23,11 @@ import {
 } from "../entities";
 import { seedRedirect } from "../coverage";
 import { describeSlot, fixRollupLine, fixUnits, ruleFixCoverage } from "../component-presentation";
+import {
+  ruleSiteResourceCoverage,
+  siteResourceFixLine,
+  withSiteResourceCoverage,
+} from "../site-resource-presentation";
 
 import { uncoveredItems } from "../component-presentation";
 
@@ -383,7 +388,20 @@ export function renderLlm(report: AuditReport, options?: LlmRenderOptions): stri
   
       const messages = rule.checks.map((c) => c.message).filter((m) => m);
       if (messages.length > 0) lines.push(`${indent(2)}${escapeXml(messages.join("; "))}`);
-      const coverage = ruleFixCoverage(rule);
+      // Shared-resource units (#2341) narrow the coverage the component units
+      // computed, so the page arithmetic below counts a page as accounted for
+      // whichever kind of unit named it.
+      const siteResources = ruleSiteResourceCoverage(rule);
+      const coverage = withSiteResourceCoverage(ruleFixCoverage(rule), siteResources, rule);
+      for (const group of siteResources.groups) {
+        lines.push(
+          `${indent(2)}<fix-once scope="site-resource" pages="${group.affectedPageCount}" resources="${group.resourceKeys.length}">${escapeXml(
+            siteResourceFixLine(group, LLM_FIX_GROUP_PAGES, (page) =>
+              compressUrl(page, baseOrigin),
+            ),
+          )}</fix-once>`,
+        );
+      }
       for (const rollup of fixUnits(coverage.groups, options?.componentRollup !== false)) {
         // One actionable line per REPAIR. No hashes, no signatures, no internal
         // keys: an agent cannot act on grouping mechanics.

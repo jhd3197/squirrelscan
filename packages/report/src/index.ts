@@ -78,6 +78,21 @@ export {
   describeRollupDefect,
 } from "./component-fix-rollup";
 export type { ComponentFixRollup, ComponentFixRollupLevel } from "./component-fix-rollup";
+// One build, one line: shared SITE RESOURCES (source maps today) grouped by the
+// page set that references them, so a template site's shared bundle is one
+// finding rather than one per page (#2341).
+export { siteResourceFixGroups } from "./site-resource-fix-groups";
+export type { SiteResourceFixGroup } from "./site-resource-fix-groups";
+export {
+  SITE_RESOURCE_MAX_KEYS,
+  describeSiteResourceDefect,
+  isRenderableSiteResourceGroup,
+  resourceName,
+  ruleSiteResourceCoverage,
+  siteResourceFixLine,
+  withSiteResourceCoverage,
+} from "./site-resource-presentation";
+export type { SiteResourceCoverage } from "./site-resource-presentation";
 // Site-wide item collapse: one shared resource on nearly every page.
 export {
   SITE_WIDE_MAX_EXCEPTIONS,

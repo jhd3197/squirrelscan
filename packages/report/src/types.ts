@@ -25,6 +25,7 @@ export type {
   ReportTechnologies,
   ReportTechnology,
   SiteMetadata,
+  SiteResourceOccurrence,
   SocialAccount,
   SoftwareAdvisory,
   TechnologyCategory,

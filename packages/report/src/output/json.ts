@@ -22,6 +22,8 @@ import type { GroupedCheck } from "../grouping";
 import { REPORT_PAGES_HARD_CAP } from "../constants";
 import { siteWideContext, siteWideItem } from "../site-wide-items";
 import { fixUnits, ruleFixCoverage } from "../component-presentation";
+import { siteResourceFixGroups } from "../site-resource-fix-groups";
+import { isRenderableSiteResourceGroup } from "../site-resource-presentation";
 import { reportFailureReasonCode } from "../failure-notice";
 import { getScoreGrade } from "../scoring";
 import { getGroupName } from "../categories";
@@ -410,6 +412,28 @@ function buildSlimReport(report: AuditReport, version: string): SlimJsonReport {
             ),
           }
         : {}),
+      ...(() => {
+        // #2341. JSON is the machine format, so it keeps EVERY unit, including
+        // the single-page ones the human surfaces decline to print: a consumer
+        // reconstructing the grouping needs the units that were rejected as
+        // much as the ones that were shown.
+        const resources = siteResourceFixGroups(rule);
+        return resources.length > 0
+          ? {
+              siteResourceFixGroups: resources.map((group) => ({
+                id: group.id,
+                checkName: group.checkName,
+                checkStatus: group.checkStatus,
+                kind: group.kind,
+                siteOrigin: group.siteOrigin,
+                resourceKeys: group.resourceKeys,
+                affectedPages: group.affectedPages.slice(0, REPORT_PAGES_HARD_CAP),
+                affectedPageCount: group.affectedPageCount,
+                rendered: isRenderableSiteResourceGroup(group),
+              })),
+            }
+          : {};
+      })(),
       ...(() => {
         // Both levels, so a consumer sees the same units the renderers print.
         const rollups = fixUnits(ruleFixCoverage(rule).groups).filter(

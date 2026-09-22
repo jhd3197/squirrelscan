@@ -8,6 +8,11 @@ import { reportFailureReasonCode } from "../failure-notice";
 import { getScoreGrade } from "../scoring";
 import { REPORT_SOURCE_PAGES_PREVIEW, REPORT_PAGES_HARD_CAP } from "../constants";
 import { fixRollupLine, fixUnits, ruleFixCoverage } from "../component-presentation";
+import {
+  ruleSiteResourceCoverage,
+  siteResourceFixLine,
+  withSiteResourceCoverage,
+} from "../site-resource-presentation";
 
 import { uncoveredItems } from "../component-presentation";
 import { formatSiteWideItem, siteWideContext, siteWideItem } from "../site-wide-items";
@@ -386,7 +391,16 @@ export function renderMarkdown(report: AuditReport, options?: MarkdownRenderOpti
         lines.push("");
       }
 
-      const coverage = ruleFixCoverage(rule);
+      // #2341: the same composition every surface makes — resource units first,
+      // then component units, over one shared coverage.
+      const siteResources = ruleSiteResourceCoverage(rule);
+      const coverage = withSiteResourceCoverage(ruleFixCoverage(rule), siteResources, rule);
+      for (const group of siteResources.groups) {
+        lines.push(
+          `**${siteResourceFixLine(group, REPORT_SOURCE_PAGES_PREVIEW, (page) => getPathname(page) || "/")}**`,
+        );
+        lines.push("");
+      }
       for (const rollup of fixUnits(coverage.groups, options?.componentRollup !== false)) {
         // One actionable line per REPAIR, not per faulty element in a block.
         lines.push(
