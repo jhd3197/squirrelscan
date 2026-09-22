@@ -107,7 +107,12 @@ for (const [hash, url] of index) {
     pruned++;
     continue;
   }
-  const domain = parseDomain(url, { allowPrivateDomains: true }).domain ?? "";
+  // `?? parsed.hostname`, matching build-dataset.ts exactly. Without it a url
+  // whose host has no recognised public suffix is dropped here but still gets a
+  // dataset row and a split there, so the page exists in the corpus with no
+  // page-type label and nothing says why.
+  const parsed = parseDomain(url, { allowPrivateDomains: true });
+  const domain = parsed.domain ?? parsed.hostname ?? "";
   if (!domain) {
     noDomain++;
     continue;
@@ -166,6 +171,10 @@ writeFileSync(
     {
       createdAt: new Date().toISOString(),
       rule: "split = sha256(registrableDomain)[0:8] mod 100; <80 train, <90 val, else holdout",
+      // `verified: false` spelled out. Without it a run that passed no
+      // --verify-against writes "domainsChecked": 0, "drifted": 0, which reads
+      // exactly like a clean verification of nothing.
+      verified: Boolean(verifyAgainst),
       verifiedAgainst: verifyAgainst || null,
       domainsChecked: checked,
       drifted,

@@ -353,6 +353,10 @@ function gzWriter(path: string): GzWriter {
       return new Promise((resolve, reject) => {
         file.on("finish", resolve);
         file.on("error", reject);
+        // The gzip stream needs its own error handler. Without one a zlib
+        // failure is an unhandled 'error' event, which takes the process down
+        // with a stack that names neither this file nor the dataset.
+        gzip.on("error", reject);
         gzip.end();
       });
     },
@@ -442,172 +446,182 @@ async function build(
    *  temporal dead zone and throw on the first row. */
   const seenHashes = new Set<string>();
 
-  for (const root of storeRoots) {
-    const storePath = `${root}/content-store.db`;
-    if (!existsSync(storePath)) {
-      log(`build: no content-store.db under ${root}, skipping`);
-      continue;
-    }
-    const db = new Database(storePath, { readonly: true });
-    // One prepared statement, reused: a short keyset read by rowid, which is the
-    // cheapest thing a concurrent writer can be asked to share a file with.
-    const batch = db.query(
-      "SELECT rowid AS rid, hash, content FROM content WHERE rowid > ? AND content_type = 'text/html' ORDER BY rowid LIMIT ?",
-    );
-    let cursor = 0;
-    log(`build: reading ${storePath}`);
+  // The store loop is wrapped so a throw anywhere inside it still closes the
+  // sqlite handle AND ends the seven gzip streams. An un-ended gzip stream
+  // leaves a .jsonl.gz truncated mid-member, which no reader can decompress.
+  let openStore: Database | null = null;
+  try {
+    for (const root of storeRoots) {
+      const storePath = `${root}/content-store.db`;
+      if (!existsSync(storePath)) {
+        log(`build: no content-store.db under ${root}, skipping`);
+        continue;
+      }
+      const db = new Database(storePath, { readonly: true });
+      openStore = db;
+      // One prepared statement, reused: a short keyset read by rowid, which is the
+      // cheapest thing a concurrent writer can be asked to share a file with.
+      const batch = db.query(
+        "SELECT rowid AS rid, hash, content FROM content WHERE rowid > ? AND content_type = 'text/html' ORDER BY rowid LIMIT ?",
+      );
+      let cursor = 0;
+      log(`build: reading ${storePath}`);
 
-    for (;;) {
-      const rows = batch.all(cursor, BATCH_ROWS) as Array<{
-        rid: number;
-        hash: string;
-        content: Uint8Array;
-      }>;
-      if (rows.length === 0) break;
-      cursor = rows[rows.length - 1]!.rid;
+      for (;;) {
+        const rows = batch.all(cursor, BATCH_ROWS) as Array<{
+          rid: number;
+          hash: string;
+          content: Uint8Array;
+        }>;
+        if (rows.length === 0) break;
+        cursor = rows[rows.length - 1]!.rid;
 
-      for (const row of rows) {
-        if (seenHashes.has(row.hash)) {
-          stats.excluded.duplicate_across_stores =
-            (stats.excluded.duplicate_across_stores ?? 0) + 1;
-          continue;
-        }
-        const choice = selected.get(row.hash);
-        if (!choice) {
-          // Either no project database knows a url for these bytes, or the
-          // per-domain cap did not pick them. Both are counted in `excluded`
-          // already; this is the row-level tally of "seen and skipped".
-          stats.excluded.not_selected = (stats.excluded.not_selected ?? 0) + 1;
-          continue;
-        }
-        if (processed >= args.limit) break;
-
-        let html: string;
-        try {
-          const raw = gunzipSync(row.content);
-          if (raw.length > MAX_HTML_BYTES) {
-            stats.excluded.too_large = (stats.excluded.too_large ?? 0) + 1;
+        for (const row of rows) {
+          if (seenHashes.has(row.hash)) {
+            stats.excluded.duplicate_across_stores =
+              (stats.excluded.duplicate_across_stores ?? 0) + 1;
             continue;
           }
-          bytes += raw.length;
-          html = raw.toString("utf8");
-        } catch {
-          stats.excluded.parse_failed = (stats.excluded.parse_failed ?? 0) + 1;
-          continue;
-        }
+          const choice = selected.get(row.hash);
+          if (!choice) {
+            // Either no project database knows a url for these bytes, or the
+            // per-domain cap did not pick them. Both are counted in `excluded`
+            // already; this is the row-level tally of "seen and skipped".
+            stats.excluded.not_selected = (stats.excluded.not_selected ?? 0) + 1;
+            continue;
+          }
+          if (processed >= args.limit) break;
 
-        let featurized;
-        let regions;
-        let pageType;
-        try {
-          const { document } = parseHTML(html);
-          featurized = featurizeDocument(document as never, choice.url, { emitMasked: true });
-          regions = silverRegionLabels(featurized.nodes);
-          pageType = silverPageType(document as never, choice.url);
-        } catch {
-          stats.excluded.parse_failed = (stats.excluded.parse_failed ?? 0) + 1;
-          continue;
-        }
-        if (featurized.nodes.length === 0) {
-          stats.excluded.no_candidates = (stats.excluded.no_candidates ?? 0) + 1;
-          continue;
-        }
+          let html: string;
+          try {
+            const raw = gunzipSync(row.content);
+            if (raw.length > MAX_HTML_BYTES) {
+              stats.excluded.too_large = (stats.excluded.too_large ?? 0) + 1;
+              continue;
+            }
+            bytes += raw.length;
+            html = raw.toString("utf8");
+          } catch {
+            stats.excluded.parse_failed = (stats.excluded.parse_failed ?? 0) + 1;
+            continue;
+          }
 
-        const pageId = row.hash.slice(0, 16);
-        const split = choice.split;
-        const labelById = new Map(regions.labels.map((l) => [l.nodeId, l]));
+          let featurized;
+          let regions;
+          let pageType;
+          try {
+            const { document } = parseHTML(html);
+            featurized = featurizeDocument(document as never, choice.url, { emitMasked: true });
+            regions = silverRegionLabels(featurized.nodes);
+            pageType = silverPageType(document as never, choice.url);
+          } catch {
+            stats.excluded.parse_failed = (stats.excluded.parse_failed ?? 0) + 1;
+            continue;
+          }
+          if (featurized.nodes.length === 0) {
+            stats.excluded.no_candidates = (stats.excluded.no_candidates ?? 0) + 1;
+            continue;
+          }
 
-        await pageWriters[split].write(
-          JSON.stringify({
-            p: pageId,
-            d: choice.domainHash,
-            s: split,
-            l: pageType.label,
-            ls: pageType.source,
-            leak: pageType.leakProne,
-            types: pageType.types,
-            f: featurized.page.features,
-            k: featurized.page.tokens,
-            divSoup: !regions.regionTrainable,
-            landmarkKinds: regions.landmarkKinds,
-            elementCount: featurized.page.elementCount,
-            nodeCount: featurized.nodes.length,
-            excludedReason: regions.excludedReason,
-          }),
-        );
-        await pageIndexWriter.write(
-          JSON.stringify({ p: pageId, u: choice.url, domain: choice.domain, s: split }),
-        );
+          const pageId = row.hash.slice(0, 16);
+          const split = choice.split;
+          const labelById = new Map(regions.labels.map((l) => [l.nodeId, l]));
 
-        for (const node of featurized.nodes) {
-          const label = labelById.get(node.nodeId)!;
-          const base = {
-            p: pageId,
-            n: node.nodeId,
-            d: choice.domainHash,
-            s: split,
-            l: label.label,
-            ls: label.labelSource,
-            c: label.containerLabel,
-            t: label.trainable,
-            inh: label.inherited,
-            w: label.weight,
-            // The true tag and role: the LABEL source, kept for the tag baseline
-            // the error analysis showed beats every learned model on semantic
-            // tags. NEVER a feature.
-            tagRaw: node.tag,
-            roleRaw: node.role,
-            depth: node.depth,
-            parent: node.parentCandidateId,
-          };
-          await nodeWriters[split].write(
-            JSON.stringify({ ...base, m: 0, f: node.features, k: node.tokens }),
+          await pageWriters[split].write(
+            JSON.stringify({
+              p: pageId,
+              d: choice.domainHash,
+              s: split,
+              l: pageType.label,
+              ls: pageType.source,
+              leak: pageType.leakProne,
+              types: pageType.types,
+              f: featurized.page.features,
+              k: featurized.page.tokens,
+              divSoup: !regions.regionTrainable,
+              landmarkKinds: regions.landmarkKinds,
+              elementCount: featurized.page.elementCount,
+              nodeCount: featurized.nodes.length,
+              excludedReason: regions.excludedReason,
+            }),
           );
-          await nodeWriters[split].write(
-            JSON.stringify({ ...base, m: 1, f: node.maskedFeatures, k: node.maskedTokens }),
+          await pageIndexWriter.write(
+            JSON.stringify({ p: pageId, u: choice.url, domain: choice.domain, s: split }),
           );
-          stats.nodeRows[split] += 2;
-          const counts = stats.nodesByLabel[split];
-          counts[label.label] = (counts[label.label] ?? 0) + 1;
-          if (label.trainable) stats.trainableNodes[split]++;
-          if (label.inherited) stats.inheritedNodes[split]++;
-          if (label.label === "article_header") stats.nestedChrome.articleHeader++;
-          if (label.label === "article_footer") stats.nestedChrome.articleFooter++;
-          if (label.label === "site_header") stats.nestedChrome.siteHeader++;
-          if (label.label === "footer") stats.nestedChrome.footer++;
-        }
 
-        stats.pages[split]++;
-        seenHashes.add(row.hash);
-        domainsSeen[split].add(choice.domainHash);
-        const types = stats.pageTypes[split];
-        types[pageType.label] = (types[pageType.label] ?? 0) + 1;
-        stats.pageTypeSources[pageType.source] = (stats.pageTypeSources[pageType.source] ?? 0) + 1;
-        if (!regions.regionTrainable) stats.divSoupPages[split]++;
-        else stats.regionTrainablePages[split]++;
+          for (const node of featurized.nodes) {
+            const label = labelById.get(node.nodeId)!;
+            const base = {
+              p: pageId,
+              n: node.nodeId,
+              d: choice.domainHash,
+              s: split,
+              l: label.label,
+              ls: label.labelSource,
+              c: label.containerLabel,
+              t: label.trainable,
+              inh: label.inherited,
+              w: label.weight,
+              // The true tag and role: the LABEL source, kept for the tag baseline
+              // the error analysis showed beats every learned model on semantic
+              // tags. NEVER a feature.
+              tagRaw: node.tag,
+              roleRaw: node.role,
+              depth: node.depth,
+              parent: node.parentCandidateId,
+            };
+            await nodeWriters[split].write(
+              JSON.stringify({ ...base, m: 0, f: node.features, k: node.tokens }),
+            );
+            await nodeWriters[split].write(
+              JSON.stringify({ ...base, m: 1, f: node.maskedFeatures, k: node.maskedTokens }),
+            );
+            stats.nodeRows[split] += 2;
+            const counts = stats.nodesByLabel[split];
+            counts[label.label] = (counts[label.label] ?? 0) + 1;
+            if (label.trainable) stats.trainableNodes[split]++;
+            if (label.inherited) stats.inheritedNodes[split]++;
+            if (label.label === "article_header") stats.nestedChrome.articleHeader++;
+            if (label.label === "article_footer") stats.nestedChrome.articleFooter++;
+            if (label.label === "site_header") stats.nestedChrome.siteHeader++;
+            if (label.label === "footer") stats.nestedChrome.footer++;
+          }
 
-        processed++;
-        if (processed % 500 === 0) {
-          const seconds = (Date.now() - started) / 1000;
-          log(
-            `build: ${processed} pages, ${(processed / seconds).toFixed(1)}/s, ` +
-              `rowid ${cursor}, ${(bytes / 1e6).toFixed(0)} MB read`,
-          );
+          stats.pages[split]++;
+          seenHashes.add(row.hash);
+          domainsSeen[split].add(choice.domainHash);
+          const types = stats.pageTypes[split];
+          types[pageType.label] = (types[pageType.label] ?? 0) + 1;
+          stats.pageTypeSources[pageType.source] =
+            (stats.pageTypeSources[pageType.source] ?? 0) + 1;
+          if (!regions.regionTrainable) stats.divSoupPages[split]++;
+          else stats.regionTrainablePages[split]++;
+
+          processed++;
+          if (processed % 500 === 0) {
+            const seconds = (Date.now() - started) / 1000;
+            log(
+              `build: ${processed} pages, ${(processed / seconds).toFixed(1)}/s, ` +
+                `rowid ${cursor}, ${(bytes / 1e6).toFixed(0)} MB read`,
+            );
+          }
         }
+        if (processed >= args.limit) break;
       }
+
+      db.close();
+      openStore = null;
       if (processed >= args.limit) break;
     }
-
-    db.close();
-    if (processed >= args.limit) break;
+  } finally {
+    openStore?.close();
+    for (const split of ["train", "val", "holdout"] as const) {
+      stats.domains[split] = domainsSeen[split].size;
+      await nodeWriters[split].close();
+      await pageWriters[split].close();
+    }
+    await pageIndexWriter.close();
   }
-
-  for (const split of ["train", "val", "holdout"] as const) {
-    stats.domains[split] = domainsSeen[split].size;
-    await nodeWriters[split].close();
-    await pageWriters[split].close();
-  }
-  await pageIndexWriter.close();
 
   const seconds = (Date.now() - started) / 1000;
   stats.throughput = {
@@ -666,19 +680,22 @@ async function main(): Promise<void> {
     const prior = JSON.parse(readFileSync(priorManifest, "utf8")) as {
       domains: Record<string, Split>;
     };
-    let drifted = 0;
-    let checked = 0;
+    // `selected` is keyed by content hash, so iterating it walks PAGES. The
+    // guarantee is about domains, so dedupe before counting or the log reports
+    // 28,718 "domains" for a corpus with 4,427 of them.
+    const drifted = new Set<string>();
+    const checked = new Set<string>();
     for (const choice of selected.values()) {
       const already = prior.domains[choice.domainHash];
       if (!already) continue;
-      checked++;
-      if (already !== choice.split) drifted++;
+      checked.add(choice.domainHash);
+      if (already !== choice.split) drifted.add(choice.domainHash);
     }
-    if (drifted > 0)
+    if (drifted.size > 0)
       throw new Error(
-        `split drift on ${drifted} of ${checked} domains against ${priorManifest}: refusing to build`,
+        `split drift on ${drifted.size} of ${checked.size} domains against ${priorManifest}: refusing to build`,
       );
-    log(`split: verified ${checked} domains against ${priorManifest}, 0 drift`);
+    log(`split: verified ${checked.size} domains against ${priorManifest}, 0 drift`);
   }
   if (existsSync(manifestPath)) {
     const previous = JSON.parse(readFileSync(manifestPath, "utf8")) as {
