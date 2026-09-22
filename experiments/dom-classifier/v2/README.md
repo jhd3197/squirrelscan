@@ -92,6 +92,36 @@ landmark. The brief's rule (inside `<main>` → `content_block`, outside every
 landmark → `unlabelled`) is what `label` holds; `containerLabel` is the strictly
 richer answer, recorded so the training lane can choose without a rebuild.
 
+### The third label source, and what it can and cannot reach
+
+Silver labels come from the page's own landmarks, so a landmark-less page
+produces no `footer` and no `navigation` row at ANY corpus size. Jev labels a
+node from its evidence instead, so `train/jev_labels.py` maps its three axes
+onto the ten region classes and `sample.py --jev-labels` adds them as a third
+source. Where silver and Jev disagree, BOTH rows are kept, each with its own
+weight, and the rate is reported: dropping either would be a silent decision
+about which annotator is right on a population nobody has adjudicated.
+
+`navigation` is the case that proves the axes have to be combined rather than
+chosen between. It is not in the `regions` vocabulary at all, while
+`navigation_menu` is one of the largest `componentTypes`, so a mapping that
+read only `regions` would produce no navigation labels whatsoever.
+
+**Measured ceiling.** On a 62-node probe, Jev mapped 79% of landmark-page nodes
+and **11%** of div-soup nodes — the same shape of gap silver has. Reading the
+packets explains it: the div-soup population here is mostly single-page-app
+shells (`classTokens=app-container`, one node holding the whole application),
+and `layout_container` with an empty regions axis is the right answer, because
+the page has no header or footer to find. That is a fact about the corpus, not
+a failure of the annotator, and no relabelling fixes it.
+
+What does help is not sampling div-soup nodes uniformly.
+`corpus/node-sample.ts` ranks them by
+`max(1 - startPos, endPos) * (0.5 + min(linkDensity, 1))` — a header sits at the
+start, a footer at the end, both are link-dense — and spends two thirds of each
+page's budget at the top of that ranking. On the same pages and the same node
+budget, div-soup chrome labels went from 3 to 6 and navigation from 2 to 5.
+
 Page type: `article`, `product_detail`, `product_listing`, `docs`, `homepage`,
 `pricing`, `contact`, `about`, `legal`, `listing_index`, `other`, `unlabelled`.
 Provenance is recorded per page. Two schema types that map to different classes
@@ -100,17 +130,65 @@ ones the model is meant to resolve later. `homepage` is the one label that needs
 the URL as well as the schema, and the URL shape IS a feature, so those rows
 carry `leak: true` and the source `jsonld+url_root`.
 
+## Growing the corpus (`corpus/`)
+
+The 2026-09-19 build read 26,252 pages from 3,278 domains, all of them pages a
+squirrelscan user had already audited. `corpus/` adds more, into a SEPARATE
+store, so the live one is never written to.
+
+```sh
+export DOM_CLASSIFIER_DATA_ROOT=/path/to/private/root
+export SQUIRREL_STORE=/path/to/squirrel-store
+export SQUIRREL_CLI=/path/to/apps/cli/src/cli.ts
+
+bun run corpus/outlinks.ts          # outbound domains, from the stored HTML
+bun run corpus/seeds.ts             # one seed url per registrable domain
+bun run corpus/crawl.ts --workers 4 --max-pages 15 --budget-minutes 180
+bun run corpus/pagetype-queue.ts --verify-against <old>/split-manifest.json
+bun run corpus/node-sample.ts --dataset $ROOT/silver-v2 --nodes 40000
+```
+
+Four things in there are not obvious:
+
+- **`squirrel crawl`, not `squirrel audit`.** The crawl subcommand fetches and
+  stores and runs no rules. Measured on one 15-page site: audit 34.4s (24.3s of
+  it CPU inside the 260 rules), crawl 2.15s. Nothing in this corpus reads a rule
+  result.
+- **The `links` table is empty** on almost every project database in the store
+  (463 domains across 17,239 of them), so `outlinks.ts` harvests outbound hosts
+  from the stored bytes with a regex instead. It is a *composition* fix as much
+  as a size one: the project directories are squirrelscan's own users, which
+  skews hard to `vercel.app`, `lovable.app` and `.ai`, and what those pages link
+  to is where the `.gov`, the news sites and the shops come from.
+- **Seeds are emitted round-robin across public suffix**, so truncating the list
+  at any length keeps the whole list's TLD mix. Taking the first N of a sorted
+  list would give N `.com` domains.
+- **The split cannot drift.** `split = sha256(registrableDomain)[0:8] mod 100`
+  is a pure function of the domain, so a domain cannot change split because the
+  corpus grew. `pagetype-queue.ts --verify-against` checks that against the
+  previous manifest and refuses to write if one domain disagrees.
+
 ## Building the dataset
 
 ```sh
 DOM_CLASSIFIER_DATA_ROOT=/path/to/private/root \
-SQUIRREL_STORE=/path/to/squirrel-store \
+SQUIRREL_STORES=/path/to/store-a:/path/to/store-b \
+DOM_CLASSIFIER_DATASET_VERSION=silver-v2 \
 bun run build-dataset.ts [--index-only] [--limit N] [--max-per-domain N]
 ```
 
-No path is hardcoded; both environment variables are required. The content store
-is opened `readonly` and read in short batches keyed by `rowid`, because another
-process writes to it while this runs.
+No path is hardcoded. `SQUIRREL_STORES` is colon-separated and each entry is a
+directory holding `content-store.db` and `projects/`; `SQUIRREL_STORE`
+(singular) still names one. A content hash present in two stores is featurized
+once — the hash is the sha256 of the exact bytes, so it is the same page.
+
+`DOM_CLASSIFIER_DATASET_VERSION` names the output directory and defaults to
+`silver-v1`. Every script in `train/` reads the same variable, so a larger
+corpus is built beside the old one rather than over it: the frozen split
+manifest and every model trained against it live in that directory.
+
+Each store is opened `readonly` and read in short batches keyed by `rowid`,
+because another process writes to it while this runs.
 
 Output, all under `$DOM_CLASSIFIER_DATA_ROOT/silver-v1/`: `nodes-{train,val,holdout}.jsonl.gz`
 (two rows per node, `m: 0` unmasked and `m: 1` masked), `pages-*.jsonl.gz`,
