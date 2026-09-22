@@ -130,6 +130,40 @@ start, a footer at the end, both are link-dense — and spends two thirds of eac
 page's budget at the top of that ranking. On the same pages and the same node
 budget, div-soup chrome labels went from 3 to 6 and navigation from 2 to 5.
 
+### Research cohorts
+
+`corpus/import-webclasseg25.ts` folds **WebClasSeg25** (CC BY 4.0, Zenodo
+record 19183572) in as a tagged cohort. Every row carries
+`cohort: "research/webclasseg25"` and `s: "train"`, and `sample.py
+--extra-train-dataset` puts them in train and nowhere else, so val and holdout
+stay on squirrelscan's own distribution.
+
+It is worth the trouble for two reasons. Its functional-classification segments
+are `header` / `nav` / `maincontent` / `footer` — the region axis itself, not an
+approximation — labelled by three to four **people** per page. And its 844 pages
+span 25 languages of European public-service sites, which is the CMS-shaped,
+non-English web the crawl does not reach. Imported: 5,960 human-labelled nodes
+(navigation 1,446, main_content 2,189, site_header 1,285, footer 1,040), of
+which 416 sit on landmark-less pages where silver produces nothing at all.
+
+The join is exact and that is the point: every element carries `hyu="N"`, every
+segment names a `hyuIndex`, so a label lands by attribute equality rather than
+an XPath or a re-derived index. Measured over the whole release, **6,217 of
+6,218 segments resolved**.
+
+A node's weight is votes for the winning label over the page's ANNOTATOR COUNT.
+Annotators agree on the label 97.9% of the time; what actually varies is which
+node they pick, since each was asked for "the largest visible coherent DOM
+node" and only 51% of nodes were marked by two or more of them. Dividing by the
+markers instead would score almost everything 1.0 and throw that away.
+
+Three other corpora were checked and rejected, which is recorded here so nobody
+re-does the work: **Webis-WebSeg-20** is CC BY 4.0 but its ground truth is
+polygons with no class label, so it cannot produce a row in this taxonomy;
+**SWDE** has no stated licence anywhere (dead CodePlex original, unlicensed
+mirrors); **WebSRC** has no dataset licence and labels answer containment rather
+than regions.
+
 Page type: `article`, `product_detail`, `product_listing`, `docs`, `homepage`,
 `pricing`, `contact`, `about`, `legal`, `listing_index`, `other`, `unlabelled`.
 Provenance is recorded per page. Two schema types that map to different classes
