@@ -184,7 +184,7 @@ class ChunkedBuilder:
                 np.asarray(self.weights, dtype=np.float32))
 
 
-def build_split(path: Path, rates: dict[str, float], n_numeric: int, n_tokens: int,
+def build_split(paths: Path | list[Path], rates: dict[str, float], n_numeric: int, n_tokens: int,
                 jev: dict[tuple[str, int], tuple[str, float]] | None = None):
     """Rows for one split, from the silver labels and optionally from Jev.
 
@@ -209,7 +209,14 @@ def build_split(path: Path, rates: dict[str, float], n_numeric: int, n_tokens: i
     kept: Counter = Counter()
     sources: Counter = Counter()
     agree = disagree = 0
-    for row in rows(path):
+    if isinstance(paths, Path):
+        paths = [paths]
+
+    def all_rows():
+        for path in paths:
+            yield from rows(path)
+
+    for row in all_rows():
         silver = collapse(row["l"])
         jev_label: str | None = None
         jev_weight = 1.0
@@ -240,7 +247,8 @@ def build_split(path: Path, rates: dict[str, float], n_numeric: int, n_tokens: i
         # lose its footer row at the content_block rate, throwing away the
         # scarce chrome supervision this exercise exists to produce.
         drop_silver = False
-        if silver is not None:
+        cohort = row.get("cohort")
+        if silver is not None and not cohort:
             rate = rates.get(silver, 1.0)
             if rate < 1.0 and keep_hash(row["p"], row["n"]) >= rate:
                 drop_silver = True
@@ -248,8 +256,11 @@ def build_split(path: Path, rates: dict[str, float], n_numeric: int, n_tokens: i
         if silver is not None and not drop_silver:
             if row["m"] == 0:
                 kept[silver] += 1
-                sources["silver" if jev_label is None else
-                        ("both-agree" if jev_label == silver else "both-disagree")] += 1
+                key = cohort or (
+                    "silver" if jev_label is None
+                    else ("both-agree" if jev_label == silver else "both-disagree")
+                )
+                sources[key] += 1
             builder.add(row["f"], row["k"], CLASS_INDEX[silver], row["d"], row["p"], row["n"],
                         int(row["m"]), float(row.get("w", 1.0)))
 
@@ -271,6 +282,9 @@ def main() -> None:
     parser.add_argument("--out", required=True)
     parser.add_argument("--dataset-version", default="silver-v1",
                         help="subdirectory of --data-root holding nodes-*.jsonl.gz")
+    parser.add_argument("--extra-train-dataset", action="append", default=[],
+                        help="another directory with nodes-train.jsonl.gz to fold into TRAIN "
+                             "only; used for tagged research cohorts")
     parser.add_argument("--max-train-rows", type=int, default=DEFAULT_MAX_TRAIN_ROWS,
                         help="node budget for the training sample; see DEFAULT_MAX_TRAIN_ROWS")
     parser.add_argument("--jev-labels", default=None,
@@ -329,8 +343,16 @@ def main() -> None:
         # Only the training split is subsampled. Val and holdout are kept whole,
         # so every reported number is over the real class distribution.
         split_rates = rates if split == "train" else {}
+        # Research cohorts are folded into TRAIN and nowhere else, so every
+        # reported number stays on squirrelscan's own distribution. Their rows
+        # are NOT downsampled: they are a few thousand human labels against
+        # millions of silver ones, and the content_block rate would delete most
+        # of them for being outnumbered by a class they do not even contain.
+        paths = [dataset / f"nodes-{split}.jsonl.gz"]
+        if split == "train":
+            paths += [Path(extra) / "nodes-train.jsonl.gz" for extra in args.extra_train_dataset]
         matrix, labels, groups, refs, masked, weights, kept, sources, agree, disagree = build_split(
-            dataset / f"nodes-{split}.jsonl.gz", split_rates, n_numeric, n_tokens, jev
+            paths, split_rates, n_numeric, n_tokens, jev
         )
         sp.save_npz(out / f"X-{split}.npz", matrix)
         np.save(out / f"y-{split}.npy", labels)
