@@ -170,39 +170,105 @@ class ChunkedBuilder:
                 np.asarray(self.weights, dtype=np.float32))
 
 
-def build_split(path: Path, rates: dict[str, float], n_numeric: int, n_tokens: int):
+def build_split(path: Path, rates: dict[str, float], n_numeric: int, n_tokens: int,
+                jev: dict[tuple[str, int], tuple[str, float]] | None = None):
+    """Rows for one split, from the silver labels and optionally from Jev.
+
+    Jev is a THIRD label source, not a correction of the second. Three cases,
+    and the difference between them is the whole point:
+
+    * **silver only** - the node sits in a landmark. Unchanged.
+    * **Jev only** - the node is on a landmark-less page, so silver said
+      `unlabelled` and the row did not exist at all. This is the case the
+      corpus expansion was for: it is pure addition, and it is the only way
+      `footer` and `navigation` ever get a training row on a div-soup theme.
+    * **both, disagreeing** - BOTH rows are emitted, each with its own label
+      and its own weight. Dropping either one would be a silent decision about
+      which annotator is right on a population nobody has adjudicated; keeping
+      both lets the trees see the conflict and return a probability that
+      reflects it. The rate is counted and reported.
+
+    A Jev row's weight is the model's own confidence, so a 0.76 answer counts
+    for less than a 0.99 one.
+    """
     builder = ChunkedBuilder(n_numeric, n_tokens)
     kept: Counter = Counter()
+    sources: Counter = Counter()
+    agree = disagree = 0
     for row in rows(path):
-        label = collapse(row["l"])
-        if label is None:
+        silver = collapse(row["l"])
+        jev_label: str | None = None
+        jev_weight = 1.0
+        if jev is not None:
+            found = jev.get((row["p"], row["n"]))
+            if found is not None:
+                jev_label, jev_weight = found
+
+        if silver is None and jev_label is None:
             continue
         # The keep decision is a hash of (page, node), so a node's masked and
         # unmasked rows are kept or dropped TOGETHER and the mix stays 50/50.
-        rate = rates.get(label, 1.0)
-        if rate < 1.0 and keep_hash(row["p"], row["n"]) >= rate:
-            continue
-        if row["m"] == 0:
-            kept[label] += 1
-        builder.add(row["f"], row["k"], CLASS_INDEX[label], row["d"], row["p"], row["n"],
-                    int(row["m"]), float(row.get("w", 1.0)))
-    return (*builder.finish(), kept)
+        # A Jev-only node is never downsampled: those rows are the scarce ones.
+        gate = silver if silver is not None else None
+        if gate is not None:
+            rate = rates.get(gate, 1.0)
+            if rate < 1.0 and keep_hash(row["p"], row["n"]) >= rate:
+                continue
+
+        if silver is not None:
+            if row["m"] == 0:
+                kept[silver] += 1
+                sources["silver" if jev_label is None else
+                        ("both-agree" if jev_label == silver else "both-disagree")] += 1
+                if jev_label is not None:
+                    if jev_label == silver:
+                        agree += 1
+                    else:
+                        disagree += 1
+            builder.add(row["f"], row["k"], CLASS_INDEX[silver], row["d"], row["p"], row["n"],
+                        int(row["m"]), float(row.get("w", 1.0)))
+
+        # The Jev row is emitted when it ADDS something: a label where silver
+        # had none, or a different label from silver's.
+        if jev_label is not None and jev_label != silver:
+            if row["m"] == 0:
+                kept[jev_label] += 1
+                if silver is None:
+                    sources["jev-only"] += 1
+            builder.add(row["f"], row["k"], CLASS_INDEX[jev_label], row["d"], row["p"], row["n"],
+                        int(row["m"]), float(jev_weight))
+    return (*builder.finish(), kept, sources, agree, disagree)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-root", required=True)
     parser.add_argument("--out", required=True)
+    parser.add_argument("--dataset-version", default="silver-v1",
+                        help="subdirectory of --data-root holding nodes-*.jsonl.gz")
+    parser.add_argument("--jev-labels", default=None,
+                        help="run-divsoup-v7.ts output; adds Jev as a third label source")
     args = parser.parse_args()
 
     data_root = Path(args.data_root)
-    dataset = data_root / "silver-v1"
+    dataset = data_root / args.dataset_version
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
     schema = json.loads((dataset / "feature-schema.json").read_text())
     n_numeric = schema["nodeFeatureCount"]
     n_tokens = schema["tokenBuckets"]
+
+    # Jev labels are loaded once and applied to EVERY split the sample covers.
+    # They are drawn from train pages only (see corpus/node-sample.ts), so val
+    # and holdout are untouched in practice; looking them up per split rather
+    # than assuming that keeps the assumption checkable.
+    jev: dict[tuple[str, int], tuple[str, float]] | None = None
+    if args.jev_labels:
+        from jev_labels import load_jev_region_labels
+
+        jev = load_jev_region_labels(Path(args.jev_labels))
+        print(json.dumps({"jevNodeLabels": len(jev)}), flush=True)
 
     print("counting train labels", flush=True)
     counts = count_labels(dataset / "nodes-train.jsonl.gz")
@@ -211,11 +277,14 @@ def main() -> None:
 
     manifest: dict[str, object] = {
         "featurizerVersion": schema["featurizerVersion"],
+        "datasetVersion": args.dataset_version,
         "classes": REGION_CLASSES,
         "trainLabelCounts": dict(counts),
         "samplingRates": rates,
         "maxTrainRows": MAX_TRAIN_ROWS,
         "contentBlockRatio": CONTENT_BLOCK_RATIO,
+        "jevLabelFile": args.jev_labels,
+        "jevNodeLabels": len(jev) if jev is not None else 0,
         "splits": {},
     }
 
@@ -223,8 +292,8 @@ def main() -> None:
         # Only the training split is subsampled. Val and holdout are kept whole,
         # so every reported number is over the real class distribution.
         split_rates = rates if split == "train" else {}
-        matrix, labels, groups, refs, masked, weights, kept = build_split(
-            dataset / f"nodes-{split}.jsonl.gz", split_rates, n_numeric, n_tokens
+        matrix, labels, groups, refs, masked, weights, kept, sources, agree, disagree = build_split(
+            dataset / f"nodes-{split}.jsonl.gz", split_rates, n_numeric, n_tokens, jev
         )
         sp.save_npz(out / f"X-{split}.npz", matrix)
         np.save(out / f"y-{split}.npy", labels)
@@ -245,8 +314,18 @@ def main() -> None:
             "nnz": int(matrix.nnz),
             "domains": len(set(groups)),
             "byClass": dict(by_class),
+            "labelSources": dict(sources),
+            # Over the nodes BOTH sources labelled. A node only one of them
+            # labelled is not a disagreement, and counting it as agreement
+            # would make the rate look better the more div-soup data is added.
+            "silverJevOverlap": agree + disagree,
+            "silverJevDisagreements": disagree,
+            "silverJevDisagreementRate": (
+                round(disagree / (agree + disagree), 4) if (agree + disagree) else None
+            ),
         }
-        print(f"{split}: {matrix.shape[0]} rows, {matrix.nnz} nnz, {len(set(groups))} domains",
+        print(f"{split}: {matrix.shape[0]} rows, {matrix.nnz} nnz, {len(set(groups))} domains, "
+              f"jev-only={sources.get('jev-only', 0)}, disagree={disagree}/{agree + disagree}",
               flush=True)
         del matrix, labels, groups, refs, masked, weights, kept
 
