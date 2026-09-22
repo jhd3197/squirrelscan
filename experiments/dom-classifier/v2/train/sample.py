@@ -17,7 +17,7 @@ Sampling policy:
   - every row of every rare class kept;
   - content_block downsampled to at most CONTENT_BLOCK_RATIO x the largest
     other class;
-  - total capped at MAX_TRAIN_ROWS.
+  - total capped at --max-train-rows (see DEFAULT_MAX_TRAIN_ROWS).
 
 Selection is deterministic: a row is kept when a hash of (pageId, nodeId) falls
 under the class's rate, so two runs pick the same rows and a rerun after a
@@ -38,7 +38,19 @@ import numpy as np
 import scipy.sparse as sp
 
 CHUNK_ROWS = 50_000
-MAX_TRAIN_ROWS = 600_000
+
+#: Default node budget for the training sample, unchanged from the silver-v1
+#: run so a rerun of that reproduces it. `--max-train-rows` overrides it.
+#:
+#: This is the number that decides whether a bigger corpus buys anything. Every
+#: class except content_block is kept whole until the GLOBAL cap binds, and then
+#: the cap scales the rare classes down by whatever factor brings the total back
+#: under it. Run the arithmetic on the silver-v1 class counts at 1x and at 2.7x
+#: and the kept non-content_block rows come out at 570,593 and 570,594 — the
+#: same number, footer 196,025 both times. A corpus 2.7x the size therefore
+#: delivers a more diverse DRAW (more domains behind the same row count) and not
+#: one extra row of supervision, unless this moves with it.
+DEFAULT_MAX_TRAIN_ROWS = 600_000
 CONTENT_BLOCK_RATIO = 3.0
 
 # The 10 product classes. article_footer folds into article_header as
@@ -93,7 +105,9 @@ def count_labels(path: Path) -> Counter:
     return counts
 
 
-def sampling_rates(counts: Counter) -> dict[str, float]:
+def sampling_rates(
+    counts: Counter, max_train_rows: int = DEFAULT_MAX_TRAIN_ROWS
+) -> dict[str, float]:
     """One rate per class. Everything except content_block is kept whole."""
     others = {k: v for k, v in counts.items() if k != "content_block"}
     largest_other = max(others.values()) if others else 0
@@ -106,8 +120,8 @@ def sampling_rates(counts: Counter) -> dict[str, float]:
     # Global cap, applied to content_block first and only then across the board,
     # so the cap never eats a rare class before it touches the abundant one.
     projected = sum(counts[name] * rates[name] for name in counts)
-    if projected > MAX_TRAIN_ROWS:
-        surplus = projected - MAX_TRAIN_ROWS
+    if projected > max_train_rows:
+        surplus = projected - max_train_rows
         cb = counts.get("content_block", 0) * rates.get("content_block", 0)
         if cb > 0:
             take = min(surplus, cb * 0.95)
@@ -249,6 +263,8 @@ def main() -> None:
     parser.add_argument("--out", required=True)
     parser.add_argument("--dataset-version", default="silver-v1",
                         help="subdirectory of --data-root holding nodes-*.jsonl.gz")
+    parser.add_argument("--max-train-rows", type=int, default=DEFAULT_MAX_TRAIN_ROWS,
+                        help="node budget for the training sample; see DEFAULT_MAX_TRAIN_ROWS")
     parser.add_argument("--jev-labels", default=None,
                         help="run-divsoup-v7.ts output; adds Jev as a third label source")
     args = parser.parse_args()
@@ -275,7 +291,7 @@ def main() -> None:
 
     print("counting train labels", flush=True)
     counts = count_labels(dataset / "nodes-train.jsonl.gz")
-    rates = sampling_rates(counts)
+    rates = sampling_rates(counts, args.max_train_rows)
     print(json.dumps({"counts": dict(counts), "rates": rates}, indent=2), flush=True)
 
     manifest: dict[str, object] = {
@@ -284,7 +300,7 @@ def main() -> None:
         "classes": REGION_CLASSES,
         "trainLabelCounts": dict(counts),
         "samplingRates": rates,
-        "maxTrainRows": MAX_TRAIN_ROWS,
+        "maxTrainRows": args.max_train_rows,
         "contentBlockRatio": CONTENT_BLOCK_RATIO,
         "jevLabelFile": args.jev_labels,
         "jevNodeLabels": len(jev) if jev is not None else 0,
