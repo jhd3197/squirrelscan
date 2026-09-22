@@ -758,6 +758,22 @@ export function unfoldAggregateCheck(check: CheckResult): CheckResult[] {
           occurrenceCount: unplaceable.length,
         }
       : undefined);
+  // What the resource drop above costs has to be legible for the same reason,
+  // and more sharply: the report groups resources by PAGE SET, so a partial set
+  // yields a unit naming fewer pages — a wrong answer that reads exactly like a
+  // right one.
+  const unplaceableResources = (check.siteResourceOccurrences ?? []).filter(
+    (occurrence) => !pageSet.has(occurrence.pageUrl),
+  );
+  const siteResourceEvidence =
+    check.siteResourceEvidence ??
+    (unplaceableResources.length > 0
+      ? {
+          state: "omitted" as const,
+          reason: "page-sample-limit" as const,
+          occurrenceCount: unplaceableResources.length,
+        }
+      : undefined);
 
   return check.pages.map((page, i) => {
     const pageItems = itemsByPage.get(page);
@@ -778,6 +794,7 @@ export function unfoldAggregateCheck(check: CheckResult): CheckResult[] {
       // Same rationale as `additional`: a whole-fold fact cannot be split
       // across rows, so it is pinned to the first one rather than repeated.
       componentEvidence: i === 0 ? componentEvidence : undefined,
+      siteResourceEvidence: i === 0 ? siteResourceEvidence : undefined,
     };
   });
 }
@@ -1047,6 +1064,30 @@ function foldGroup(group: CheckResult[], limits: FoldLimits): CheckResult {
       const right = `${b.pageUrl}\0${b.kind}\0${b.key}\0${b.source}`;
       return left < right ? -1 : left > right ? 1 : 0;
     });
+  // Folding rebuilds the aggregate field by field, so a marker on any member
+  // has to be merged forward or the fold erases the fact that evidence existed.
+  const resourceMarkers = group
+    .map((check) => check.siteResourceEvidence)
+    .filter((marker): marker is NonNullable<CheckResult["siteResourceEvidence"]> =>
+      Boolean(marker),
+    );
+  const siteResourceEvidence =
+    resourceMarkers.length > 0
+      ? {
+          state: "omitted" as const,
+          // Same precedence as the component markers above: `payload-limit`
+          // outranks `page-sample-limit`, which outranks the bookkeeping one.
+          reason: resourceMarkers.some((marker) => marker.reason === "payload-limit")
+            ? ("payload-limit" as const)
+            : resourceMarkers.some((marker) => marker.reason === "page-sample-limit")
+              ? ("page-sample-limit" as const)
+              : ("sibling-row" as const),
+          occurrenceCount: resourceMarkers.reduce(
+            (sum, marker) => sum + marker.occurrenceCount,
+            0,
+          ),
+        }
+      : undefined;
 
   return {
     name: first.name,
@@ -1058,6 +1099,7 @@ function foldGroup(group: CheckResult[], limits: FoldLimits): CheckResult {
     ...(first.skipReason !== undefined ? { skipReason: first.skipReason } : {}),
     ...(componentOccurrences.length > 0 ? { componentOccurrences } : {}),
     ...(siteResourceOccurrences.length > 0 ? { siteResourceOccurrences } : {}),
+    ...(siteResourceEvidence ? { siteResourceEvidence } : {}),
     ...(componentEvidence ? { componentEvidence } : {}),
     ...(allUnrendered
       ? { provenance: "unrendered" as const }

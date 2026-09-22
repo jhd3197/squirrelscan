@@ -27,6 +27,7 @@
 
 import type { CheckItem, CheckResult, PageFindingRecord } from "@squirrelscan/core-contracts";
 import { unpackComponentOccurrences } from "@squirrelscan/core-contracts/component-evidence";
+import { unpackSiteResourceOccurrences } from "@squirrelscan/core-contracts/site-resource-evidence";
 import type { RuleRunResult } from "@squirrelscan/rules/types";
 
 import type { SkippedPassCounts } from "./stream-findings";
@@ -80,6 +81,10 @@ interface ParsedPayload {
    * accepts both. */
   componentOccurrences?: unknown;
   componentEvidence?: CheckResult["componentEvidence"];
+  /** (#2341) Resource evidence as `flattenChecks` wrote it: the hoisted wire
+   * form, or a plain occurrence array from before the codec. */
+  siteResourceOccurrences?: unknown;
+  siteResourceEvidence?: CheckResult["siteResourceEvidence"];
 }
 
 /** Emission-order key for an item finding's payload; findings without a stamped
@@ -207,6 +212,23 @@ function reconstructRuleChecks(findings: PageFindingRecord[]): CheckResult[] {
       const componentEvidence =
         markers.find((marker) => marker.reason !== "sibling-row") ?? markers[0];
       if (componentEvidence) check.componentEvidence = componentEvidence;
+    }
+
+    // (#2341) Same ownership rule, same fallback: one row holds the set, the
+    // rest hold markers, and a marker surviving alone is how a lost owner stays
+    // visible instead of looking like a check that never had evidence.
+    const siteResourceOccurrences = parsed
+      .map((entry) => unpackSiteResourceOccurrences(entry.siteResourceOccurrences))
+      .find((entry) => entry !== undefined && entry.length > 0);
+    if (siteResourceOccurrences) {
+      check.siteResourceOccurrences = siteResourceOccurrences;
+    } else {
+      const markers = parsed
+        .map((entry) => entry.siteResourceEvidence)
+        .filter((marker): marker is NonNullable<typeof marker> => Boolean(marker));
+      const siteResourceEvidence =
+        markers.find((marker) => marker.reason !== "sibling-row") ?? markers[0];
+      if (siteResourceEvidence) check.siteResourceEvidence = siteResourceEvidence;
     }
 
     checks.push(check);

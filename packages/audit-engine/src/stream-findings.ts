@@ -49,21 +49,69 @@ function clampComponentEvidenceForStream(payload: string | null): string | null 
   }
 
   const occurrences = parsed.componentOccurrences;
-  if (!Array.isArray(occurrences)) return payload;
+  // (#2341) Either kind of evidence can be the reason a payload is over cap, so
+  // a payload carrying only resource evidence must still be clampable.
+  const resources = parsed.siteResourceOccurrences;
+  const resourceCount = siteResourceOccurrenceCount(resources);
+  if (!Array.isArray(occurrences) && resourceCount === 0) return payload;
 
-  const { componentOccurrences: _componentOccurrences, ...withoutEvidence } = parsed;
+  const {
+    componentOccurrences: _componentOccurrences,
+    siteResourceOccurrences: _siteResourceOccurrences,
+    ...withoutEvidence
+  } = parsed;
+  const resourceMarker =
+    resourceCount > 0
+      ? {
+          siteResourceEvidence: {
+            state: "omitted",
+            reason: "payload-limit",
+            occurrenceCount: resourceCount,
+          },
+        }
+      : {};
+
+  // Element evidence is the bulkier of the two, so try dropping it alone first:
+  // the resource set is what decides the shared-bundle page count, and losing it
+  // changes the grouping answer rather than merely thinning the evidence.
+  if (Array.isArray(occurrences) && resourceCount > 0) {
+    const resourceKept = JSON.stringify({
+      ...withoutEvidence,
+      siteResourceOccurrences: resources,
+      componentEvidence: {
+        state: "omitted",
+        reason: "payload-limit",
+        occurrenceCount: occurrences.length,
+      },
+    });
+    if (resourceKept.length <= REPORT_LIMITS.maxFindingPayload) return resourceKept;
+  }
+
   const omitted = JSON.stringify({
     ...withoutEvidence,
-    componentEvidence: {
-      state: "omitted",
-      reason: "payload-limit",
-      occurrenceCount: occurrences.length,
-    },
+    ...resourceMarker,
+    ...(Array.isArray(occurrences)
+      ? {
+          componentEvidence: {
+            state: "omitted",
+            reason: "payload-limit",
+            occurrenceCount: occurrences.length,
+          },
+        }
+      : {}),
   });
   if (omitted.length <= REPORT_LIMITS.maxFindingPayload) return omitted;
   // No room for even the marker without trimming legacy data. Keep that data
   // byte-identical rather than emitting an over-cap payload the ingest drops.
   return JSON.stringify(withoutEvidence);
+}
+
+/** Occurrence count in either wire form, without rehydrating the whole blob. */
+function siteResourceOccurrenceCount(value: unknown): number {
+  if (Array.isArray(value)) return value.length;
+  if (!value || typeof value !== "object") return 0;
+  const rows = (value as { occurrences?: unknown }).occurrences;
+  return Array.isArray(rows) ? rows.length : 0;
 }
 
 /**
