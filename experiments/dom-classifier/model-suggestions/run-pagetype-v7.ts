@@ -178,6 +178,13 @@ const failureCounts: Record<string, number> = {};
 const MAX_NO_CALL_STREAK = Number(argument("--max-no-call-streak", "200"));
 if (!Number.isInteger(MAX_NO_CALL_STREAK) || MAX_NO_CALL_STREAK < 1)
   throw new Error("--max-no-call-streak must be a positive integer");
+/** Spend ceiling for THIS run, in USD at the $0.042/M input rate. Workers stop
+ *  taking rows once it is reached; the requests already in flight (at most
+ *  `--concurrency`) still land, so the overshoot is a few pages. 0 = no cap. */
+const MAX_USD = Number(argument("--max-usd", "0"));
+if (!Number.isFinite(MAX_USD) || MAX_USD < 0) throw new Error("--max-usd must be >= 0");
+const spentUsd = () => (totals.inputTokens * 42) / 1_000_000_000;
+let budgetReached = false;
 let noCallStreak = 0;
 let aborted: string | null = null;
 /** Every row a worker finished, whatever the outcome. */
@@ -196,7 +203,8 @@ const startedAt = Date.now();
 async function worker(): Promise<void> {
   for (;;) {
     const index = cursor++;
-    if (aborted || index >= work.length) return;
+    if (MAX_USD > 0 && spentUsd() >= MAX_USD) budgetReached = true;
+    if (aborted || budgetReached || index >= work.length) return;
     const row = work[index];
     // Everything for this row is inside the try, including reading the store
     // and building the evidence. When those sat outside it, one page that threw
@@ -302,6 +310,8 @@ console.log(
     medianLatencyMs: latencies.length ? latencies[Math.floor(latencies.length / 2)] : null,
     p95LatencyMs: latencies.length ? latencies[Math.floor(latencies.length * 0.95)] : null,
     aborted,
+    budgetReached,
+    unprocessed: Math.max(0, work.length - processed),
     failureCounts,
     failures,
   }),

@@ -38,6 +38,15 @@ const storeRoots = (process.env.SQUIRREL_STORES ?? process.env.SQUIRREL_STORE ??
   .map((path) => path.trim())
   .filter(Boolean);
 if (storeRoots.length === 0) throw new Error("SQUIRREL_STORES must be set");
+/** Roots whose `projects/` are read for the hash -> url index ONLY; their
+ *  content store is never opened. For a snapshot of a content store taken
+ *  without its project databases: the live store keeps being LRU-pruned by
+ *  other audits, so its bytes are read from the snapshot and only its urls
+ *  from the live projects. */
+const indexOnlyRoots = (process.env.SQUIRREL_INDEX_ONLY_ROOTS ?? "")
+  .split(":")
+  .map((path) => path.trim())
+  .filter(Boolean);
 
 function argument(name: string, fallback: string): string {
   const index = Bun.argv.indexOf(name);
@@ -48,7 +57,22 @@ function argument(name: string, fallback: string): string {
 }
 const maxPerDomain = Number(argument("--max-per-domain", "25"));
 const verifyAgainst = argument("--verify-against", "");
-const outDir = resolve(dataRoot, "pagetype-jev-v7");
+const outDir = resolve(argument("--out", resolve(dataRoot, "pagetype-jev-v7")));
+if (!outDir.startsWith(`${resolve(dataRoot)}/`))
+  throw new Error(`--out must be under ${resolve(dataRoot)}`);
+/** An embargoed evaluation sample (`divsoup-eval-v1/sample.jsonl`): its pages
+ *  AND every page of its domains stay out of the queue, so no label drawn here
+ *  sits on a template the evaluation scores. Throws if the file is missing
+ *  rather than quietly excluding nothing. */
+const excludeSamplePath = argument("--exclude-sample", "");
+const excludedPageIds = new Set<string>();
+const excludedDomains = new Set<string>();
+if (excludeSamplePath)
+  for (const line of readFileSync(excludeSamplePath, "utf8").split("\n").filter(Boolean)) {
+    const row = JSON.parse(line) as { pageId: string; domain?: string };
+    excludedPageIds.add(row.pageId);
+    if (row.domain) excludedDomains.add(row.domain);
+  }
 mkdirSync(outDir, { recursive: true, mode: 0o700 });
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -66,7 +90,7 @@ const index = new Map<string, string>();
  *  PNG, a zip or a JSON feed, and the content store files those bytes as
  *  text/html all the same. */
 const contentTypes = new Map<string, string | null>();
-for (const root of storeRoots) {
+for (const root of [...storeRoots, ...indexOnlyRoots]) {
   const projectsDir = `${root}/projects`;
   if (!existsSync(projectsDir)) continue;
   const dirs = (
@@ -134,6 +158,7 @@ console.log(JSON.stringify({ stage: "available", hashes: available.size }));
 const byDomain = new Map<string, Array<{ hash: string; url: string }>>();
 let pruned = 0;
 let noDomain = 0;
+let excludedEval = 0;
 for (const [hash, url] of index) {
   if (!available.has(hash)) {
     pruned++;
@@ -147,6 +172,10 @@ for (const [hash, url] of index) {
   const domain = parsed.domain ?? parsed.hostname ?? "";
   if (!domain) {
     noDomain++;
+    continue;
+  }
+  if (excludedDomains.has(domain) || excludedPageIds.has(hash.slice(0, 16))) {
+    excludedEval++;
     continue;
   }
   const bucket = byDomain.get(domain);
@@ -246,6 +275,7 @@ const summary = {
   maxPerDomain,
   prunedFromStore: pruned,
   noDomain,
+  excludedEval: { pages: excludedEval, sampleDomains: excludedDomains.size },
   skipped,
   splitDriftChecked: checked,
   splitDrifted: drifted,
