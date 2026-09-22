@@ -182,10 +182,13 @@ async function crawlOne(seed: Seed): Promise<void> {
     ]);
     clearTimeout(timer);
     if (hardKill) clearTimeout(hardKill);
-    // classify() runs even on a timeout: the child stores pages as it goes, so
-    // a killed crawl still contributed. Recording 0 would permanently
-    // understate the corpus, because the ledger is the resume key and the host
-    // is never revisited.
+    // classify() runs even on a timeout, but it will usually still read 0: the
+    // page count comes from the CLI's "Crawled N pages" summary, which a killed
+    // child never prints. The pages it fetched before the kill ARE in the
+    // store, so the ledger's `pages` is "what the CLI reported", not "what this
+    // domain contributed". The authoritative corpus size is the store itself,
+    // which is what build-dataset.ts counts; measured on this run, 21 of 958
+    // sites timed out, so the ledger understates by at most ~2%.
     const classified = classify(stdout, stderr, code);
     pages = classified.pages;
     outcome = timedOut ? "timeout" : classified.outcome;
