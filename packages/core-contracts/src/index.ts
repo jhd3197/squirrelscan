@@ -191,6 +191,46 @@ export interface ComponentOccurrence {
   };
 }
 
+/**
+ * One observation of a shared SITE RESOURCE on one page.
+ *
+ * The non-DOM sibling of {@link ComponentOccurrence}. A source map is not an
+ * element: it has no region, no locator and no structural signature, so
+ * borrowing that shape would mean inventing five fields a reader could not act
+ * on and would push a URL through DOM-shaped grouping that asks the wrong
+ * question. What a shared resource has instead is an IDENTITY (`key`) and the
+ * set of pages that reference it, which is exactly what the report stage needs
+ * to say "one build ships this, on N pages".
+ *
+ * Rules see one page at a time and so cannot know a resource is shared; they
+ * record what they saw and the report stage, which sees every page, decides.
+ * Emitted UNCAPPED, unlike `items` — a cap would turn affected-page membership
+ * into an unlabelled guess, the same reason `componentOccurrences` is uncapped.
+ */
+export interface SiteResourceOccurrence {
+  /**
+   * What kind of shared resource this is. A consumer that does not know a kind
+   * renders nothing for it rather than narrating it with borrowed confidence.
+   */
+  kind: "source-map";
+  /** The resource's identity: for a source map, its absolute URL. */
+  key: string;
+  /** The page this observation was made on. */
+  pageUrl: string;
+  /**
+   * Where on the page it was referenced from — a script `src`, `HTTP header`,
+   * `inline style`. Carried so a reader can find the reference, never grouped
+   * on: the same map reached through two references is still one repair.
+   */
+  source: string;
+  /**
+   * Site identity, from {@link componentSiteOrigin}. Two origins in one crawl
+   * are two builds, and merging them would claim a fix that one of them does
+   * not have.
+   */
+  siteOrigin: string;
+}
+
 export interface CheckResult {
   name: string;
   status: CheckStatus;
@@ -207,6 +247,13 @@ export interface CheckResult {
    * It never replaces items, pages, or the original rule detection.
    */
   componentOccurrences?: ComponentOccurrence[];
+  /**
+   * Complete, additive evidence of the shared site RESOURCES behind a finding,
+   * for report-stage site-level grouping. Like {@link componentOccurrences} it
+   * never replaces items, pages, or the original rule detection: a rule emitting
+   * this keeps its per-page checks byte-identical.
+   */
+  siteResourceOccurrences?: SiteResourceOccurrence[];
   /**
    * Evidence this check HAD but that a bounded surface could not carry. It is
    * the honest counterpart of {@link componentOccurrences}: a reader that finds

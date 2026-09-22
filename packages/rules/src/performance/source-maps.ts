@@ -4,6 +4,7 @@
 import type { CheckResult, Rule, RuleContext, RuleResult } from "../types";
 
 import { resolveUrl } from "@squirrelscan/utils";
+import { siteResourceOccurrences } from "../shared/site-resource-occurrence";
 
 export const sourceMapsRule: Rule = {
   meta: {
@@ -166,6 +167,19 @@ export const sourceMapsRule: Rule = {
             ? { additional: uniqueSourceMaps.length - 10 }
             : {}),
         },
+        // Additive evidence only: name, status, message, items and details above
+        // are exactly what this rule emitted before, so the status and the score
+        // cannot move. `items` stays the bounded 10-entry sample it has always
+        // been; this carries the WHOLE set, because the report stage groups on
+        // "which pages reference which maps" and a sampled set would make that
+        // membership a guess. On a template site every page lands the same keys
+        // here, which is precisely the fact one build-level fix turns on.
+        siteResourceOccurrences: siteResourceOccurrences({
+          kind: "source-map",
+          pageUrl: ctx.page.url,
+          observedUrl: ctx.page.finalUrl,
+          resources: uniqueSourceMaps.map((s) => ({ key: s.url, source: s.source })),
+        }),
       });
     }
 

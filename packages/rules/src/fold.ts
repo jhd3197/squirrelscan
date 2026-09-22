@@ -4,6 +4,7 @@ import type {
   CheckItem,
   CheckResult,
   ComponentOccurrence,
+  SiteResourceOccurrence,
 } from "@squirrelscan/core-contracts";
 import {
   clampDetailsRecord,
@@ -729,6 +730,17 @@ export function unfoldAggregateCheck(check: CheckResult): CheckResult[] {
     if (list) list.push(occurrence);
     else occurrencesByPage.set(occurrence.pageUrl, [occurrence]);
   }
+  // Shared-resource evidence rides the same rows, under the same rule: it never
+  // adds one. An occurrence for a page the fold did not keep is dropped rather
+  // than pinned to an unrelated row, because the page set is the whole claim —
+  // a map re-attributed to the wrong page would make the report name pages that
+  // never referenced it.
+  const siteResourcesByPage = new Map<string, SiteResourceOccurrence[]>();
+  for (const occurrence of check.siteResourceOccurrences ?? []) {
+    const list = siteResourcesByPage.get(occurrence.pageUrl);
+    if (list) list.push(occurrence);
+    else siteResourcesByPage.set(occurrence.pageUrl, [occurrence]);
+  }
   // Evidence for a page outside the bounded sample cannot be placed on any row.
   // Record how much was dropped rather than losing it silently or inventing a
   // row for it. A marker the check already carries describes a harder loss
@@ -762,6 +774,7 @@ export function unfoldAggregateCheck(check: CheckResult): CheckResult[] {
       items: pageItems && pageItems.length > 0 ? pageItems : undefined,
       details: Object.keys(details).length > 0 ? details : undefined,
       componentOccurrences: pageOccurrences,
+      siteResourceOccurrences: siteResourcesByPage.get(page),
       // Same rationale as `additional`: a whole-fold fact cannot be split
       // across rows, so it is pinned to the first one rather than repeated.
       componentEvidence: i === 0 ? componentEvidence : undefined,
@@ -1021,6 +1034,19 @@ function foldGroup(group: CheckResult[], limits: FoldLimits): CheckResult {
       const right = `${b.pageUrl}\0${b.family.key}\0${b.variant.key}\0${b.element.locator}\0${b.defect.kind}`;
       return left < right ? -1 : left > right ? 1 : 0;
     });
+  // Same contract as `componentOccurrences` above and for the same reason: this
+  // is membership evidence, not a presentation sample, so it is concatenated
+  // whole rather than capped. Its size is bounded by the crawl anyway — one
+  // small record per (page, distinct resource), and a build ships a handful of
+  // maps, not a per-page list. Sorted on the full identity so a re-fold and a
+  // payload round-trip serialize identically.
+  const siteResourceOccurrences = group
+    .flatMap((check) => check.siteResourceOccurrences ?? [])
+    .sort((a, b) => {
+      const left = `${a.pageUrl}\0${a.kind}\0${a.key}\0${a.source}`;
+      const right = `${b.pageUrl}\0${b.kind}\0${b.key}\0${b.source}`;
+      return left < right ? -1 : left > right ? 1 : 0;
+    });
 
   return {
     name: first.name,
@@ -1031,6 +1057,7 @@ function foldGroup(group: CheckResult[], limits: FoldLimits): CheckResult {
     details,
     ...(first.skipReason !== undefined ? { skipReason: first.skipReason } : {}),
     ...(componentOccurrences.length > 0 ? { componentOccurrences } : {}),
+    ...(siteResourceOccurrences.length > 0 ? { siteResourceOccurrences } : {}),
     ...(componentEvidence ? { componentEvidence } : {}),
     ...(allUnrendered
       ? { provenance: "unrendered" as const }
