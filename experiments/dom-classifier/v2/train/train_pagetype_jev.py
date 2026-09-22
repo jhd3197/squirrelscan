@@ -217,6 +217,8 @@ def main() -> None:
     parser.add_argument("--out", required=True)
     parser.add_argument("--rounds", type=int, default=400)
     parser.add_argument("--folds", type=int, default=5)
+    parser.add_argument("--max-iterations", type=int, default=0,
+                        help="cap the shipped boosting rounds; 0 means no cap")
     args = parser.parse_args()
 
     root = Path(args.data_root)
@@ -308,7 +310,18 @@ def main() -> None:
     report["learningCurve"] = curve
 
     # Final model: the whole pool, at the median CV best iteration.
+    #
+    # `--max-iterations` caps that. The region head is budgeted by bytes and
+    # this head is not, so with a much larger label pool it can train longer and
+    # push the COMBINED artifact past the 2 MB ship gate — a limit neither head
+    # can see on its own. Default 0 leaves the behaviour exactly as it was; the
+    # cap is only reached for when the export reports an oversized artifact.
     iterations = int(np.median(best["iterations"])) if best["iterations"] else 100
+    if args.max_iterations > 0 and iterations > args.max_iterations:
+        print(f"capping iterations {iterations} -> {args.max_iterations} for the artifact budget",
+              flush=True)
+        iterations = args.max_iterations
+    report["iterationCap"] = args.max_iterations or None
     config = {k: best[k] for k in ("numLeaves", "minDataInLeaf", "learningRate")}
     weights = w if best["softTargetWeights"] else np.ones(x.shape[0])
     booster = train_booster(x, y, weights, None, None, None, config, iterations)
