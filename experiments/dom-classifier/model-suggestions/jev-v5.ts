@@ -66,9 +66,26 @@ const MAX_PAGE_EVIDENCE = 12;
 const EMPTY_TEXT = "[empty]";
 /** Tags whose text is never page prose; mirrors the extractor's text walk. */
 const PAGE_TEXT_SKIP: ReadonlySet<string> = new Set([
-  "script", "style", "template", "noscript", "svg", "canvas", "iframe", "object",
-  "embed", "head", "title", "link", "meta", "base", "math", "map", "area",
-  "track", "source", "param",
+  "script",
+  "style",
+  "template",
+  "noscript",
+  "svg",
+  "canvas",
+  "iframe",
+  "object",
+  "embed",
+  "head",
+  "title",
+  "link",
+  "meta",
+  "base",
+  "math",
+  "map",
+  "area",
+  "track",
+  "source",
+  "param",
 ]);
 
 const tokenPattern = /(?:bearer\s+|api[_-]?key\s*[=:]\s*|password\s*[=:]\s*)[^\s,;]+/gi;
@@ -425,11 +442,7 @@ export function serializePagePacket(evidence: PageEvidence): string {
  * carry no markup at all, which are 57% of the holdout split and the whole
  * reason this labelling exists.
  */
-export function pageEvidenceFromHtml(
-  html: string,
-  pageUrl: string,
-  pageId: string,
-): PageEvidence {
+export function pageEvidenceFromHtml(html: string, pageUrl: string, pageId: string): PageEvidence {
   // A single linear walk collecting each element's OWN text. Going through
   // `extractPage` instead would shape every candidate, and shaping runs
   // `querySelectorAll` over each node's subtree: quadratic in page size, which
@@ -437,8 +450,21 @@ export function pageEvidenceFromHtml(
   // prose. Own text also avoids the duplication subtree text produces, where a
   // section and its paragraphs each contribute the same sentences.
   const { document } = parseHTML(html);
-  const body = (document as { body?: unknown }).body as
-    | { firstChild: unknown; nextSibling: unknown; nodeType: number; localName?: string; nodeName: string }
+  // linkedom's `body` getter destructures `documentElement.firstElementChild`,
+  // so on a document with no element at all it throws instead of returning
+  // null. Check first; `unusableHtmlReason` is how a caller skips such a page.
+  const body = (
+    (document as { documentElement?: unknown }).documentElement
+      ? (document as { body?: unknown }).body
+      : null
+  ) as
+    | {
+        firstChild: unknown;
+        nextSibling: unknown;
+        nodeType: number;
+        localName?: string;
+        nodeName: string;
+      }
     | null
     | undefined;
   const collected: Array<{ rank: number; text: string }> = [];

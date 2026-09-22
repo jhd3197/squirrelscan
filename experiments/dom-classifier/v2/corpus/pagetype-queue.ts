@@ -25,8 +25,11 @@ import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { gunzipSync } from "node:zlib";
 
 import { parse as parseDomain } from "tldts";
+
+import { type UnusableHtml, unusableHtmlReason } from "../unusable-html.ts";
 
 const dataRoot = process.env.DOM_CLASSIFIER_DATA_ROOT;
 if (!dataRoot) throw new Error("DOM_CLASSIFIER_DATA_ROOT must be set");
@@ -59,6 +62,10 @@ function splitOf(domain: string): Split {
 
 // --- hash -> url, from every store's project databases -----------------------
 const index = new Map<string, string>();
+/** The response content type the crawl recorded for each hash. A 200 can be a
+ *  PNG, a zip or a JSON feed, and the content store files those bytes as
+ *  text/html all the same. */
+const contentTypes = new Map<string, string | null>();
 for (const root of storeRoots) {
   const projectsDir = `${root}/projects`;
   if (!existsSync(projectsDir)) continue;
@@ -72,10 +79,13 @@ for (const root of storeRoots) {
       db = new Database(`${projectsDir}/${rel}`, { readonly: true });
       for (const row of db
         .query(
-          "SELECT normalized_url AS url, content_hash AS hash FROM pages WHERE content_hash IS NOT NULL AND status = 200",
+          "SELECT normalized_url AS url, content_hash AS hash, content_type AS type FROM pages WHERE content_hash IS NOT NULL AND status = 200",
         )
-        .all() as Array<{ url: string; hash: string }>)
-        if (!index.has(row.hash)) index.set(row.hash, row.url);
+        .all() as Array<{ url: string; hash: string; type: string | null }>)
+        if (!index.has(row.hash)) {
+          index.set(row.hash, row.url);
+          contentTypes.set(row.hash, row.type);
+        }
       opened++;
     } catch {
       /* a project database mid-write is skipped, not fatal */
@@ -88,13 +98,40 @@ for (const root of storeRoots) {
 
 // --- which hashes still have bytes ------------------------------------------
 const available = new Set<string>();
+const contentStores: Database[] = [];
 for (const root of storeRoots) {
   const path = `${root}/content-store.db`;
   if (!existsSync(path)) continue;
   const db = new Database(path, { readonly: true });
   for (const row of db.query("SELECT hash FROM content").all() as Array<{ hash: string }>)
     available.add(row.hash);
-  db.close();
+  contentStores.push(db);
+}
+const contentSelects = contentStores.map((db) =>
+  db.query<{ content: Uint8Array }, [string]>("SELECT content FROM content WHERE hash = ?"),
+);
+/** HTML, or unknown: a missing content type is left to the bytes to decide. */
+function isHtmlType(type: string | null | undefined): boolean {
+  const essence = type?.split(";")[0]?.trim().toLowerCase();
+  return !essence || essence === "text/html" || essence === "application/xhtml+xml";
+}
+/** Why a selected page has nothing to label, read from the same bytes the
+ *  runner will read. `missingHtml` is a row pruned since the hash list above. */
+function unusable(hash: string): UnusableHtml | "unreadableBlob" | "missingHtml" | null {
+  for (const select of contentSelects) {
+    const row = select.get(hash);
+    if (!row) continue;
+    // The store gzips every blob, so one that does not gunzip is unreadable,
+    // not raw HTML: decoding it raw is how a bad read passed for a page.
+    let html: string;
+    try {
+      html = new TextDecoder().decode(gunzipSync(row.content));
+    } catch {
+      return "unreadableBlob";
+    }
+    return unusableHtmlReason(html);
+  }
+  return "missingHtml";
 }
 console.log(JSON.stringify({ stage: "available", hashes: available.size }));
 
@@ -131,6 +168,15 @@ let checked = 0;
 const rows: Record<Split, string[]> = { train: [], val: [], holdout: [] };
 const domainsBySplit: Record<Split, number> = { train: 0, val: 0, holdout: 0 };
 const manifest: Record<string, Split> = {};
+// Named skip reasons, so a page with no usable HTML never reaches the runner
+// and surfaces there as a crash (#2307).
+const skipped: Record<UnusableHtml | "notHtml" | "unreadableBlob" | "missingHtml", number> = {
+  emptyHtml: 0,
+  noDocumentElement: 0,
+  notHtml: 0,
+  unreadableBlob: 0,
+  missingHtml: 0,
+};
 for (const [domain, pages] of byDomain) {
   pages.sort((left, right) => (sha256(left.hash) < sha256(right.hash) ? -1 : 1));
   const split = splitOf(domain);
@@ -145,7 +191,16 @@ for (const [domain, pages] of byDomain) {
   }
   manifest[domainHash] = split;
   domainsBySplit[split]++;
-  for (const page of pages.slice(0, maxPerDomain))
+  // Select first, THEN drop what cannot be labelled, with no backfill:
+  // build-dataset.ts takes the same first N and excludes an empty or
+  // element-less page there too, so a backfilled page would be labelled here
+  // and never appear in the dataset.
+  for (const page of pages.slice(0, maxPerDomain)) {
+    const reason = isHtmlType(contentTypes.get(page.hash)) ? unusable(page.hash) : "notHtml";
+    if (reason) {
+      skipped[reason]++;
+      continue;
+    }
     rows[split].push(
       JSON.stringify({
         pageId: page.hash.slice(0, 16),
@@ -155,7 +210,9 @@ for (const [domain, pages] of byDomain) {
         split,
       }),
     );
+  }
 }
+for (const db of contentStores) db.close();
 if (drifted > 0)
   throw new Error(
     `split drift on ${drifted} of ${checked} domains against ${verifyAgainst}: refusing to write`,
@@ -193,6 +250,7 @@ const summary = {
   maxPerDomain,
   prunedFromStore: pruned,
   noDomain,
+  skipped,
   splitDriftChecked: checked,
   splitDrifted: drifted,
 };

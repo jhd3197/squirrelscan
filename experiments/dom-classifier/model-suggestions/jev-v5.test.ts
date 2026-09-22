@@ -13,6 +13,7 @@ import {
   type ExtractedCandidate,
   PAGE_TYPES_V5,
   pageEvidence,
+  pageEvidenceFromHtml,
   PROMPT_REVISION_V5,
   PURPOSES_V5,
   REGIONS_V5,
@@ -20,6 +21,7 @@ import {
   serializeNodePacket,
   toRowsV5,
 } from "./jev-v5.ts";
+import { unusableHtmlReason } from "../v2/unusable-html.ts";
 import type { CapturedNode, CapturedPage } from "../labeler/types.ts";
 import { extractPage } from "../extract-dom.ts";
 
@@ -377,5 +379,52 @@ describe("evaluateWithBackoff", () => {
       ),
     ).rejects.toThrow("422");
     expect(calls).toBe(1);
+  });
+});
+
+describe("pages with no usable HTML (#2307)", () => {
+  const prose = "A paragraph long enough to count as evidence about what this page is for.";
+
+  test("an empty or whitespace body is emptyHtml", () => {
+    expect(unusableHtmlReason("")).toBe("emptyHtml");
+    expect(unusableHtmlReason(" \n\t ")).toBe("emptyHtml");
+  });
+
+  test("bytes that parse to no element are noDocumentElement", () => {
+    for (const html of [
+      "plain text body",
+      '{"ok":true}',
+      "<!doctype html>",
+      "<!-- only a comment -->",
+    ])
+      expect(unusableHtmlReason(html)).toBe("noDocumentElement");
+    // Past the prefix: no element in the first bytes, none after them either.
+    expect(unusableHtmlReason("x".repeat(20_000))).toBe("noDocumentElement");
+  });
+
+  test("a page with an element is usable, wherever the element starts", () => {
+    expect(unusableHtmlReason(`<html><body><p>${prose}</p></body></html>`)).toBeNull();
+    expect(unusableHtmlReason(`<p>${prose}</p>`)).toBeNull();
+    // The first element sits after the prefix, so only the full parse finds it.
+    expect(unusableHtmlReason(`${"x".repeat(20_000)}<p>${prose}</p>`)).toBeNull();
+    // A tag cut at the prefix boundary: the prefix sees no element, the full
+    // parse settles it either way.
+    expect(unusableHtmlReason(`${"x".repeat(8190)}<p class="a">`)).toBeNull();
+    expect(unusableHtmlReason(`${"x".repeat(8190)}<!-- <p> -->`)).toBe("noDocumentElement");
+  });
+
+  test("pageEvidenceFromHtml returns empty evidence instead of throwing", () => {
+    for (const html of ["", "plain text body", "<!doctype html>"]) {
+      const evidence = pageEvidenceFromHtml(html, "https://example.com/a", "p1");
+      expect(evidence.lines).toEqual([]);
+      expect(evidence.path).toBe("/a");
+    }
+    expect(
+      pageEvidenceFromHtml(
+        `<html><body><p>${prose}</p></body></html>`,
+        "https://example.com/",
+        "p2",
+      ).lines,
+    ).toEqual([prose]);
   });
 });

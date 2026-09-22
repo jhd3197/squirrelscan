@@ -36,6 +36,7 @@ import {
   snapshotHash,
   type PolicyRevision,
 } from "./jev-v5.ts";
+import { type UnusableHtml, unusableHtmlReason } from "../v2/unusable-html.ts";
 
 const configuredRoot = process.env.DOM_CLASSIFIER_DATA_ROOT?.trim();
 if (!configuredRoot)
@@ -122,18 +123,18 @@ function resolveContent(prefix: string): { hash: string; html: string } | null {
       break;
     }
   }
-  if (!row?.content) return null;
+  if (!row) return null;
+  // The content store gzips every blob it writes, an empty body included, so a
+  // blob that does not gunzip is a read that went wrong, not a format to guess
+  // at. This used to fall back to decoding the raw bytes, which turned an
+  // unreadable read into "a page with no element" and hid the real error.
+  // Throwing lands it in `failed` with zlib's message, and a resume retries it.
   const bytes = row.content instanceof Uint8Array ? row.content : new Uint8Array(row.content);
   let html: string;
   try {
     html = new TextDecoder().decode(gunzipSync(bytes));
-  } catch {
-    // Not every blob is gzipped; fall back before deciding it is unreadable.
-    try {
-      html = new TextDecoder().decode(bytes);
-    } catch {
-      return null;
-    }
+  } catch (error) {
+    throw new Error(`unreadable blob: ${error instanceof Error ? error.message : String(error)}`);
   }
   return { hash: row.hash, html };
 }
@@ -144,16 +145,43 @@ const requestTimeoutMs = Number(argument("--request-timeout-ms", "45000"));
 if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1000 || requestTimeoutMs > 120_000)
   throw new Error("--request-timeout-ms must be 1000..120000");
 const transport = createHttpTransport({ timeoutMs: requestTimeoutMs });
-const totals = { labelled: 0, missingHtml: 0, failed: 0, inputTokens: 0, retries: 0 };
+const totals: Record<
+  "labelled" | "missingHtml" | UnusableHtml | "failed" | "inputTokens" | "retries",
+  number
+> = {
+  labelled: 0,
+  missingHtml: 0,
+  emptyHtml: 0,
+  noDocumentElement: 0,
+  failed: 0,
+  inputTokens: 0,
+  retries: 0,
+};
 const latencies: number[] = [];
 const failures: Array<{ pageId: string; error: string }> = [];
+/** Every failure by message. `failures` keeps only the first 20, which on
+ *  2026-09-22 showed 20 scattered pages and hid 5,365 consecutive ones. */
+const failureCounts: Record<string, number> = {};
+/**
+ * Rows in a row that ended without a model call, as a failure or an unusable
+ * page. Unusable pages run at about 0.3% of the corpus and a domain holds at
+ * most 25 pages, so a long streak is the process or the store going wrong, not
+ * the pages: stop, rather than record thousands of healthy pages as failures
+ * (or, worse, skip them as empty) in a few minutes. `missingHtml` neither
+ * extends nor breaks it, because a pruned store legitimately drops long runs.
+ */
+const MAX_NO_CALL_STREAK = Number(argument("--max-no-call-streak", "200"));
+if (!Number.isInteger(MAX_NO_CALL_STREAK) || MAX_NO_CALL_STREAK < 1)
+  throw new Error("--max-no-call-streak must be a positive integer");
+let noCallStreak = 0;
+let aborted: string | null = null;
 let cursor = 0;
 const startedAt = Date.now();
 
 async function worker(): Promise<void> {
   for (;;) {
     const index = cursor++;
-    if (index >= work.length) return;
+    if (aborted || index >= work.length) return;
     const row = work[index];
     // Everything for this row is inside the try, including reading the store
     // and building the evidence. When those sat outside it, one page that threw
@@ -165,6 +193,16 @@ async function worker(): Promise<void> {
       const resolved = resolveContent(row.contentHash);
       if (!resolved) {
         totals.missingHtml++;
+        continue;
+      }
+      // An empty body, or bytes with no element in them, is a page with nothing
+      // to label: skipped by name, never counted as `failed`. On 2026-09-22 the
+      // runner threw on these instead, about 100 pages across the three splits.
+      const unusable = unusableHtmlReason(resolved.html);
+      if (unusable) {
+        totals[unusable]++;
+        if (++noCallStreak >= MAX_NO_CALL_STREAK)
+          aborted = `${noCallStreak} consecutive rows without a model call`;
         continue;
       }
       const evidence = pageEvidenceFromHtml(resolved.html, row.url, row.pageId);
@@ -203,16 +241,17 @@ async function worker(): Promise<void> {
         { mode: 0o600 },
       );
       totals.labelled++;
+      noCallStreak = 0;
       totals.retries += retries;
       totals.inputTokens += Number(response.usage?.input_tokens ?? 0);
       latencies.push(latencyMs);
     } catch (error) {
       totals.failed++;
-      if (failures.length < 20)
-        failures.push({
-          pageId: row.pageId,
-          error: error instanceof Error ? error.message : String(error),
-        });
+      const message = error instanceof Error ? error.message : String(error);
+      failureCounts[message] = (failureCounts[message] ?? 0) + 1;
+      if (failures.length < 20) failures.push({ pageId: row.pageId, error: message });
+      if (++noCallStreak >= MAX_NO_CALL_STREAK)
+        aborted = `${noCallStreak} consecutive rows without a model call, last: ${message}`;
     }
     if ((totals.labelled + totals.failed) % 500 === 0)
       console.log(
@@ -240,6 +279,9 @@ console.log(
     wallClockMs: Date.now() - startedAt,
     medianLatencyMs: latencies.length ? latencies[Math.floor(latencies.length / 2)] : null,
     p95LatencyMs: latencies.length ? latencies[Math.floor(latencies.length * 0.95)] : null,
+    aborted,
+    failureCounts,
     failures,
   }),
 );
+if (aborted) process.exit(1);
