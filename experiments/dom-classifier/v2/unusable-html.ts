@@ -4,6 +4,17 @@
  */
 import { parseHTML } from "../../../packages/parser/src/dom.ts";
 
+/**
+ * HTML, or unknown, by the response content type the crawl recorded in
+ * `pages.content_type`. A 200 can be a PNG, a zip or a JSON feed, and the
+ * content store files those bytes as text/html all the same, so this is the
+ * only place the difference survives. A missing type is left to the bytes.
+ */
+export function isHtmlType(type: string | null | undefined): boolean {
+  const essence = type?.split(";")[0]?.trim().toLowerCase();
+  return !essence || essence === "text/html" || essence === "application/xhtml+xml";
+}
+
 /** Why stored bytes cannot be labelled as a page. */
 export type UnusableHtml = "emptyHtml" | "noDocumentElement";
 

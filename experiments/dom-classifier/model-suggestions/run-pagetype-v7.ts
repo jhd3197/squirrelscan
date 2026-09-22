@@ -146,13 +146,14 @@ if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1000 || requestTim
   throw new Error("--request-timeout-ms must be 1000..120000");
 const transport = createHttpTransport({ timeoutMs: requestTimeoutMs });
 const totals: Record<
-  "labelled" | "missingHtml" | UnusableHtml | "failed" | "inputTokens" | "retries",
+  "labelled" | "missingHtml" | UnusableHtml | "noEvidence" | "failed" | "inputTokens" | "retries",
   number
 > = {
   labelled: 0,
   missingHtml: 0,
   emptyHtml: 0,
   noDocumentElement: 0,
+  noEvidence: 0,
   failed: 0,
   inputTokens: 0,
   retries: 0,
@@ -168,13 +169,27 @@ const failureCounts: Record<string, number> = {};
  * most 25 pages, so a long streak is the process or the store going wrong, not
  * the pages: stop, rather than record thousands of healthy pages as failures
  * (or, worse, skip them as empty) in a few minutes. `missingHtml` neither
- * extends nor breaks it, because a pruned store legitimately drops long runs.
+ * extends nor breaks it, because a pruned store legitimately drops long runs;
+ * the flip side is that a wrong `--store` misses every row without aborting,
+ * which costs nothing and shows as `missingHtml` in the complete line. Run a
+ * queue built by the current `pagetype-queue.ts`: an older one still holds the
+ * unusable pages, and after a resume they sit next to each other.
  */
 const MAX_NO_CALL_STREAK = Number(argument("--max-no-call-streak", "200"));
 if (!Number.isInteger(MAX_NO_CALL_STREAK) || MAX_NO_CALL_STREAK < 1)
   throw new Error("--max-no-call-streak must be a positive integer");
 let noCallStreak = 0;
 let aborted: string | null = null;
+/** Every row a worker finished, whatever the outcome. */
+let processed = 0;
+function noCall(lastError?: string): void {
+  if (++noCallStreak < MAX_NO_CALL_STREAK || aborted) return;
+  aborted =
+    `${noCallStreak} consecutive rows without a model call ` +
+    `(failed ${totals.failed}, emptyHtml ${totals.emptyHtml}, noDocumentElement ` +
+    `${totals.noDocumentElement}, noEvidence ${totals.noEvidence})` +
+    (lastError ? `, last error: ${lastError}` : "");
+}
 let cursor = 0;
 const startedAt = Date.now();
 
@@ -201,11 +216,16 @@ async function worker(): Promise<void> {
       const unusable = unusableHtmlReason(resolved.html);
       if (unusable) {
         totals[unusable]++;
-        if (++noCallStreak >= MAX_NO_CALL_STREAK)
-          aborted = `${noCallStreak} consecutive rows without a model call`;
+        noCall();
         continue;
       }
       const evidence = pageEvidenceFromHtml(resolved.html, row.url, row.pageId);
+      // No prose and no title: nothing for the model to read but the path.
+      if (evidence.lines.length === 0 && !evidence.title) {
+        totals.noEvidence++;
+        noCall();
+        continue;
+      }
       const built = buildPageTypeRequest(evidence, policy);
       const { response, latencyMs, retries } = await evaluateWithBackoff(transport, built.request);
       const answer = response.answers.page_type as {
@@ -250,19 +270,21 @@ async function worker(): Promise<void> {
       const message = error instanceof Error ? error.message : String(error);
       failureCounts[message] = (failureCounts[message] ?? 0) + 1;
       if (failures.length < 20) failures.push({ pageId: row.pageId, error: message });
-      if (++noCallStreak >= MAX_NO_CALL_STREAK)
-        aborted = `${noCallStreak} consecutive rows without a model call, last: ${message}`;
+      noCall(message);
+    } finally {
+      // In `finally` so a skipped row counts too: `done` reaches `of`, and a
+      // long run of skips still reports.
+      if (++processed % 500 === 0)
+        console.log(
+          JSON.stringify({
+            stage: "progress",
+            done: processed,
+            of: work.length,
+            ...totals,
+            usd: Number(((totals.inputTokens * 42) / 1_000_000_000).toFixed(4)),
+          }),
+        );
     }
-    if ((totals.labelled + totals.failed) % 500 === 0)
-      console.log(
-        JSON.stringify({
-          stage: "progress",
-          done: totals.labelled + totals.failed,
-          of: work.length,
-          ...totals,
-          usd: Number(((totals.inputTokens * 42) / 1_000_000_000).toFixed(4)),
-        }),
-      );
   }
 }
 
@@ -284,4 +306,5 @@ console.log(
     failures,
   }),
 );
-if (aborted) process.exit(1);
+// exitCode, not exit(): exit() can cut off the complete line on a piped stdout.
+if (aborted) process.exitCode = 1;

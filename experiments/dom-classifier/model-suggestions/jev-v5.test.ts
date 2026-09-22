@@ -21,7 +21,7 @@ import {
   serializeNodePacket,
   toRowsV5,
 } from "./jev-v5.ts";
-import { unusableHtmlReason } from "../v2/unusable-html.ts";
+import { isHtmlType, unusableHtmlReason } from "../v2/unusable-html.ts";
 import type { CapturedNode, CapturedPage } from "../labeler/types.ts";
 import { extractPage } from "../extract-dom.ts";
 
@@ -426,5 +426,37 @@ describe("pages with no usable HTML (#2307)", () => {
         "p2",
       ).lines,
     ).toEqual([prose]);
+  });
+
+  test("markup without explicit html and body still yields its prose", () => {
+    // linkedom roots these at the first element and its `body` getter inserts
+    // an empty body there, so a walk from `document.body` found nothing.
+    for (const html of [
+      `<p>${prose}</p>`,
+      `<!doctype html><title>t</title><p>${prose}</p>`,
+      `<div><p>${prose}</p></div>`,
+      `<html><head><title>t</title></head><p>${prose}</p></html>`,
+    ])
+      expect(pageEvidenceFromHtml(html, "https://example.com/", "p3").lines).toEqual([prose]);
+  });
+
+  test("isHtmlType keeps HTML and unknown, drops everything else", () => {
+    for (const type of [
+      null,
+      undefined,
+      "",
+      "text/html",
+      "Text/HTML; charset=utf-8",
+      "application/xhtml+xml",
+    ])
+      expect(isHtmlType(type)).toBe(true);
+    for (const type of [
+      "text/plain",
+      "application/json",
+      "image/png",
+      "text/markdown",
+      "application/x-directory",
+    ])
+      expect(isHtmlType(type)).toBe(false);
   });
 });

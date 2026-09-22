@@ -450,26 +450,44 @@ export function pageEvidenceFromHtml(html: string, pageUrl: string, pageId: stri
   // prose. Own text also avoids the duplication subtree text produces, where a
   // section and its paragraphs each contribute the same sentences.
   const { document } = parseHTML(html);
-  // linkedom's `body` getter destructures `documentElement.firstElementChild`,
-  // so on a document with no element at all it throws instead of returning
-  // null. Check first; `unusableHtmlReason` is how a caller skips such a page.
-  const body = (
-    (document as { documentElement?: unknown }).documentElement
-      ? (document as { body?: unknown }).body
-      : null
-  ) as
-    | {
-        firstChild: unknown;
-        nextSibling: unknown;
-        nodeType: number;
-        localName?: string;
-        nodeName: string;
-      }
-    | null
-    | undefined;
+  // The walk starts at the real <body> when the markup has one, and at the
+  // document itself otherwise. linkedom's `body` getter is not used: it throws
+  // on a document with no element, and on markup without explicit <html> and
+  // <body> (`<p>…</p>`, `<title>t</title><p>…</p>`) the root is the first
+  // top-level element, so the getter INSERTS an empty head and body inside it
+  // and the walk found nothing: a model call on a page with no evidence. The
+  // top-level elements come from `childNodes`, because a doctype's
+  // `nextSibling` is null in linkedom and a sibling walk would stop there.
+  type WalkNode = {
+    firstChild: unknown;
+    nextSibling: unknown;
+    nodeType: number;
+    localName?: string;
+    nodeName: string;
+  };
+  const root = (document as { documentElement?: WalkNode | null }).documentElement ?? null;
+  let start: WalkNode[] = [];
+  if (root) {
+    let body: WalkNode | null = null;
+    if (root.localName === "html")
+      for (
+        let child = root.firstChild as WalkNode | null;
+        child;
+        child = child.nextSibling as WalkNode | null
+      )
+        if (child.nodeType === 1 && child.localName === "body") {
+          body = child;
+          break;
+        }
+    start = body
+      ? [body]
+      : [...(document as unknown as { childNodes: Iterable<WalkNode> }).childNodes]
+          .filter((node) => node.nodeType === 1)
+          .reverse();
+  }
   const collected: Array<{ rank: number; text: string }> = [];
-  if (body) {
-    const stack = [body];
+  if (start.length > 0) {
+    const stack = start;
     while (stack.length > 0 && collected.length < MAX_PAGE_EVIDENCE * 8) {
       const element = stack.pop()!;
       const tag = (element.localName ?? element.nodeName.toLowerCase()).toLowerCase();
@@ -477,9 +495,9 @@ export function pageEvidenceFromHtml(html: string, pageUrl: string, pageId: stri
       let own = "";
       const children: typeof stack = [];
       for (
-        let child = element.firstChild as (typeof body & { data?: string }) | null;
+        let child = element.firstChild as (WalkNode & { data?: string }) | null;
         child;
-        child = child.nextSibling as (typeof body & { data?: string }) | null
+        child = child.nextSibling as (WalkNode & { data?: string }) | null
       ) {
         if (child.nodeType === 3) own += ` ${child.data ?? ""}`;
         else if (child.nodeType === 1) children.push(child);

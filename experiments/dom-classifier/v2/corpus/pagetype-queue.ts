@@ -29,7 +29,7 @@ import { gunzipSync } from "node:zlib";
 
 import { parse as parseDomain } from "tldts";
 
-import { type UnusableHtml, unusableHtmlReason } from "../unusable-html.ts";
+import { isHtmlType, type UnusableHtml, unusableHtmlReason } from "../unusable-html.ts";
 
 const dataRoot = process.env.DOM_CLASSIFIER_DATA_ROOT;
 if (!dataRoot) throw new Error("DOM_CLASSIFIER_DATA_ROOT must be set");
@@ -110,11 +110,6 @@ for (const root of storeRoots) {
 const contentSelects = contentStores.map((db) =>
   db.query<{ content: Uint8Array }, [string]>("SELECT content FROM content WHERE hash = ?"),
 );
-/** HTML, or unknown: a missing content type is left to the bytes to decide. */
-function isHtmlType(type: string | null | undefined): boolean {
-  const essence = type?.split(";")[0]?.trim().toLowerCase();
-  return !essence || essence === "text/html" || essence === "application/xhtml+xml";
-}
 /** Why a selected page has nothing to label, read from the same bytes the
  *  runner will read. `missingHtml` is a row pruned since the hash list above. */
 function unusable(hash: string): UnusableHtml | "unreadableBlob" | "missingHtml" | null {
@@ -192,9 +187,10 @@ for (const [domain, pages] of byDomain) {
   manifest[domainHash] = split;
   domainsBySplit[split]++;
   // Select first, THEN drop what cannot be labelled, with no backfill:
-  // build-dataset.ts takes the same first N and excludes an empty or
-  // element-less page there too, so a backfilled page would be labelled here
-  // and never appear in the dataset.
+  // build-dataset.ts takes the same first N and applies the same content-type
+  // and unusable-HTML checks, so a backfilled page would be labelled here and
+  // never appear in the dataset. (It also drops pages over MAX_HTML_BYTES and
+  // pages with no featurizer candidates, which a label here merely outlives.)
   for (const page of pages.slice(0, maxPerDomain)) {
     const reason = isHtmlType(contentTypes.get(page.hash)) ? unusable(page.hash) : "notHtml";
     if (reason) {
