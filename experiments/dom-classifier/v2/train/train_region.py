@@ -253,9 +253,16 @@ DEFAULT_CONFIG = {
 
 def train_one(x_train, y_train, x_val, y_val, rounds: int, config: dict,
               w_train=None, w_val=None):
-    """`w_train`/`w_val` are the PER-ROW weights: 1 for a node that declares its
-    own region, 0.5 for one that inherits it from the landmark it sits in.
-    They multiply the class weights rather than replacing them."""
+    """`w_train`/`w_val` are the PER-ROW weights, multiplied into the class
+    weights rather than replacing them:
+
+    * 1 for a node that declares its own region;
+    * 0.5 for one that inherits it from the landmark it sits in;
+    * the annotator's own confidence, anywhere in (0, 1], for a row whose label
+      came from Jev. A 0.38 answer therefore contributes 0.38 of a row, which
+      is how a label source with a real but uncertain reading of a node earns
+      less than a landmark tag without being thrown away.
+    """
     import lightgbm as lgb
 
     power = float(config["weightPower"])
