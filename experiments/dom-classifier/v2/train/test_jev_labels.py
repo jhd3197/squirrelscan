@@ -91,6 +91,65 @@ def test_shape_confidence_is_read_from_the_component_answer():
     assert call(component="navigation_menu", regions=[], raw=raw) == ("navigation", 0.88)
 
 
+def test_a_sub_threshold_shape_is_discarded_not_trusted():
+    # run-divsoup-v7.ts filters regions and purposes at noul >= 0.75 but writes
+    # componentType as a bare argmax, so a shape the model scored 0.38 arrives
+    # looking exactly like one it scored 0.98. Below the bar it must not decide.
+    raw = {"node_p#1_component_type": {"choice": "navigation_menu", "confidence": 0.38}}
+    assert call(component="navigation_menu", regions=[], raw=raw) is None
+
+
+def test_a_weak_shape_does_not_suppress_a_region_that_cleared_the_bar():
+    # navigation_menu outranks footer on the ladder, so a 0.4-confidence
+    # navigation_menu would otherwise hide a footer the model was sure about.
+    raw = {
+        "node_p#1_component_type": {"choice": "navigation_menu", "confidence": 0.4},
+        "node_p#1_region_footer": {"noul": 0.94},
+    }
+    assert call(component="navigation_menu", regions=["footer"], raw=raw) == ("footer", 0.94)
+
+
+def test_a_shape_exactly_at_the_threshold_still_counts():
+    raw = {"node_p#1_component_type": {"choice": "navigation_menu", "confidence": 0.75}}
+    assert call(component="navigation_menu", regions=[], raw=raw) == ("navigation", 0.75)
+
+
+def test_the_loader_keeps_jev_labels_out_of_val_and_holdout(tmp_path):
+    # The embargoed div-soup evaluation file is a run-divsoup-v7.ts output like
+    # any other. Training must never read a node row from another split.
+    import json
+
+    from jev_labels import load_jev_region_labels
+
+    rows = []
+    for split, node in (("train", "a#1"), ("holdout", "b#2"), ("val", "c#3")):
+        rows.append(
+            json.dumps(
+                {
+                    "recordType": "node",
+                    "split": split,
+                    "nodeId": node,
+                    "observedAxes": {
+                        "componentType": {"labels": "layout_container"},
+                        "regions": {"labels": ["footer"]},
+                        "purposes": {"labels": []},
+                    },
+                    "rawAnswers": {f"node_{node}_region_footer": {"noul": 0.9}},
+                }
+            )
+        )
+    path = tmp_path / "jev.jsonl"
+    path.write_text("\n".join(rows) + "\n")
+
+    counts: dict[str, int] = {}
+    train_only = load_jev_region_labels(path, allowed_splits=frozenset({"train"}), counts=counts)
+    assert set(train_only) == {("a", 1)}
+    assert counts == {"nodeRows": 3, "wrongSplit": 2, "abstained": 0, "mapped": 1}
+
+    # Scoring passes no filter, because that file is what scoring is for.
+    assert set(load_jev_region_labels(path)) == {("a", 1), ("b", 2), ("c", 3)}
+
+
 def test_a_missing_noul_falls_back_to_the_threshold_not_to_zero():
     # A label present in `observedAxes` cleared 0.75 by construction, so the
     # floor is 0.75 and never 0: a weight of 0 would silently drop the row.

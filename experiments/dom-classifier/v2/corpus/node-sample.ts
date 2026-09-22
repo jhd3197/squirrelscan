@@ -61,16 +61,26 @@ const sha256 = (value: string) => createHash("sha256").update(value).digest("hex
 /** Deterministic order key: nothing to do with crawl order, page size or name. */
 const orderKey = (...parts: string[]) => sha256(parts.join("|"));
 
+// The exclusion list must fail LOUD. It is the stated defence against the
+// embargoed evaluation pages reaching a training sample, and a guard that
+// silently does nothing when its path is wrong is worse than no guard: the run
+// succeeds and the summary reports `excludedPages: 0`, which reads like "there
+// was nothing to exclude".
 const excluded = new Set<string>();
-if (excludePagesPath && existsSync(excludePagesPath))
+if (excludePagesPath) {
+  if (!existsSync(excludePagesPath))
+    throw new Error(`--exclude-pages ${excludePagesPath} does not exist`);
   for (const line of readFileSync(excludePagesPath, "utf8").split("\n")) {
     if (!line) continue;
     try {
       excluded.add((JSON.parse(line) as { pageId: string }).pageId);
     } catch {
-      /* ignore */
+      /* a malformed line is not a page id */
     }
   }
+  if (excluded.size === 0)
+    throw new Error(`--exclude-pages ${excludePagesPath} yielded no page ids`);
+}
 
 async function* gzLines(path: string): AsyncGenerator<string> {
   const stream = createReadStream(path).pipe(createGunzip());
@@ -147,10 +157,31 @@ type NodeRow = {
   /** chrome score, derived from three feature columns and then discarded */
   chrome: number;
 };
-/** Feature columns, by their index in `feature-schema.json` at v2.2.0. */
-const F_START_POS = 1;
-const F_END_POS = 2;
-const F_LINK_DENSITY = 29;
+/**
+ * Feature columns, resolved BY NAME from the dataset's own schema.
+ *
+ * They were hardcoded (1, 2, 29 at featurizer v2.2.0) and that is a silent
+ * failure waiting to happen: a featurizer change that inserts a column
+ * re-points `chromeScore` at three unrelated numbers, and the only symptom is
+ * a worse sample — which is the very quantity this file is trying to improve,
+ * so nothing would look broken.
+ */
+const featureSchema = JSON.parse(readFileSync(`${datasetDir}/feature-schema.json`, "utf8")) as {
+  nodeFeatures: string[];
+  featurizerVersion: string;
+};
+function featureIndex(name: string): number {
+  const index = featureSchema.nodeFeatures.indexOf(name);
+  if (index < 0)
+    throw new Error(
+      `feature "${name}" is not in ${datasetDir}/feature-schema.json ` +
+        `(featurizer ${featureSchema.featurizerVersion}); chromeScore cannot be computed`,
+    );
+  return index;
+}
+const F_START_POS = featureIndex("startPos");
+const F_END_POS = featureIndex("endPos");
+const F_LINK_DENSITY = featureIndex("linkDensity");
 
 /**
  * How much this node looks like site chrome, from position and link density.

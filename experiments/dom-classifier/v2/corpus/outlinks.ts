@@ -97,8 +97,18 @@ const SKIP_DOMAIN = new Set([
   "plausible.io",
   "clarity.ms",
 ]);
-/** Platforms whose pages are a single shared template: one sample is enough. */
-const CAP_ONE = new Set([
+/**
+ * Never crawled. These are linked from almost every page in the store, so they
+ * clear any `minCount`, and they are the hosts most likely to answer a crawler
+ * with 403 or 429 — inflating the block rate while teaching the classifier
+ * nothing it cannot learn from a site that wants to be read.
+ *
+ * An earlier revision put them in a `CAP_ONE` set meaning "one sample is
+ * enough". That was a no-op dressed as a cap: `counts` already holds exactly
+ * one row per domain, so the set's only real effect was to EXEMPT them from
+ * the `minCount` filter and push them into the seed list.
+ */
+const SKIP_PLATFORM = new Set([
   "facebook.com",
   "twitter.com",
   "x.com",
@@ -114,6 +124,7 @@ const CAP_ONE = new Set([
   "threads.net",
   "medium.com",
   "vimeo.com",
+  "wikipedia.org",
 ]);
 
 const HREF = /href\s*=\s*["'](https?:\/\/[^"'\s>]{4,300})["']/gi;
@@ -153,7 +164,14 @@ for (;;) {
       } catch {
         continue;
       }
-      const parsed = parseDomain(url.href, { allowPrivateDomains: false });
+      // `allowPrivateDomains: true`, matching seeds.ts, build-dataset.ts and
+      // pagetype-queue.ts. With it false, tldts collapses `foo.vercel.app` to
+      // `vercel.app`, `blog.github.io` to `github.io` and `shop.myshopify.com`
+      // to `myshopify.com`, and since `counts` is keyed on that and keeps the
+      // FIRST url seen, every hosted platform yields exactly one seed. That
+      // deletes the largest landmark-less population in the harvest, which is
+      // the population this file exists to find.
+      const parsed = parseDomain(url.href, { allowPrivateDomains: true });
       const domain = parsed.domain;
       if (!domain || SKIP_DOMAIN.has(domain) || onThisPage.has(domain)) continue;
       onThisPage.add(domain);
@@ -169,14 +187,10 @@ db.close();
 
 // A domain linked from only one page of one site is usually a typo, a
 // throwaway or a tracker. Two independent pages is a low bar that removes most
-// of that noise; a platform domain is capped at one seed because every page of
-// it is the same template.
+// of that noise.
 const rows: Array<{ domain: string; url: string; count: number }> = [];
 for (const [domain, entry] of counts) {
-  if (CAP_ONE.has(domain)) {
-    rows.push({ domain, url: entry.url, count: entry.count });
-    continue;
-  }
+  if (SKIP_PLATFORM.has(domain)) continue;
   if (entry.count < minCount) continue;
   rows.push({ domain, url: entry.url, count: entry.count });
 }

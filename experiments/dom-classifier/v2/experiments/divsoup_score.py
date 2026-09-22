@@ -58,14 +58,12 @@ def score(truth: dict, predictions: dict) -> dict:
     total = correct = abstained = 0
     chrome_total = chrome_correct = chrome_abstained = 0
     confusion: dict[str, Counter] = defaultdict(Counter)
-    covered_by_class: Counter = Counter()
     for key, (gold, _confidence) in truth.items():
         row = predictions.get(key)
         if row is None:
             continue
         got = row["label"]
         total += 1
-        covered_by_class[gold] += 1
         confusion[gold][got] += 1
         if got == "unknown":
             abstained += 1
@@ -110,14 +108,43 @@ def main() -> None:
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
 
-    truth = load_jev_region_labels(Path(args.labels))
+    # No split filter: this file IS the evaluation set, and scoring is what it
+    # is for. `counts` carries the denominator so the mapped total is never
+    # reported on its own.
+    counts: dict[str, int] = {}
+    truth = load_jev_region_labels(Path(args.labels), counts=counts)
     before = load_predictions(Path(args.before))
     after = load_predictions(Path(args.after))
+
+    # Both artifacts are scored over the SAME keys. `divsoup-predict.ts` can
+    # drop a node (missing html, or a nodeId the featurizer no longer emits),
+    # and a featurizer change can make it drop a different node for each
+    # artifact — at which point the two accuracies have different denominators
+    # and the delta between them means nothing. Intersect once, and report what
+    # the intersection cost.
+    shared = truth.keys() & before.keys() & after.keys()
+    dropped = {
+        "notPredictedBefore": len(truth.keys() - before.keys()),
+        "notPredictedAfter": len(truth.keys() - after.keys()),
+        "scoredOnBothSides": len(shared),
+    }
+    truth = {key: truth[key] for key in shared}
 
     report = {
         "labelSource": "Jev v7 (dom-suggestions-v7), embargoed div-soup eval set",
         "labelMapping": "train/jev_labels.py, the same mapping the training rows use",
-        "mappedLabels": len(truth),
+        # The mapping abstains on nodes whose axes do not decide a region, and
+        # that is most of a div-soup sample: without the denominator the
+        # headline reads as if the whole eval set were graded.
+        "labelCoverage": {
+            **counts,
+            "mappingAbstentionRate": (
+                round(counts.get("abstained", 0) / counts["nodeRows"], 4)
+                if counts.get("nodeRows")
+                else None
+            ),
+        },
+        "coverage": dropped,
         "note": (
             "Both annotator and model are machines; this is agreement with a "
             "policy-v7 reading of each node, not human ground truth."
@@ -138,7 +165,7 @@ def main() -> None:
         )
     report["delta"] = {"accuracy": delta_all, "chromeAccuracy": delta_chrome}
     Path(args.out).write_text(json.dumps(report, indent=2) + "\n")
-    print(json.dumps({k: report[k] for k in ("mappedLabels", "delta")}, indent=2))
+    print(json.dumps({k: report[k] for k in ("labelCoverage", "coverage", "delta")}, indent=2))
     for side in ("before", "after"):
         s = report[side]
         print(

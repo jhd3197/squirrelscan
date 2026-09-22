@@ -20,6 +20,9 @@
 //                      by rowid, so a prefix is a deterministic sample)
 //   --max-per-domain N default 25
 //   --rebuild-index    ignore the cached index
+//   --verify-against <split-manifest.json>
+//                      refuse to build if any domain lands in a different split
+//                      than that manifest gave it
 //
 // Phases:
 //   1. index   stream every project.db, read (normalized_url, content_hash)
@@ -69,6 +72,8 @@ interface Args {
   rebuildIndex: boolean;
   limit: number;
   maxPerDomain: number;
+  /** A prior split-manifest.json to check this build's splits against. */
+  verifyAgainst: string;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -77,7 +82,10 @@ function parseArgs(argv: string[]): Args {
     rebuildIndex: argv.includes("--rebuild-index"),
     limit: Number.POSITIVE_INFINITY,
     maxPerDomain: DEFAULT_MAX_PER_DOMAIN,
+    verifyAgainst: "",
   };
+  const verify = argv.indexOf("--verify-against");
+  if (verify !== -1 && argv[verify + 1]) args.verifyAgainst = argv[verify + 1]!;
   const limit = argv.indexOf("--limit");
   if (limit !== -1 && argv[limit + 1]) args.limit = Number(argv[limit + 1]);
   const perDomain = argv.indexOf("--max-per-domain");
@@ -436,7 +444,10 @@ async function build(
 
   for (const root of storeRoots) {
     const storePath = `${root}/content-store.db`;
-    if (!existsSync(storePath)) continue;
+    if (!existsSync(storePath)) {
+      log(`build: no content-store.db under ${root}, skipping`);
+      continue;
+    }
     const db = new Database(storePath, { readonly: true });
     // One prepared statement, reused: a short keyset read by rowid, which is the
     // cheapest thing a concurrent writer can be asked to share a file with.
@@ -619,7 +630,14 @@ async function main(): Promise<void> {
   mkdirSync(cacheDir, { recursive: true });
   mkdirSync(`${dataRoot}/logs`, { recursive: true });
 
-  const indexPath = `${cacheDir}/hash-url-index.jsonl`;
+  // The cache key includes the STORE SET. With one shared filename, adding a
+  // second store to SQUIRREL_STORES silently reuses the single-store index:
+  // every hash from the new store is then missing a url, so it is never
+  // selected, and the run reports success having read nothing from it. The
+  // failure is invisible because `availableHashes()` does read both stores, so
+  // the store-size logs look exactly right.
+  const indexKey = sha256(storeRoots.join(":")).slice(0, 12);
+  const indexPath = `${cacheDir}/hash-url-index-${indexKey}.jsonl`;
   if (args.rebuildIndex || !existsSync(indexPath)) buildIndex(indexPath);
   else log(`index: reusing ${indexPath}`);
   if (args.indexOnly) return;
@@ -635,8 +653,33 @@ async function main(): Promise<void> {
   // The split manifest is written ONCE. A later run with more pages must land
   // every domain in the same split, or the holdout is contaminated by anything
   // trained before it.
+  //
+  // The manifest lives inside the DATASET VERSION directory, so a build of a
+  // new version finds none and writes a fresh one — which disables this check
+  // in exactly the situation it was written for. `--verify-against <prior
+  // split-manifest.json>` restores it across versions, and is how a larger
+  // corpus is checked against the corpus the current holdout was drawn from.
   const manifestPath = `${outDir}/split-manifest.json`;
   mkdirSync(outDir, { recursive: true });
+  const priorManifest = args.verifyAgainst;
+  if (priorManifest) {
+    const prior = JSON.parse(readFileSync(priorManifest, "utf8")) as {
+      domains: Record<string, Split>;
+    };
+    let drifted = 0;
+    let checked = 0;
+    for (const choice of selected.values()) {
+      const already = prior.domains[choice.domainHash];
+      if (!already) continue;
+      checked++;
+      if (already !== choice.split) drifted++;
+    }
+    if (drifted > 0)
+      throw new Error(
+        `split drift on ${drifted} of ${checked} domains against ${priorManifest}: refusing to build`,
+      );
+    log(`split: verified ${checked} domains against ${priorManifest}, 0 drift`);
+  }
   if (existsSync(manifestPath)) {
     const previous = JSON.parse(readFileSync(manifestPath, "utf8")) as {
       domains: Record<string, Split>;

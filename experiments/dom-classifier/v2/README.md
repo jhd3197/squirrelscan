@@ -138,15 +138,22 @@ store, so the live one is never written to.
 
 ```sh
 export DOM_CLASSIFIER_DATA_ROOT=/path/to/private/root
-export SQUIRREL_STORE=/path/to/squirrel-store
 export SQUIRREL_CLI=/path/to/apps/cli/src/cli.ts
+# outlinks.ts and seeds.ts read ONE store; everything downstream reads both.
+export SQUIRREL_STORE=/path/to/squirrel-store
+export SQUIRREL_STORES=/path/to/squirrel-store:$DOM_CLASSIFIER_DATA_ROOT/crawl-home/.squirrel
 
 bun run corpus/outlinks.ts          # outbound domains, from the stored HTML
 bun run corpus/seeds.ts             # one seed url per registrable domain
 bun run corpus/crawl.ts --workers 4 --max-pages 15 --budget-minutes 180
-bun run corpus/pagetype-queue.ts --verify-against <old>/split-manifest.json
-bun run corpus/node-sample.ts --dataset $ROOT/silver-v2 --nodes 40000
+bun run corpus/pagetype-queue.ts --verify-against <prior>/split-manifest.json
+bun run corpus/node-sample.ts --dataset $DOM_CLASSIFIER_DATA_ROOT/silver-v2 \
+  --nodes 40000 --exclude-pages <divsoup-eval page ids>
 ```
+
+`SQUIRREL_STORES` matters from `pagetype-queue.ts` onward: with only
+`SQUIRREL_STORE` set, the queue and the dataset are built from the live store
+alone and every page the crawl just fetched is missing, with no error.
 
 Four things in there are not obvious:
 
@@ -190,7 +197,7 @@ manifest and every model trained against it live in that directory.
 Each store is opened `readonly` and read in short batches keyed by `rowid`,
 because another process writes to it while this runs.
 
-Output, all under `$DOM_CLASSIFIER_DATA_ROOT/silver-v1/`: `nodes-{train,val,holdout}.jsonl.gz`
+Output, all under `$DOM_CLASSIFIER_DATA_ROOT/$DOM_CLASSIFIER_DATASET_VERSION/`: `nodes-{train,val,holdout}.jsonl.gz`
 (two rows per node, `m: 0` unmasked and `m: 1` masked), `pages-*.jsonl.gz`,
 `feature-schema.json`, `split-manifest.json`, `stats.json`, and
 `page-index.jsonl.gz` — the only file that holds a URL. Rows carry
@@ -199,6 +206,13 @@ Output, all under `$DOM_CLASSIFIER_DATA_ROOT/silver-v1/`: `nodes-{train,val,hold
 The split is 80/10/10 by registrable domain, `sha256(domain)[0:8] % 100`, and
 `split-manifest.json` is written once. A later, larger build that would move a
 domain between splits fails rather than contaminating the holdout.
+
+That manifest lives inside the dataset-version directory, so a build of a NEW
+version finds none and writes a fresh one — which disables the check in exactly
+the case it was written for. Pass `--verify-against <prior>/split-manifest.json`
+to check a new version's splits against the corpus the current holdout came
+from. It is not a formality: the 2026-09-22 build verified 3,657 domains with
+zero drift, which is what makes the old holdout still a holdout.
 
 ## Tests
 

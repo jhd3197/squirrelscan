@@ -114,7 +114,6 @@ def region_from_answers(
     """
     region_set = set(regions)
     purpose_set = set(purposes)
-    shape = component_type or "unknown"
 
     def region_conf(label: str, floor: float = NOUL_THRESHOLD) -> float:
         return max(_noul(raw, node_id, "region_", label), floor)
@@ -122,13 +121,35 @@ def region_from_answers(
     def purpose_conf(label: str, floor: float = NOUL_THRESHOLD) -> float:
         return max(_noul(raw, node_id, "purpose_", label), floor)
 
-    def shape_conf(floor: float = NOUL_THRESHOLD) -> float:
+    def raw_shape_conf() -> float:
         answer = raw.get(f"node_{node_id}_component_type")
         if isinstance(answer, dict):
             value = answer.get("confidence")
             if isinstance(value, (int, float)):
                 return float(value)
-        return floor
+        # A packet with no raw answer recorded: the choice cleared whatever the
+        # runner required to write it, so treat it as exactly at the threshold.
+        return NOUL_THRESHOLD
+
+    # The shape axis has to clear the SAME bar as the other two, and it does not
+    # get one for free. `run-divsoup-v7.ts` filters `regions` and `purposes` at
+    # noul >= 0.75 but writes `componentType` as a bare argmax with no floor, so
+    # a shape the model scored 0.38 arrives looking exactly like one it scored
+    # 0.98. Taking that at face value let sub-threshold shapes decide 22% of the
+    # mapped labels, and 38 of 71 `navigation` labels — the one class this
+    # mapping exists to produce — came from an argmax the model was not
+    # confident in. Two of those also SUPPRESSED a `footer` that did clear 0.75,
+    # because navigation_menu outranks footer on the ladder below.
+    #
+    # Below the bar the shape is discarded rather than trusted, so the node
+    # falls through to the regions axis, which was filtered properly.
+    shape_confidence = raw_shape_conf()
+    shape = component_type or "unknown"
+    if shape_confidence < NOUL_THRESHOLD:
+        shape = "unknown"
+
+    def shape_conf() -> float:
+        return shape_confidence
 
     # 1. overlays
     if shape in DIALOG_SHAPES:
@@ -174,13 +195,31 @@ def region_from_answers(
     return None
 
 
-def load_jev_region_labels(path: Path) -> dict[tuple[str, int], tuple[str, float]]:
+def load_jev_region_labels(
+    path: Path,
+    allowed_splits: frozenset[str] | None = None,
+    counts: dict[str, int] | None = None,
+) -> dict[tuple[str, int], tuple[str, float]]:
     """Read a `run-divsoup-v7.ts` output file into {(pageId, nodeId): (class, conf)}.
 
     The runner appends, and a resumed run can write a page twice; the LAST row
     for a node wins, which is the one from the most recent complete request.
+
+    `allowed_splits` is the leakage guard and the TRAINING caller must pass
+    `frozenset({"train"})`. Every node row carries the split it came from, and
+    without the filter this loader will happily read the embargoed div-soup
+    evaluation file — which is a `run-divsoup-v7.ts` output like any other, and
+    is named in this function's own docstring — straight into holdout training
+    rows, silently replacing the labels that grade the result. `divsoup_score.py`
+    passes that exact file to this same function, so the two uses are one typo
+    apart. Scoring passes None, because scoring is what that file is for.
+
+    `counts`, when given, is filled with `rows`, `wrongSplit` and `abstained`,
+    so a caller can report what fraction of the file the mapping actually used
+    instead of presenting the mapped total with no denominator.
     """
     out: dict[tuple[str, int], tuple[str, float]] = {}
+    seen = wrong_split = abstained = 0
     opener = gzip.open if str(path).endswith(".gz") else open
     with opener(path, "rt") as handle:  # type: ignore[operator]
         for line in handle:
@@ -191,6 +230,10 @@ def load_jev_region_labels(path: Path) -> dict[tuple[str, int], tuple[str, float
             except json.JSONDecodeError:
                 continue
             if row.get("recordType") != "node":
+                continue
+            seen += 1
+            if allowed_splits is not None and row.get("split") not in allowed_splits:
+                wrong_split += 1
                 continue
             node_ref = row.get("nodeId")
             if not isinstance(node_ref, str) or "#" not in node_ref:
@@ -211,6 +254,17 @@ def load_jev_region_labels(path: Path) -> dict[tuple[str, int], tuple[str, float
                 list(regions),
                 list(purposes),
             )
-            if mapped is not None:
+            if mapped is None:
+                abstained += 1
+            else:
                 out[(page_id, node_id)] = mapped
+    if counts is not None:
+        counts.update(
+            {
+                "nodeRows": seen,
+                "wrongSplit": wrong_split,
+                "abstained": abstained,
+                "mapped": len(out),
+            }
+        )
     return out

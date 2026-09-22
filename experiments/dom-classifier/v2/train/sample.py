@@ -220,28 +220,36 @@ def build_split(path: Path, rates: dict[str, float], n_numeric: int, n_tokens: i
 
         if silver is None and jev_label is None:
             continue
+
+        # Agreement is counted BEFORE downsampling, over every node both
+        # sources labelled. Counting it after would measure the overlap that
+        # survived the content_block rate instead — a rate that is well under
+        # 1.0 and that moves with --max-train-rows, so the published
+        # disagreement rate would change when a memory budget changed.
+        if row["m"] == 0 and silver is not None and jev_label is not None:
+            if jev_label == silver:
+                agree += 1
+            else:
+                disagree += 1
+
         # The keep decision is a hash of (page, node), so a node's masked and
         # unmasked rows are kept or dropped TOGETHER and the mix stays 50/50.
         # Downsampling is driven by the SILVER label, because that is what the
-        # rates were computed from. A Jev-only node has no silver label and is
-        # never downsampled: those rows are the scarce ones this whole exercise
-        # exists to produce, and there are at most ~40k of them against a 600k
-        # cap.
+        # rates were computed from, and it gates the SILVER row only: a node
+        # where silver says content_block and Jev says footer would otherwise
+        # lose its footer row at the content_block rate, throwing away the
+        # scarce chrome supervision this exercise exists to produce.
+        drop_silver = False
         if silver is not None:
             rate = rates.get(silver, 1.0)
             if rate < 1.0 and keep_hash(row["p"], row["n"]) >= rate:
-                continue
+                drop_silver = True
 
-        if silver is not None:
+        if silver is not None and not drop_silver:
             if row["m"] == 0:
                 kept[silver] += 1
                 sources["silver" if jev_label is None else
                         ("both-agree" if jev_label == silver else "both-disagree")] += 1
-                if jev_label is not None:
-                    if jev_label == silver:
-                        agree += 1
-                    else:
-                        disagree += 1
             builder.add(row["f"], row["k"], CLASS_INDEX[silver], row["d"], row["p"], row["n"],
                         int(row["m"]), float(row.get("w", 1.0)))
 
@@ -283,11 +291,18 @@ def main() -> None:
     # and holdout are untouched in practice; looking them up per split rather
     # than assuming that keeps the assumption checkable.
     jev: dict[tuple[str, int], tuple[str, float]] | None = None
+    jev_counts: dict[str, int] = {}
     if args.jev_labels:
         from jev_labels import load_jev_region_labels
 
-        jev = load_jev_region_labels(Path(args.jev_labels))
-        print(json.dumps({"jevNodeLabels": len(jev)}), flush=True)
+        # TRAIN ONLY, enforced on the `split` the runner writes on every node
+        # row. The embargoed div-soup evaluation file is a run-divsoup-v7.ts
+        # output like any other, so without this a single wrong path turns the
+        # labels that GRADE the model into holdout training rows.
+        jev = load_jev_region_labels(
+            Path(args.jev_labels), allowed_splits=frozenset({"train"}), counts=jev_counts
+        )
+        print(json.dumps({"jevLabels": jev_counts}), flush=True)
 
     print("counting train labels", flush=True)
     counts = count_labels(dataset / "nodes-train.jsonl.gz")
@@ -304,6 +319,9 @@ def main() -> None:
         "contentBlockRatio": CONTENT_BLOCK_RATIO,
         "jevLabelFile": args.jev_labels,
         "jevNodeLabels": len(jev) if jev is not None else 0,
+        # nodeRows / wrongSplit / abstained / mapped, so the mapped total is
+        # never read without the denominator it came from.
+        "jevLabelCounts": jev_counts or None,
         "splits": {},
     }
 
@@ -318,18 +336,21 @@ def main() -> None:
         np.save(out / f"y-{split}.npy", labels)
         np.save(out / f"m-{split}.npy", masked)
         np.save(out / f"w-{split}.npy", weights)
-        (out / f"refs-{split}.jsonl").write_text(
-            "".join(
-                json.dumps({"p": p, "n": n, "d": d}) + "\n"
-                for (p, n), d in zip(refs, groups, strict=True)
-            )
-        )
+        # Streamed, not "".join(...): at 10x corpus this file is millions of
+        # lines and joining it holds the whole thing in one string on top of
+        # the sparse matrix that is still resident.
+        with (out / f"refs-{split}.jsonl").open("w") as handle:
+            for (page_id, node_id), domain in zip(refs, groups, strict=True):
+                handle.write(json.dumps({"p": page_id, "n": node_id, "d": domain}) + "\n")
         by_class = Counter(REGION_CLASSES[int(i)] for i in labels)
         manifest["splits"][split] = {
             "rows": int(matrix.shape[0]),
             "maskedRows": int((masked == 1).sum()),
             "unmaskedRows": int((masked == 0).sum()),
-            "inheritedRows": int((weights < 1.0).sum()),
+            # Inherited landmark labels carry exactly 0.5. A Jev row's weight
+            # is a confidence anywhere in (0, 1), so `weights < 1.0` would
+            # count every Jev row as inherited.
+            "inheritedRows": int((weights == 0.5).sum()),
             "nnz": int(matrix.nnz),
             "domains": len(set(groups)),
             "byClass": dict(by_class),
@@ -343,6 +364,15 @@ def main() -> None:
                 round(disagree / (agree + disagree), 4) if (agree + disagree) else None
             ),
         }
+        if split != "train":
+            leaked = sources.get("jev-only", 0) + sources.get("both-agree", 0) + sources.get(
+                "both-disagree", 0
+            )
+            if leaked:
+                raise SystemExit(
+                    f"{leaked} Jev-labelled nodes reached the {split} split; the loader is "
+                    "meant to keep them to train. Refusing to write a contaminated sample."
+                )
         print(f"{split}: {matrix.shape[0]} rows, {matrix.nnz} nnz, {len(set(groups))} domains, "
               f"jev-only={sources.get('jev-only', 0)}, disagree={disagree}/{agree + disagree}",
               flush=True)

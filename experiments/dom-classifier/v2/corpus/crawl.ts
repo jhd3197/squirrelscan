@@ -92,6 +92,10 @@ const totals: Record<Outcome, number> & { pages: number } = {
 };
 const startedAt = Date.now();
 let cursor = 0;
+/** Sites actually started. `cursor` overshoots by up to `workers`, because each
+ *  worker increments it once more to discover the queue is empty, and dividing
+ *  the failure count by that understates it. */
+let claimed = 0;
 let stopped = false;
 
 const BLOCK = /\b(403|429|forbidden|too many requests|rate.?limit|waf|blocked by)\b/i;
@@ -148,12 +152,28 @@ async function crawlOne(seed: Seed): Promise<void> {
         cwd: crawlHome,
       },
     );
+    // `timedOut` is set by the timer, not inferred from elapsed time. Inferring
+    // it recorded a site that finished on its own inside the last half-second
+    // of the window as a timeout, exit code 0 and pages crawled and all.
+    let timedOut = false;
+    let hardKill: ReturnType<typeof setTimeout> | undefined;
     const timer = setTimeout(() => {
+      timedOut = true;
       try {
         child.kill();
       } catch {
         /* already gone */
       }
+      // SIGTERM can be caught. Without an escalation a child that ignores it
+      // holds its worker forever, and the budget is only checked BETWEEN
+      // sites, so the whole run would never end and never write its summary.
+      hardKill = setTimeout(() => {
+        try {
+          child.kill(9);
+        } catch {
+          /* already gone */
+        }
+      }, 5_000);
     }, siteTimeoutMs);
     const [stdout, stderr, code] = await Promise.all([
       new Response(child.stdout).text(),
@@ -161,13 +181,14 @@ async function crawlOne(seed: Seed): Promise<void> {
       child.exited,
     ]);
     clearTimeout(timer);
-    if (Date.now() - began >= siteTimeoutMs - 500) {
-      outcome = "timeout";
-    } else {
-      const classified = classify(stdout, stderr, code);
-      outcome = classified.outcome;
-      pages = classified.pages;
-    }
+    if (hardKill) clearTimeout(hardKill);
+    // classify() runs even on a timeout: the child stores pages as it goes, so
+    // a killed crawl still contributed. Recording 0 would permanently
+    // understate the corpus, because the ledger is the resume key and the host
+    // is never revisited.
+    const classified = classify(stdout, stderr, code);
+    pages = classified.pages;
+    outcome = timedOut ? "timeout" : classified.outcome;
     if (outcome !== "ok") {
       const line = `${stdout}\n${stderr}`
         .split("\n")
@@ -206,6 +227,7 @@ async function worker(): Promise<void> {
     }
     const index = cursor++;
     if (index >= work.length) return;
+    claimed++;
     await crawlOne(work[index]!);
     const done = Object.entries(totals)
       .filter(([key]) => key !== "pages")
@@ -239,14 +261,16 @@ await Promise.all(Array.from({ length: Math.min(workers, work.length) }, worker)
 const summary = {
   stage: "complete",
   ...totals,
-  attempted: work.length - (work.length - cursor > 0 ? work.length - cursor : 0),
-  remaining: Math.max(0, work.length - cursor),
+  attempted: claimed,
+  remaining: Math.max(0, work.length - claimed),
   minutes: Number(((Date.now() - startedAt) / 60_000).toFixed(1)),
-  blockRate:
+  // Sums blocked + unreachable + timeout + error + empty: a FAILURE rate, of
+  // which an outright block is one kind.
+  failureRate:
     Number(
       (
         (totals.blocked + totals.unreachable + totals.timeout + totals.error + totals.empty) /
-        Math.max(1, cursor)
+        Math.max(1, claimed)
       ).toFixed(4),
     ) || 0,
 };
