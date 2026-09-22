@@ -255,6 +255,23 @@ export interface CheckResult {
    */
   siteResourceOccurrences?: SiteResourceOccurrence[];
   /**
+   * The honest counterpart of {@link siteResourceOccurrences}, with exactly the
+   * meaning {@link componentEvidence} has for element evidence: a reader that
+   * finds neither field knows the check never produced resource evidence, and a
+   * reader that finds this one knows how much was dropped and why.
+   *
+   * It matters more here than it looks. The report stage groups resources by
+   * PAGE SET, so silently losing some occurrences does not merely shrink the
+   * evidence — it changes the answer, splitting one site-wide unit into a
+   * narrower one that names fewer pages. Without this marker that wrong answer
+   * is indistinguishable from a correct one.
+   */
+  siteResourceEvidence?: {
+    state: "omitted";
+    reason: "payload-limit" | "page-sample-limit" | "sibling-row";
+    occurrenceCount: number;
+  };
+  /**
    * Evidence this check HAD but that a bounded surface could not carry. It is
    * the honest counterpart of {@link componentOccurrences}: a reader that finds
    * neither field knows the check never produced evidence, and a reader that
