@@ -1,0 +1,267 @@
+#!/usr/bin/env bun
+/**
+ * Draw the node-labelling sample for Jev, weighted onto landmark-less pages.
+ *
+ * ## The failure this sample exists to fix
+ *
+ * Silver region labels come from the page's own landmarks, so a page that has
+ * none produces no `footer` and no `navigation` rows — ever, at any corpus
+ * size. The region head therefore learns those classes only from pages that
+ * declare them, and is asked at runtime about pages that do not. That is a
+ * distribution shift, and more silver data does not touch it: the labels are
+ * missing exactly where the model is weak.
+ *
+ * Jev labels a node from its evidence rather than from its tag, so it CAN put a
+ * `footer` label on a `<div class="site-foot">`. This sample is therefore drawn
+ * at least 60% from div-soup pages (fewer than two landmark kinds), which is
+ * the opposite of how the silver rows are distributed.
+ *
+ * ## Node identity
+ *
+ * `nodeId` is the featurizer's preorder element index, taken straight from the
+ * dataset's node rows. `run-divsoup-v7.ts` resolves it with `featurizerOrder`,
+ * which reproduces that same walk. It is NOT an index into `extractPage`'s
+ * candidate array: indexing that instead resolved 553 of 822 nodes to a
+ * different element, silently, because a wrong element still has a tag and
+ * still makes a plausible packet.
+ *
+ * ## What is kept out
+ *
+ * - **holdout**, entirely. Training on labels drawn from the split that scores
+ *   the result is the one mistake that cannot be undone by re-running anything.
+ * - **`divsoup-eval-v1`'s pages**, by page id, when the embargoed sample list is
+ *   passed with `--exclude-pages`. Those 822 nodes are the blind evaluation set.
+ */
+import { createHash } from "node:crypto";
+import { createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createInterface } from "node:readline";
+import { resolve } from "node:path";
+import { createGunzip } from "node:zlib";
+
+const dataRoot = process.env.DOM_CLASSIFIER_DATA_ROOT;
+if (!dataRoot) throw new Error("DOM_CLASSIFIER_DATA_ROOT must be set");
+
+function argument(name: string, fallback: string): string {
+  const index = Bun.argv.indexOf(name);
+  if (index < 0) return fallback;
+  const value = Bun.argv[index + 1];
+  if (!value || value.startsWith("--")) throw new Error(`${name} needs a value`);
+  return value;
+}
+const datasetDir = resolve(argument("--dataset", `${dataRoot}/silver-v2`));
+const outDir = resolve(argument("--out", `${dataRoot}/node-jev-v7`));
+const targetNodes = Number(argument("--nodes", "40000"));
+const divSoupShare = Number(argument("--divsoup-share", "0.6"));
+const maxPerDomain = Number(argument("--max-per-domain", "40"));
+const maxPerPage = Number(argument("--max-per-page", "6"));
+const excludePagesPath = argument("--exclude-pages", "");
+mkdirSync(outDir, { recursive: true, mode: 0o700 });
+
+const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
+/** Deterministic order key: nothing to do with crawl order, page size or name. */
+const orderKey = (...parts: string[]) => sha256(parts.join("|"));
+
+const excluded = new Set<string>();
+if (excludePagesPath && existsSync(excludePagesPath))
+  for (const line of readFileSync(excludePagesPath, "utf8").split("\n")) {
+    if (!line) continue;
+    try {
+      excluded.add((JSON.parse(line) as { pageId: string }).pageId);
+    } catch {
+      /* ignore */
+    }
+  }
+
+async function* gzLines(path: string): AsyncGenerator<string> {
+  const stream = createReadStream(path).pipe(createGunzip());
+  for await (const line of createInterface({ input: stream, crlfDelay: Infinity }))
+    if (line) yield line;
+}
+
+// --- pass A: which pages ----------------------------------------------------
+type PageRow = { p: string; d: string; divSoup: boolean; nodeCount: number; l: string };
+const divSoupPages: PageRow[] = [];
+const landmarkPages: PageRow[] = [];
+for await (const line of gzLines(`${datasetDir}/pages-train.jsonl.gz`)) {
+  const row = JSON.parse(line) as PageRow;
+  if (excluded.has(row.p) || row.nodeCount === 0) continue;
+  (row.divSoup ? divSoupPages : landmarkPages).push(row);
+}
+console.log(
+  JSON.stringify({
+    stage: "pages",
+    divSoup: divSoupPages.length,
+    landmark: landmarkPages.length,
+    excluded: excluded.size,
+  }),
+);
+
+/** Pick pages under a per-domain cap, in a deterministic order, until the node
+ *  budget for this tier is met at `maxPerPage` nodes each. */
+function choosePages(pages: PageRow[], nodeBudget: number, perDomain: Map<string, number>) {
+  const chosen: PageRow[] = [];
+  let budget = nodeBudget;
+  const ordered = [...pages].sort((left, right) => (orderKey(left.p) < orderKey(right.p) ? -1 : 1));
+  for (const page of ordered) {
+    if (budget <= 0) break;
+    const used = perDomain.get(page.d) ?? 0;
+    if (used >= maxPerDomain) continue;
+    const take = Math.min(maxPerPage, page.nodeCount, maxPerDomain - used, budget);
+    if (take <= 0) continue;
+    perDomain.set(page.d, used + take);
+    chosen.push(page);
+    budget -= take;
+  }
+  return chosen;
+}
+
+const perDomain = new Map<string, number>();
+const divSoupBudget = Math.round(targetNodes * divSoupShare);
+const chosenDivSoup = choosePages(divSoupPages, divSoupBudget, perDomain);
+// Whatever the div-soup tier could not fill is spent on landmark pages rather
+// than left unspent: a shortfall there is a fact about the corpus, and the
+// summary records it instead of hiding it.
+const divSoupPlanned = [...perDomain.values()].reduce((sum, value) => sum + value, 0);
+const chosenLandmark = choosePages(landmarkPages, targetNodes - divSoupPlanned, perDomain);
+const chosen = new Map<string, PageRow>();
+for (const page of [...chosenDivSoup, ...chosenLandmark]) chosen.set(page.p, page);
+console.log(
+  JSON.stringify({
+    stage: "chosen",
+    divSoupPages: chosenDivSoup.length,
+    landmarkPages: chosenLandmark.length,
+    divSoupNodesPlanned: divSoupPlanned,
+  }),
+);
+
+// --- pass B: which nodes ----------------------------------------------------
+/** Only the UNMASKED row of each node (`m: 0`): the two rows are the same node,
+ *  and a packet is built from the real markup, never the masked features. */
+type NodeRow = { p: string; n: number; m: number; l: string; tagRaw: string; inh: boolean };
+const byPage = new Map<string, NodeRow[]>();
+for await (const line of gzLines(`${datasetDir}/nodes-train.jsonl.gz`)) {
+  const row = JSON.parse(line) as NodeRow;
+  if (row.m !== 0 || !chosen.has(row.p)) continue;
+  const bucket = byPage.get(row.p);
+  if (bucket) bucket.push(row);
+  else byPage.set(row.p, [row]);
+}
+
+/** Within a page, spread the picks across TAGS before taking a second of any
+ *  one tag. A page of forty `<div>`s otherwise contributes forty near-identical
+ *  packets and teaches the boundary nothing. */
+function pickNodes(rows: NodeRow[], take: number): NodeRow[] {
+  const byTag = new Map<string, NodeRow[]>();
+  for (const row of rows) {
+    const bucket = byTag.get(row.tagRaw);
+    if (bucket) bucket.push(row);
+    else byTag.set(row.tagRaw, [row]);
+  }
+  for (const bucket of byTag.values())
+    bucket.sort((left, right) =>
+      orderKey(left.p, String(left.n)) < orderKey(right.p, String(right.n)) ? -1 : 1,
+    );
+  const tags = [...byTag.keys()].sort((left, right) => (orderKey(left) < orderKey(right) ? -1 : 1));
+  const picked: NodeRow[] = [];
+  for (let round = 0; picked.length < take; round++) {
+    let moved = false;
+    for (const tag of tags) {
+      if (picked.length >= take) break;
+      const row = byTag.get(tag)![round];
+      if (row) {
+        picked.push(row);
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+  return picked;
+}
+
+// --- emit -------------------------------------------------------------------
+// The page index is the only file carrying a url, and the Jev runner needs one
+// per page to build page evidence.
+const urls = new Map<string, { u: string; domain: string; s: string }>();
+for await (const line of gzLines(`${datasetDir}/page-index.jsonl.gz`)) {
+  const row = JSON.parse(line) as { p: string; u: string; domain: string; s: string };
+  if (chosen.has(row.p)) urls.set(row.p, row);
+}
+
+const perDomainFinal = new Map<string, number>();
+const lines: string[] = [];
+const silver: string[] = [];
+const tagCounts: Record<string, number> = {};
+let nodes = 0;
+let divSoupNodes = 0;
+let missingUrl = 0;
+for (const [pageId, page] of chosen) {
+  const rows = byPage.get(pageId);
+  const meta = urls.get(pageId);
+  if (!rows?.length) continue;
+  if (!meta) {
+    missingUrl++;
+    continue;
+  }
+  const used = perDomainFinal.get(page.d) ?? 0;
+  const take = Math.min(maxPerPage, maxPerDomain - used);
+  if (take <= 0) continue;
+  const picked = pickNodes(rows, take);
+  if (!picked.length) continue;
+  perDomainFinal.set(page.d, used + picked.length);
+  nodes += picked.length;
+  if (page.divSoup) divSoupNodes += picked.length;
+  for (const row of picked) tagCounts[row.tagRaw] = (tagCounts[row.tagRaw] ?? 0) + 1;
+  lines.push(
+    JSON.stringify({
+      pageId,
+      // The full content hash is what the divsoup runner looks up; the dataset's
+      // page id IS the first 16 hex of it, and the runner is given both stores.
+      contentHash: pageId,
+      url: meta.u,
+      domain: meta.domain,
+      split: meta.s,
+      candidates: picked.map((row) => ({ nodeId: row.n })),
+    }),
+  );
+  // The silver answer for the same nodes, written separately so the
+  // silver-vs-Jev disagreement can be computed without re-reading the dataset.
+  for (const row of picked)
+    silver.push(
+      JSON.stringify({
+        pageId,
+        nodeId: row.n,
+        silverLabel: row.l,
+        inherited: row.inh,
+        tagRaw: row.tagRaw,
+        divSoup: page.divSoup,
+      }),
+    );
+}
+
+writeFileSync(`${outDir}/sample.jsonl`, lines.map((l) => `${l}\n`).join(""), { mode: 0o600 });
+writeFileSync(`${outDir}/silver-for-sample.jsonl`, silver.map((l) => `${l}\n`).join(""), {
+  mode: 0o600,
+});
+const summary = {
+  stage: "complete",
+  pages: lines.length,
+  nodes,
+  divSoupNodes,
+  divSoupShare: Number((divSoupNodes / Math.max(1, nodes)).toFixed(4)),
+  targetNodes,
+  targetDivSoupShare: divSoupShare,
+  domains: perDomainFinal.size,
+  maxPerDomain,
+  maxPerPage,
+  missingUrl,
+  excludedPages: excluded.size,
+  tagCounts: Object.fromEntries(
+    Object.entries(tagCounts)
+      .sort((left, right) => right[1] - left[1])
+      .slice(0, 20),
+  ),
+};
+writeFileSync(`${outDir}/sample-summary.json`, `${JSON.stringify(summary, null, 2)}\n`, {
+  mode: 0o600,
+});
+console.log(JSON.stringify(summary));

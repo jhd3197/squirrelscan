@@ -62,7 +62,13 @@ function argument(name: string, fallback?: string): string {
 }
 
 const samplePath = privatePath(argument("--sample"));
-const storePath = resolve(argument("--store"));
+/** One or more content stores, colon-separated: the live store plus the
+ *  isolated store the corpus expansion crawls into. */
+const storePaths = argument("--store")
+  .split(":")
+  .map((path) => resolve(path.trim()))
+  .filter(Boolean);
+if (storePaths.length === 0) throw new Error("--store resolved to no paths");
 const packetsPath = privatePath(argument("--packets"));
 const outputPath = privatePath(argument("--output"));
 const policyRevision = argument("--policy-revision", "v7") as PolicyRevision;
@@ -107,12 +113,16 @@ const sample: SamplePage[] = readFileSync(samplePath, "utf8")
   })
   .sort((left, right) => left.pageId.localeCompare(right.pageId));
 
-const store = new Database(storePath, { readonly: true });
-const select = store.query<{ content: Uint8Array }, [string]>(
-  "select content from content where hash = ?",
+const stores = storePaths.map((path) => new Database(path, { readonly: true }));
+const selects = stores.map((store) =>
+  store.query<{ content: Uint8Array }, [string]>("select content from content where hash = ?"),
 );
 function htmlFor(hash: string): string | null {
-  const row = select.get(hash);
+  let row: { content: Uint8Array } | null = null;
+  for (const select of selects) {
+    row = select.get(hash);
+    if (row?.content) break;
+  }
   if (!row?.content) return null;
   const bytes = row.content instanceof Uint8Array ? row.content : new Uint8Array(row.content);
   try {
@@ -324,7 +334,7 @@ async function worker(): Promise<void> {
 }
 
 await Promise.all(Array.from({ length: Math.min(concurrency, work.length) }, worker));
-store.close();
+for (const store of stores) store.close();
 latencies.sort((left, right) => left - right);
 console.log(
   JSON.stringify({

@@ -62,7 +62,14 @@ function argument(name: string, fallback?: string): string {
 type QueueRow = { pageId: string; contentHash: string; url: string; split: string };
 
 const pagesPath = privatePath(argument("--pages"));
-const storePath = resolve(argument("--store"));
+/** One or more content stores, colon-separated. The corpus expansion crawls
+ *  into a SECOND store so the live one is never written to, and a queue row can
+ *  be satisfied by either. */
+const storePaths = argument("--store")
+  .split(":")
+  .map((path) => resolve(path.trim()))
+  .filter(Boolean);
+if (storePaths.length === 0) throw new Error("--store resolved to no paths");
 const outputPath = privatePath(argument("--output"));
 const concurrency = Number(argument("--concurrency", "4"));
 const limit = Number(argument("--limit", "0"));
@@ -92,20 +99,29 @@ if (existsSync(outputPath))
 
 // Read-only, and asserted: a labelling run must not be able to mutate the store
 // it reads, whatever a later edit to this file does.
-const store = new Database(storePath, { readonly: true });
+const stores = storePaths.map((path) => new Database(path, { readonly: true }));
 // The page index carries a 16-character prefix of the store's 64-character
 // hash, so an equality lookup finds nothing. A half-open range over the hex
 // alphabet uses the hash index and, unlike LIKE, cannot be defeated by an
 // underscore or percent in the key. Two hits means the prefix is ambiguous and
 // the page is skipped rather than guessed at.
-const select = store.query<{ hash: string; content: Uint8Array }, [string, string]>(
-  "select hash, content from content where hash >= ? and hash < ? limit 2",
+const selects = stores.map((store) =>
+  store.query<{ hash: string; content: Uint8Array }, [string, string]>(
+    "select hash, content from content where hash >= ? and hash < ? limit 2",
+  ),
 );
 
 function resolveContent(prefix: string): { hash: string; html: string } | null {
-  const rows = select.all(prefix, `${prefix}g`);
-  if (rows.length !== 1) return null;
-  const row = rows[0];
+  let row: { hash: string; content: Uint8Array } | undefined;
+  for (const select of selects) {
+    const rows = select.all(prefix, `${prefix}g`);
+    // Ambiguous in ANY store means ambiguous: skip rather than pick one.
+    if (rows.length > 1) return null;
+    if (rows.length === 1) {
+      row = rows[0];
+      break;
+    }
+  }
   if (!row?.content) return null;
   const bytes = row.content instanceof Uint8Array ? row.content : new Uint8Array(row.content);
   let html: string;
@@ -212,7 +228,7 @@ async function worker(): Promise<void> {
 }
 
 await Promise.all(Array.from({ length: Math.min(concurrency, work.length) }, worker));
-store.close();
+for (const store of stores) store.close();
 latencies.sort((left, right) => left - right);
 console.log(
   JSON.stringify({

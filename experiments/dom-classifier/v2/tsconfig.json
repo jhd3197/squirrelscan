@@ -19,6 +19,7 @@
     "*.ts",
     "runtime/*.ts",
     "train/*.ts",
-    "experiments/*.ts"
+    "experiments/*.ts",
+    "corpus/*.ts"
   ]
 }

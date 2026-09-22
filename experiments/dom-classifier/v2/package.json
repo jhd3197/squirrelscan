@@ -7,8 +7,8 @@
     "test": "bun test featurize.test.ts silver-labels.test.ts runtime/predict.test.ts",
     "typecheck": "tsgo --noEmit -p tsconfig.json",
     "lint": "oxlint .",
-    "format": "oxfmt --write *.ts runtime/*.ts train/*.ts",
-    "format:check": "oxfmt --check *.ts runtime/*.ts train/*.ts",
+    "format": "oxfmt --write *.ts runtime/*.ts train/*.ts corpus/*.ts",
+    "format:check": "oxfmt --check *.ts runtime/*.ts train/*.ts corpus/*.ts",
     "build-dataset": "bun run build-dataset.ts"
   },
   "dependencies": {
