@@ -208,10 +208,13 @@ def build_split(path: Path, rates: dict[str, float], n_numeric: int, n_tokens: i
             continue
         # The keep decision is a hash of (page, node), so a node's masked and
         # unmasked rows are kept or dropped TOGETHER and the mix stays 50/50.
-        # A Jev-only node is never downsampled: those rows are the scarce ones.
-        gate = silver if silver is not None else None
-        if gate is not None:
-            rate = rates.get(gate, 1.0)
+        # Downsampling is driven by the SILVER label, because that is what the
+        # rates were computed from. A Jev-only node has no silver label and is
+        # never downsampled: those rows are the scarce ones this whole exercise
+        # exists to produce, and there are at most ~40k of them against a 600k
+        # cap.
+        if silver is not None:
+            rate = rates.get(silver, 1.0)
             if rate < 1.0 and keep_hash(row["p"], row["n"]) >= rate:
                 continue
 

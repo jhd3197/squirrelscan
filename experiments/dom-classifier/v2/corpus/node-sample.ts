@@ -137,14 +137,63 @@ console.log(
 // --- pass B: which nodes ----------------------------------------------------
 /** Only the UNMASKED row of each node (`m: 0`): the two rows are the same node,
  *  and a packet is built from the real markup, never the masked features. */
-type NodeRow = { p: string; n: number; m: number; l: string; tagRaw: string; inh: boolean };
+type NodeRow = {
+  p: string;
+  n: number;
+  m: number;
+  l: string;
+  tagRaw: string;
+  inh: boolean;
+  /** chrome score, derived from three feature columns and then discarded */
+  chrome: number;
+};
+/** Feature columns, by their index in `feature-schema.json` at v2.2.0. */
+const F_START_POS = 1;
+const F_END_POS = 2;
+const F_LINK_DENSITY = 29;
+
+/**
+ * How much this node looks like site chrome, from position and link density.
+ *
+ * Measured, not assumed. On the probe run the div-soup nodes Jev went on to
+ * call footer / navigation / site_header scored a median 1.18, against 0.43 for
+ * the div-soup nodes it abstained on.
+ *
+ * It matters because of what the probe showed about the div-soup population:
+ * of 38 div-soup nodes labelled, Jev found chrome on 4. The other 34 were app
+ * shells, cards and lists on single-page-app themes that genuinely have no
+ * header or footer — `layout_container` with an empty regions axis was the
+ * right answer, not a failure to see one. Sampling div-soup nodes uniformly
+ * therefore spends most of the budget on pages with no chrome to find; the
+ * score puts it where chrome can exist.
+ */
+function chromeScore(features: number[]): number {
+  const startPos = features[F_START_POS] ?? 0;
+  const endPos = features[F_END_POS] ?? 0;
+  const linkDensity = features[F_LINK_DENSITY] ?? 0;
+  // A header sits at the start, a footer at the end, and both are link-dense.
+  return Math.max(1 - startPos, endPos) * (0.5 + Math.min(linkDensity, 1));
+}
+
 const byPage = new Map<string, NodeRow[]>();
 for await (const line of gzLines(`${datasetDir}/nodes-train.jsonl.gz`)) {
-  const row = JSON.parse(line) as NodeRow;
+  const row = JSON.parse(line) as NodeRow & { f: number[] };
   if (row.m !== 0 || !chosen.has(row.p)) continue;
+  // The feature vector is 197 numbers per row and there are millions of rows:
+  // reduce it to the one number this file needs and drop the rest immediately,
+  // or the sample of a 100k-page dataset does not fit in memory.
+  const kept: NodeRow = {
+    p: row.p,
+    n: row.n,
+    m: row.m,
+    l: row.l,
+    tagRaw: row.tagRaw,
+    inh: row.inh,
+    chrome: chromeScore(row.f),
+  };
   const bucket = byPage.get(row.p);
-  if (bucket) bucket.push(row);
-  else byPage.set(row.p, [row]);
+  if (bucket) bucket.push(kept);
+  else byPage.set(row.p, [kept]);
 }
 
 /** Within a page, spread the picks across TAGS before taking a second of any
@@ -178,6 +227,31 @@ function pickNodes(rows: NodeRow[], take: number): NodeRow[] {
   return picked;
 }
 
+/**
+ * On a div-soup page, spend most of the page's budget on the nodes that can BE
+ * chrome, and the rest on the tag spread.
+ *
+ * Not all of it: a sample of nothing but suspected headers and footers would
+ * teach the boundary between chrome and content only from one side, and the
+ * content side is what `content_block` is. The split is two thirds / one third.
+ */
+function pickChromeFirst(rows: NodeRow[], take: number): NodeRow[] {
+  const chromeTake = Math.max(1, Math.round(take * (2 / 3)));
+  const ranked = [...rows].sort(
+    (left, right) =>
+      right.chrome - left.chrome ||
+      (orderKey(left.p, String(left.n)) < orderKey(right.p, String(right.n)) ? -1 : 1),
+  );
+  const picked = ranked.slice(0, chromeTake);
+  const taken = new Set(picked.map((row) => row.n));
+  for (const row of pickNodes(
+    rows.filter((row) => !taken.has(row.n)),
+    take - picked.length,
+  ))
+    picked.push(row);
+  return picked;
+}
+
 // --- emit -------------------------------------------------------------------
 // The page index is the only file carrying a url, and the Jev runner needs one
 // per page to build page evidence.
@@ -205,7 +279,7 @@ for (const [pageId, page] of chosen) {
   const used = perDomainFinal.get(page.d) ?? 0;
   const take = Math.min(maxPerPage, maxPerDomain - used);
   if (take <= 0) continue;
-  const picked = pickNodes(rows, take);
+  const picked = page.divSoup ? pickChromeFirst(rows, take) : pickNodes(rows, take);
   if (!picked.length) continue;
   perDomainFinal.set(page.d, used + picked.length);
   nodes += picked.length;

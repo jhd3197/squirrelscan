@@ -114,13 +114,37 @@ const sample: SamplePage[] = readFileSync(samplePath, "utf8")
   .sort((left, right) => left.pageId.localeCompare(right.pageId));
 
 const stores = storePaths.map((path) => new Database(path, { readonly: true }));
-const selects = stores.map((store) =>
-  store.query<{ content: Uint8Array }, [string]>("select content from content where hash = ?"),
-);
+const selects = stores.map((store) => ({
+  exact: store.query<{ content: Uint8Array }, [string]>(
+    "select content from content where hash = ?",
+  ),
+  prefix: store.query<{ content: Uint8Array }, [string, string]>(
+    "select content from content where hash >= ? and hash < ? limit 2",
+  ),
+}));
+/**
+ * Content by full hash, or by a PREFIX of one.
+ *
+ * `divsoup-eval-v1/sample.jsonl` carries the full 64-hex hash, but a sample
+ * drawn from the featurized dataset only has the 16-hex `pageId`, which is
+ * that hash's first 16 characters and the only page identifier those rows
+ * keep. An equality lookup on a prefix silently finds nothing and every page
+ * is reported as missing HTML, so the prefix takes a half-open range over the
+ * hex alphabet instead: it uses the primary key index, and unlike LIKE it
+ * cannot be defeated by an underscore or percent in the key. Two hits means
+ * the prefix is ambiguous and the page is skipped rather than guessed at.
+ */
 function htmlFor(hash: string): string | null {
   let row: { content: Uint8Array } | null = null;
+  const isFullHash = hash.length === 64;
   for (const select of selects) {
-    row = select.get(hash);
+    if (isFullHash) {
+      row = select.exact.get(hash);
+    } else {
+      const rows = select.prefix.all(hash, `${hash}g`);
+      if (rows.length > 1) return null;
+      row = rows[0] ?? null;
+    }
     if (row?.content) break;
   }
   if (!row?.content) return null;
