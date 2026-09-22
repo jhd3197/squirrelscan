@@ -34,10 +34,17 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import struct
 from pathlib import Path
 
 import numpy as np
+
+#: The dataset directory under --data-root. The 2026-09-19 build is `silver-v1`;
+#: a larger corpus is built beside it rather than over it, and every script in
+#: this directory has to agree on which one is being read.
+DATASET = os.environ.get("DOM_CLASSIFIER_DATASET_VERSION", "silver-v1")
+
 
 MAGIC = b"SQDC"
 VERSION = 1
@@ -214,7 +221,7 @@ def main() -> None:
     models = Path(args.models)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    schema = json.loads((Path(args.data_root) / "silver-v1" / "feature-schema.json").read_text())
+    schema = json.loads((Path(args.data_root) / DATASET / "feature-schema.json").read_text())
 
     region_report = json.loads((models / "region" / "region-report.json").read_text())
     page_dir = models / args.pagetype_dir

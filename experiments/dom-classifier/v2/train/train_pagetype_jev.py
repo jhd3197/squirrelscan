@@ -28,11 +28,18 @@ import argparse
 import gzip
 import hashlib
 import json
+import os
 from collections import Counter
 from pathlib import Path
 
 import numpy as np
 import scipy.sparse as sp
+
+#: The dataset directory under --data-root. The 2026-09-19 build is `silver-v1`;
+#: a larger corpus is built beside it rather than over it, and every script in
+#: this directory has to agree on which one is being read.
+DATASET = os.environ.get("DOM_CLASSIFIER_DATASET_VERSION", "silver-v1")
+
 
 N_JOBS = 4
 
@@ -216,12 +223,12 @@ def main() -> None:
     jev_dir = Path(args.jev)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    schema = json.loads((root / "silver-v1" / "feature-schema.json").read_text())
+    schema = json.loads((root / DATASET / "feature-schema.json").read_text())
     n_numeric, n_tokens = schema["pageFeatureCount"], schema["tokenBuckets"]
 
     features: dict[str, dict] = {}
     for split in ("train", "val", "holdout"):
-        features.update(load_features(root / "silver-v1" / f"pages-{split}.jsonl.gz",
+        features.update(load_features(root / DATASET / f"pages-{split}.jsonl.gz",
                                       n_numeric, n_tokens))
 
     pool_jev = {**load_jev(jev_dir / "train.jsonl"), **load_jev(jev_dir / "val.jsonl")}

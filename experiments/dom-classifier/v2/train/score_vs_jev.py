@@ -22,11 +22,18 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import os
 from collections import Counter
 from pathlib import Path
 
 import numpy as np
 import scipy.sparse as sp
+
+#: The dataset directory under --data-root. The 2026-09-19 build is `silver-v1`;
+#: a larger corpus is built beside it rather than over it, and every script in
+#: this directory has to agree on which one is being read.
+DATASET = os.environ.get("DOM_CLASSIFIER_DATASET_VERSION", "silver-v1")
+
 
 MODEL_CLASSES = ["article", "listing_index", "docs", "product_detail", "about", "contact", "other"]
 UNREACHABLE = ["legal", "pricing", "homepage", "product_listing"]
@@ -82,10 +89,10 @@ def main() -> None:
     import lightgbm as lgb
 
     root = Path(args.data_root)
-    schema = json.loads((root / "silver-v1" / "feature-schema.json").read_text())
+    schema = json.loads((root / DATASET / "feature-schema.json").read_text())
     report = json.loads((Path(args.models) / "pagetype" / "pagetype-report.json").read_text())
 
-    x, ids, silver = load_pages(root / "silver-v1" / "pages-holdout.jsonl.gz",
+    x, ids, silver = load_pages(root / DATASET / "pages-holdout.jsonl.gz",
                                 schema["pageFeatureCount"], schema["tokenBuckets"])
     booster = lgb.Booster(model_file=str(Path(args.models) / "pagetype" / "pagetype-model.txt"))
     probs = booster.predict(x, num_iteration=report["shipped"]["iterations"])

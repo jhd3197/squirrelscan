@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -27,6 +28,12 @@ import scipy.sparse as sp
 sys.path.insert(0, str(Path(__file__).parent))
 from sample import CLASS_INDEX, REGION_CLASSES  # noqa: E402
 from train_region import ABLATIONS, layout, per_class_metrics, select  # noqa: E402
+
+#: The dataset directory under --data-root. The 2026-09-19 build is `silver-v1`;
+#: a larger corpus is built beside it rather than over it, and every script in
+#: this directory has to agree on which one is being read.
+DATASET = os.environ.get("DOM_CLASSIFIER_DATASET_VERSION", "silver-v1")
+
 
 CONTENT_BLOCK = CLASS_INDEX["content_block"]
 N_JOBS = 4
@@ -62,7 +69,7 @@ def main() -> None:
 
     sample = Path(args.sample)
     models = Path(args.models)
-    schema = json.loads((Path(args.data_root) / "silver-v1" / "feature-schema.json").read_text())
+    schema = json.loads((Path(args.data_root) / DATASET / "feature-schema.json").read_text())
     blocks = layout(schema)
     report = json.loads((models / "region" / "region-report.json").read_text())
     feature_set = report["chosenFeatureSet"]

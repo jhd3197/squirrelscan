@@ -32,7 +32,10 @@ function requireEnv(name: string): string {
 
 const dataRoot = requireEnv("DOM_CLASSIFIER_DATA_ROOT");
 const storeRoot = requireEnv("SQUIRREL_STORE");
-const dataset = `${dataRoot}/silver-v1`;
+/** The dataset directory under the data root. `silver-v1` is the 2026-09-19
+ *  build; a larger corpus is built beside it rather than over it, and the
+ *  Python scripts in this directory read the same variable. */
+const dataset = `${dataRoot}/${process.env.DOM_CLASSIFIER_DATASET_VERSION ?? "silver-v1"}`;
 
 interface PageIndexEntry {
   p: string;

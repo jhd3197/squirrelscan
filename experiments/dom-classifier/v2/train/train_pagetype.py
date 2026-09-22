@@ -20,11 +20,18 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import os
 import time
 from pathlib import Path
 
 import numpy as np
 import scipy.sparse as sp
+
+#: The dataset directory under --data-root. The 2026-09-19 build is `silver-v1`;
+#: a larger corpus is built beside it rather than over it, and every script in
+#: this directory has to agree on which one is being read.
+DATASET = os.environ.get("DOM_CLASSIFIER_DATASET_VERSION", "silver-v1")
+
 
 N_JOBS = 4
 MIN_SUPPORT = 50
@@ -177,7 +184,7 @@ def main() -> None:
     parser.add_argument("--budget-bytes", type=int, default=600_000)
     args = parser.parse_args()
 
-    dataset = Path(args.data_root) / "silver-v1"
+    dataset = Path(args.data_root) / DATASET
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     schema = json.loads((dataset / "feature-schema.json").read_text())
