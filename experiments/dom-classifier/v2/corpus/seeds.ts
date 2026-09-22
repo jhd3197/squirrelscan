@@ -181,37 +181,81 @@ if (existsSync(outlinksPath)) {
 }
 
 // --- ordering ---------------------------------------------------------------
-// Round-robin across public suffix. Within a suffix, order by sha256(domain),
-// which has nothing to do with crawl order, site size or name length — so the
-// prefix taken by a truncated run is a random sample of that suffix, not its
-// alphabetical head.
-const bySuffix = new Map<string, Seed[]>();
-for (const seed of seeds.values()) {
-  const bucket = bySuffix.get(seed.suffix);
-  if (bucket) bucket.push(seed);
-  else bySuffix.set(seed.suffix, [seed]);
-}
-for (const bucket of bySuffix.values())
-  bucket.sort((left, right) =>
-    createHash("sha256").update(left.domain).digest("hex") <
-    createHash("sha256").update(right.domain).digest("hex")
-      ? -1
-      : 1,
-  );
-// Largest suffix first, so .com (the bulk) is drawn every round and the long
-// tail is exhausted into the early part of the list rather than the end.
-const buckets = [...bySuffix.entries()].sort((left, right) => right[1].length - left[1].length);
-const ordered: Seed[] = [];
-for (let round = 0; ordered.length < seeds.size; round++) {
-  let moved = false;
-  for (const [, bucket] of buckets) {
-    const seed = bucket[round];
-    if (seed) {
-      ordered.push(seed);
-      moved = true;
-    }
+// Two passes. First round-robin across public suffix WITHIN each cohort, so the
+// TLD mix of a truncated run matches the whole; then interleave the cohorts so
+// the diverse one is spent evenly across the run rather than at the end.
+function roundRobinBySuffix(pool: Seed[]): Seed[] {
+  const bySuffix = new Map<string, Seed[]>();
+  for (const seed of pool) {
+    const bucket = bySuffix.get(seed.suffix);
+    if (bucket) bucket.push(seed);
+    else bySuffix.set(seed.suffix, [seed]);
   }
-  if (!moved) break;
+  for (const bucket of bySuffix.values())
+    bucket.sort((left, right) =>
+      createHash("sha256").update(left.domain).digest("hex") <
+      createHash("sha256").update(right.domain).digest("hex")
+        ? -1
+        : 1,
+    );
+  // Largest suffix first, so .com (the bulk) is drawn every round and the long
+  // tail is exhausted into the early part of the list rather than the end.
+  const buckets = [...bySuffix.entries()].sort((left, right) => right[1].length - left[1].length);
+  const out: Seed[] = [];
+  for (let round = 0; out.length < pool.length; round++) {
+    let moved = false;
+    for (const [, bucket] of buckets) {
+      const seed = bucket[round];
+      if (seed) {
+        out.push(seed);
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+  return out;
+}
+
+/**
+ * The two cohorts, and why they are not interchangeable.
+ *
+ * `store-pages` seeds are the sites squirrelscan's own users audited. They are
+ * 84% of the pool and they skew hard — 665 `vercel.app`, 210 `lovable.app`, 848
+ * `.ai`. That skew is USEFUL, because those are the landmark-less themes the
+ * classifier is short of, but a corpus that is 84% of them has never seen
+ * WordPress, a news site, a shop or a government page.
+ *
+ * `outlinks` and `cloud-inventory` are the harvested rest of the web, and they
+ * are the scarce resource. Interleaving to a share cap spends them evenly, so
+ * the diversity of the corpus does not depend on the run reaching the end of
+ * the list — which it will not, because the clock stops first.
+ */
+const userBaseOrder = roundRobinBySuffix(
+  [...seeds.values()].filter((seed) => seed.source === "store-pages"),
+);
+const harvestedOrder = roundRobinBySuffix(
+  [...seeds.values()].filter((seed) => seed.source !== "store-pages"),
+);
+const userBaseShare = Number(argument("--user-base-share", "0.4"));
+const ordered: Seed[] = [];
+let userBaseTaken = 0;
+let userIndex = 0;
+let harvestIndex = 0;
+/** Where the harvested cohort ran out, after which the cap cannot hold. */
+let harvestExhaustedAt = -1;
+while (userIndex < userBaseOrder.length || harvestIndex < harvestedOrder.length) {
+  const haveHarvest = harvestIndex < harvestedOrder.length;
+  const haveUser = userIndex < userBaseOrder.length;
+  // Take from the user-base cohort only while doing so keeps its running share
+  // at or under the cap. Otherwise take a harvested seed.
+  const wouldStayUnderCap = (userBaseTaken + 1) / (ordered.length + 1) <= userBaseShare;
+  if (haveUser && (!haveHarvest || wouldStayUnderCap)) {
+    if (!haveHarvest && harvestExhaustedAt < 0) harvestExhaustedAt = ordered.length;
+    ordered.push(userBaseOrder[userIndex++]!);
+    userBaseTaken++;
+  } else if (haveHarvest) {
+    ordered.push(harvestedOrder[harvestIndex++]!);
+  } else break;
 }
 
 const limit = Number(argument("--limit", "0"));
@@ -221,7 +265,19 @@ writeFileSync(
   emitted.map((seed) => `${JSON.stringify(seed)}\n`).join(""),
   { mode: 0o600 },
 );
-const suffixTop = Object.fromEntries(buckets.slice(0, 15).map(([name, b]) => [name, b.length]));
+const suffixCounts = new Map<string, number>();
+for (const seed of emitted) suffixCounts.set(seed.suffix, (suffixCounts.get(seed.suffix) ?? 0) + 1);
+const suffixTop = Object.fromEntries(
+  [...suffixCounts.entries()].sort((left, right) => right[1] - left[1]).slice(0, 15),
+);
+/** The user-base share of each prefix of the list, so the cap can be checked
+ *  against where the crawl actually stopped rather than against the whole. */
+const shareAt: Record<string, number> = {};
+for (const at of [1000, 2500, 5000, 10000, 13000, 15000]) {
+  if (emitted.length < at) continue;
+  const taken = emitted.slice(0, at).filter((seed) => seed.source === "store-pages").length;
+  shareAt[String(at)] = Number((taken / at).toFixed(3));
+}
 writeFileSync(
   `${outDir}/seeds-summary.json`,
   `${JSON.stringify(
@@ -229,9 +285,14 @@ writeFileSync(
       builtAt: new Date().toISOString(),
       domains: emitted.length,
       totalDiscovered: seeds.size,
-      suffixes: bySuffix.size,
+      suffixes: suffixCounts.size,
       suffixTop,
       bySource: counts,
+      userBaseShareCap: userBaseShare,
+      userBaseShareAtPrefix: shareAt,
+      harvestedPool: harvestedOrder.length,
+      userBasePool: userBaseOrder.length,
+      harvestExhaustedAt: harvestExhaustedAt < 0 ? null : harvestExhaustedAt,
       rejected,
       projectDbs: { opened, failed, of: dirs.length },
       wallMs: Date.now() - startedAt,
@@ -242,5 +303,11 @@ writeFileSync(
   { mode: 0o600 },
 );
 console.log(
-  JSON.stringify({ stage: "complete", domains: emitted.length, suffixes: bySuffix.size }),
+  JSON.stringify({
+    stage: "complete",
+    domains: emitted.length,
+    suffixes: suffixCounts.size,
+    userBaseShareAtPrefix: shareAt,
+    harvestExhaustedAt: harvestExhaustedAt < 0 ? null : harvestExhaustedAt,
+  }),
 );

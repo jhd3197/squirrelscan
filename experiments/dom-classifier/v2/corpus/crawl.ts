@@ -15,8 +15,8 @@
  *  - a host is crawled ONCE, ever: `--resume` is never passed and a domain that
  *    appears in the ledger is skipped;
  *  - 403 / 429 / WAF-blocked marks the host dead and it is not retried;
- *  - at most `--concurrency` site crawls run at once, each with a small
- *    per-host worker pool.
+ *  - at most `--workers` site crawls run at once, each on a DIFFERENT host and
+ *    each with its own small per-host pool.
  *
  * The ledger (`crawl-ledger.jsonl`) holds one row per attempted domain and is
  * the resume key, so an interrupted run continues rather than restarting.
@@ -49,8 +49,13 @@ const perSiteConcurrency = Number(argument("--site-concurrency", "4"));
 const siteTimeoutMs = Number(argument("--site-timeout-ms", "75000"));
 const budgetMs = Number(argument("--budget-minutes", "180")) * 60_000;
 const limit = Number(argument("--limit", "0"));
-if (!Number.isInteger(workers) || workers < 1 || workers > 4)
-  throw new Error("--workers must be 1..4");
+// 12 is the approved ceiling. The politeness that matters is PER HOST, and it
+// is set by the crawler's own per-host pool and robots crawl-delay; N site
+// workers are N different hosts, not N requests at one host. The ceiling exists
+// for this machine, not for the remote ones: 12 bun crawlers plus the Jev
+// runner have to stay inside a ~6 GB total RSS budget.
+if (!Number.isInteger(workers) || workers < 1 || workers > 12)
+  throw new Error("--workers must be 1..12");
 
 mkdirSync(crawlHome, { recursive: true, mode: 0o700 });
 

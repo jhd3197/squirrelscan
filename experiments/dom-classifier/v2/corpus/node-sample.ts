@@ -27,8 +27,10 @@
  *
  * ## What is kept out
  *
- * - **holdout**, entirely. Training on labels drawn from the split that scores
- *   the result is the one mistake that cannot be undone by re-running anything.
+ * - **holdout**, unless `--split holdout` is passed deliberately to build an
+ *   EVALUATION sample. Training on labels drawn from the split that scores the
+ *   result is the one mistake that cannot be undone by re-running anything, so
+ *   the default is train and the other case announces itself.
  * - **`divsoup-eval-v1`'s pages**, by page id, when the embargoed sample list is
  *   passed with `--exclude-pages`. Those 822 nodes are the blind evaluation set.
  */
@@ -55,6 +57,23 @@ const divSoupShare = Number(argument("--divsoup-share", "0.6"));
 const maxPerDomain = Number(argument("--max-per-domain", "40"));
 const maxPerPage = Number(argument("--max-per-page", "6"));
 const excludePagesPath = argument("--exclude-pages", "");
+/**
+ * Which split to draw from. `train` is the labelling sample. `holdout` builds
+ * an EVALUATION sample instead, and the loud banner below exists because the
+ * two files look identical: `sample.py` hard-fails if a Jev label from another
+ * split reaches it, but nothing stops a person pointing the wrong path at the
+ * wrong script.
+ */
+const split = argument("--split", "train");
+if (!["train", "val", "holdout"].includes(split))
+  throw new Error(`--split must be train | val | holdout, got ${split}`);
+if (split !== "train")
+  console.log(
+    JSON.stringify({
+      stage: "warning",
+      message: `drawing from ${split}: this is an EVALUATION sample and must never be passed to sample.py --jev-labels`,
+    }),
+  );
 mkdirSync(outDir, { recursive: true, mode: 0o700 });
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -100,7 +119,7 @@ type PageRow = {
 };
 const divSoupPages: PageRow[] = [];
 const landmarkPages: PageRow[] = [];
-for await (const line of gzLines(`${datasetDir}/pages-train.jsonl.gz`)) {
+for await (const line of gzLines(`${datasetDir}/pages-${split}.jsonl.gz`)) {
   const row = JSON.parse(line) as PageRow;
   if (excluded.has(row.p) || row.nodeCount === 0) continue;
   (row.divSoup ? divSoupPages : landmarkPages).push(row);
@@ -228,7 +247,7 @@ function chromeScore(features: number[]): number {
 }
 
 const byPage = new Map<string, NodeRow[]>();
-for await (const line of gzLines(`${datasetDir}/nodes-train.jsonl.gz`)) {
+for await (const line of gzLines(`${datasetDir}/nodes-${split}.jsonl.gz`)) {
   const row = JSON.parse(line) as NodeRow & { f: number[] };
   if (row.m !== 0 || !chosen.has(row.p)) continue;
   // The feature vector is 197 numbers per row and there are millions of rows:
@@ -376,6 +395,7 @@ writeFileSync(`${outDir}/silver-for-sample.jsonl`, silver.map((l) => `${l}\n`).j
 });
 const summary = {
   stage: "complete",
+  split,
   pages: lines.length,
   nodes,
   divSoupNodes,
