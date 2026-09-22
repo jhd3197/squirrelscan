@@ -89,7 +89,15 @@ async function* gzLines(path: string): AsyncGenerator<string> {
 }
 
 // --- pass A: which pages ----------------------------------------------------
-type PageRow = { p: string; d: string; divSoup: boolean; nodeCount: number; l: string };
+type PageRow = {
+  p: string;
+  d: string;
+  divSoup: boolean;
+  nodeCount: number;
+  l: string;
+  /** The landmark kinds the page declared. div-soup means fewer than two. */
+  landmarkKinds: string[];
+};
 const divSoupPages: PageRow[] = [];
 const landmarkPages: PageRow[] = [];
 for await (const line of gzLines(`${datasetDir}/pages-train.jsonl.gz`)) {
@@ -101,6 +109,8 @@ console.log(
   JSON.stringify({
     stage: "pages",
     divSoup: divSoupPages.length,
+    divSoupWithOneLandmark: divSoupPages.filter((p) => (p.landmarkKinds?.length ?? 0) === 1).length,
+    divSoupWithNone: divSoupPages.filter((p) => (p.landmarkKinds?.length ?? 0) === 0).length,
     landmark: landmarkPages.length,
     excluded: excluded.size,
   }),
@@ -111,7 +121,18 @@ console.log(
 function choosePages(pages: PageRow[], nodeBudget: number, perDomain: Map<string, number>) {
   const chosen: PageRow[] = [];
   let budget = nodeBudget;
-  const ordered = [...pages].sort((left, right) => (orderKey(left.p) < orderKey(right.p) ? -1 : 1));
+  // Among div-soup pages, the ones that declared ONE landmark kind come first.
+  // "div-soup" is fewer than two kinds, which lumps together two populations
+  // that are not alike: a page with zero is usually a single-page-app shell
+  // with no header or footer to find, while a page with one has real site
+  // chrome and simply did not declare the rest of it — a `<nav>` but no
+  // `<footer>`. The second is where an undeclared footer actually exists, so
+  // it is where the labelling budget belongs. Within a tier the order is still
+  // the hash, so the choice is reproducible and independent of crawl order.
+  const ordered = [...pages].sort((left, right) => {
+    const rank = (page: PageRow) => (page.divSoup ? -(page.landmarkKinds?.length ?? 0) : 0);
+    return rank(left) - rank(right) || (orderKey(left.p) < orderKey(right.p) ? -1 : 1);
+  });
   for (const page of ordered) {
     if (budget <= 0) break;
     const used = perDomain.get(page.d) ?? 0;
@@ -298,6 +319,9 @@ const silver: string[] = [];
 const tagCounts: Record<string, number> = {};
 let nodes = 0;
 let divSoupNodes = 0;
+/** div-soup nodes drawn from a page that declared ONE landmark kind: the tier
+ *  where an undeclared footer or header can actually exist. */
+let oneLandmarkNodes = 0;
 let missingUrl = 0;
 for (const [pageId, page] of chosen) {
   const rows = byPage.get(pageId);
@@ -314,7 +338,10 @@ for (const [pageId, page] of chosen) {
   if (!picked.length) continue;
   perDomainFinal.set(page.d, used + picked.length);
   nodes += picked.length;
-  if (page.divSoup) divSoupNodes += picked.length;
+  if (page.divSoup) {
+    divSoupNodes += picked.length;
+    if ((page.landmarkKinds?.length ?? 0) === 1) oneLandmarkNodes += picked.length;
+  }
   for (const row of picked) tagCounts[row.tagRaw] = (tagCounts[row.tagRaw] ?? 0) + 1;
   lines.push(
     JSON.stringify({
@@ -353,6 +380,7 @@ const summary = {
   nodes,
   divSoupNodes,
   divSoupShare: Number((divSoupNodes / Math.max(1, nodes)).toFixed(4)),
+  divSoupNodesFromOneLandmarkPages: oneLandmarkNodes,
   targetNodes,
   targetDivSoupShare: divSoupShare,
   domains: perDomainFinal.size,
