@@ -194,6 +194,7 @@ import type {
   ReportTechnologies as _RT,
   RuleCategory as _RC,
   SiteMetadata as _SM,
+  SiteResourceOccurrence as _SRO,
 } from "@squirrelscan/core-contracts";
 export type AuditStatus = _AS;
 export type AuditFailureReasonCode = _AFRC;
@@ -208,6 +209,7 @@ export type EntityMap = _EM;
 export type DomainStats = _DST;
 export type CacheStats = _CST;
 export type ComponentOccurrence = _CO;
+export type SiteResourceOccurrence = _SRO;
 
 // Structured item for CheckResult - represents a single affected resource
 export interface CheckItem {
@@ -240,6 +242,15 @@ export interface CheckResult {
   // which is how the feature reached production emitting nothing.
   componentOccurrences?: ComponentOccurrence[];
   componentEvidence?: {
+    state: "omitted";
+    reason: "payload-limit" | "page-sample-limit" | "sibling-row";
+    occurrenceCount: number;
+  };
+  // #2341: additive shared-resource evidence. Here for exactly the reason the
+  // twin warning above gives — omitting it from this interface is how the
+  // field reaches production silently dropped.
+  siteResourceOccurrences?: SiteResourceOccurrence[];
+  siteResourceEvidence?: {
     state: "omitted";
     reason: "payload-limit" | "page-sample-limit" | "sibling-row";
     occurrenceCount: number;

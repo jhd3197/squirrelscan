@@ -16,6 +16,7 @@ import type {
   PackedSubtreeLadder,
 } from "@squirrelscan/core-contracts/component-evidence";
 import { packComponentOccurrences } from "@squirrelscan/core-contracts/component-evidence";
+import { packSiteResourceOccurrences } from "@squirrelscan/core-contracts/site-resource-evidence";
 import { componentOccurrenceKey } from "../component-fix-groups";
 import type { GroupedCheck } from "../grouping";
 
@@ -484,6 +485,20 @@ function buildSlimReport(report: AuditReport, version: string): SlimJsonReport {
             })()
           : {}),
         ...(check.componentEvidence ? { componentEvidence: check.componentEvidence } : {}),
+        // #2341: the raw evidence, packed. The derived `siteResourceFixGroups`
+        // above are NOT what a re-import reads back — they are derived, and
+        // `report -i` re-derives them from this, so there is one source of
+        // truth rather than two that can disagree.
+        ...(check.siteResourceOccurrences?.length
+          ? {
+              siteResourceOccurrences: packSiteResourceOccurrences(
+                check.siteResourceOccurrences,
+              ),
+            }
+          : {}),
+        ...(check.siteResourceEvidence
+          ? { siteResourceEvidence: check.siteResourceEvidence }
+          : {}),
         ...(check.value ? { legacyValue: check.value } : {}),
         // Smart audits (#110): provenance for findings carried across audits.
         // (#1652) "unrendered" is tested FIRST and emits no `lastSeenAt` —

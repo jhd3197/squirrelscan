@@ -49,6 +49,7 @@ export interface GroupedCheck {
   componentOccurrences?: ComponentOccurrence[];
   /** Complete raw shared-resource evidence, merged across this check's pages. */
   siteResourceOccurrences?: SiteResourceOccurrence[];
+  siteResourceEvidence?: CheckResult["siteResourceEvidence"];
   componentEvidence?: CheckResult["componentEvidence"];
 
   // Legacy field (deprecated)
@@ -289,6 +290,7 @@ export function groupIssuesByCategory(
         check as { siteResourceOccurrences?: SiteResourceOccurrence[] }
       ).siteResourceOccurrences;
       const componentEvidence = (check as CheckResult).componentEvidence;
+      const siteResourceEvidence = (check as CheckResult).siteResourceEvidence;
       // A folded aggregate check (#910) stands in for `details.occurrences`
       // per-page checks — count them all so "×N" badges stay truthful.
       const occurrences = checkOccurrences({ details });
@@ -385,6 +387,7 @@ export function groupIssuesByCategory(
           ]);
         }
         if (componentEvidence) existing.componentEvidence = componentEvidence;
+        if (siteResourceEvidence) existing.siteResourceEvidence = siteResourceEvidence;
       } else {
         const itemById = new Map<string, CheckItem>();
         for (const item of items ?? []) {
@@ -420,6 +423,7 @@ export function groupIssuesByCategory(
           siteResourceOccurrences: siteResourceOccurrences
             ? dedupeSiteResources(siteResourceOccurrences)
             : undefined,
+          siteResourceEvidence,
           componentEvidence,
           value: typeof (check as { value?: unknown }).value === "string"
             ? (check as { value: string }).value

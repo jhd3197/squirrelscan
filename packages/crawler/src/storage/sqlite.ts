@@ -453,6 +453,7 @@ const MIGRATIONS: Record<number, string[]> = {
   // `squirrel audit` path while every in-memory test stays green.
   31: [
     "ALTER TABLE rule_results ADD COLUMN site_resource_occurrences TEXT DEFAULT NULL",
+    "ALTER TABLE rule_results ADD COLUMN site_resource_evidence TEXT DEFAULT NULL",
   ],
 
 };
@@ -544,6 +545,7 @@ const RULE_RESULTS_ALTER_COLUMNS: ReadonlyArray<{ name: string; type: string }> 
   { name: "component_occurrences", type: "TEXT" },
   { name: "component_evidence", type: "TEXT" },
   { name: "site_resource_occurrences", type: "TEXT" },
+  { name: "site_resource_evidence", type: "TEXT" },
 ];
 
 const SCHEMA = `
@@ -825,6 +827,7 @@ CREATE TABLE IF NOT EXISTS rule_results (
   component_occurrences TEXT,
   component_evidence TEXT,
   site_resource_occurrences TEXT,
+  site_resource_evidence TEXT,
   created_at INTEGER NOT NULL,
   FOREIGN KEY (crawl_id) REFERENCES crawls(id)
 );
@@ -3195,9 +3198,9 @@ export class SQLiteStorage implements CrawlStorage {
             crawl_id, page_url, rule_id, check_name, status, message,
             value, expected, items, details, pages, skip_reason,
             component_occurrences, component_evidence, site_resource_occurrences,
-            created_at
+            site_resource_evidence, created_at
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
 
         const timestamp = Date.now();
@@ -3226,6 +3229,7 @@ export class SQLiteStorage implements CrawlStorage {
               check.siteResourceOccurrences?.length
                 ? JSON.stringify(check.siteResourceOccurrences)
                 : null,
+              check.siteResourceEvidence ? JSON.stringify(check.siteResourceEvidence) : null,
               timestamp
             );
           }
@@ -3627,9 +3631,9 @@ export class SQLiteStorage implements CrawlStorage {
             crawl_id, page_url, rule_id, check_name, status, message,
             value, expected, items, details, pages, skip_reason,
             component_occurrences, component_evidence, site_resource_occurrences,
-            created_at
+            site_resource_evidence, created_at
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
 
         const timestamp = Date.now();
@@ -3656,6 +3660,9 @@ export class SQLiteStorage implements CrawlStorage {
                   check.componentEvidence ? JSON.stringify(check.componentEvidence) : null,
                   check.siteResourceOccurrences?.length
                     ? JSON.stringify(check.siteResourceOccurrences)
+                    : null,
+                  check.siteResourceEvidence
+                    ? JSON.stringify(check.siteResourceEvidence)
                     : null,
                   timestamp
                 );
@@ -3988,6 +3995,9 @@ export class SQLiteStorage implements CrawlStorage {
         ? (JSON.parse(
             row.site_resource_occurrences as string,
           ) as CheckResult["siteResourceOccurrences"])
+        : undefined,
+      siteResourceEvidence: row.site_resource_evidence
+        ? (JSON.parse(row.site_resource_evidence as string) as CheckResult["siteResourceEvidence"])
         : undefined,
     };
   }

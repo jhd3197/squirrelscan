@@ -16,6 +16,7 @@ import type {
   CheckResult,
   ComponentOccurrence,
   ReportRuleResult,
+  SiteResourceOccurrence,
 } from "@/types";
 
 // Extended crawl metadata with optional published info
@@ -24,6 +25,7 @@ export interface CrawlMetadataWithPublished extends CrawlMetadata {
 }
 
 import { unpackComponentOccurrences } from "@squirrelscan/core-contracts/component-evidence";
+import { unpackSiteResourceOccurrences } from "@squirrelscan/core-contracts/site-resource-evidence";
 import { WITHHELD_SEED_REDIRECT_TARGET } from "@squirrelscan/report";
 
 import {
@@ -180,6 +182,14 @@ interface SlimJsonReport {
        */
       componentShapes?: { v: number; shapes: unknown[]; ladders?: unknown[] };
       componentEvidence?: CheckResult["componentEvidence"];
+      /**
+       * #2341 shared-resource evidence, packed. Read back for the same reason
+       * as the component evidence above: the serialized `siteResourceFixGroups`
+       * are derived, and `groupIssuesByCategory` re-derives them from this, so
+       * there is one source of truth rather than two that can disagree.
+       */
+      siteResourceOccurrences?: unknown;
+      siteResourceEvidence?: CheckResult["siteResourceEvidence"];
       legacyValue?: string;
     }>;
   }>;
@@ -230,6 +240,17 @@ function convertSlimReport(report: SlimJsonReport): AuditReport {
         if (list) list.push(occurrence);
         else occurrencesByPage.set(occurrence.pageUrl, [occurrence]);
       }
+      // Partitioned by page, never copied onto every row: the grouping keys on
+      // which pages reference a resource, so duplicating the set across rows
+      // would make every page claim every map.
+      const restoredResources =
+        unpackSiteResourceOccurrences(check.siteResourceOccurrences) ?? [];
+      const resourcesByPage = new Map<string, SiteResourceOccurrence[]>();
+      for (const occurrence of restoredResources) {
+        const list = resourcesByPage.get(occurrence.pageUrl);
+        if (list) list.push(occurrence);
+        else resourcesByPage.set(occurrence.pageUrl, [occurrence]);
+      }
 
       if (check.affectedPages.length > 0) {
         // Evidence for a page the serialized sample does not list cannot be
@@ -257,9 +278,12 @@ function convertSlimReport(report: SlimJsonReport): AuditReport {
             details: check.details,
             value: check.legacyValue ?? null,
             componentOccurrences: occurrencesByPage.get(page),
+            siteResourceOccurrences: resourcesByPage.get(page),
             // A whole-check fact cannot be split across rows; pin it to the
             // first, as the fold does with `details.additional`.
             componentEvidence: index === 0 ? evidence : undefined,
+            siteResourceEvidence:
+              index === 0 ? check.siteResourceEvidence : undefined,
           });
         }
       } else {
@@ -272,6 +296,9 @@ function convertSlimReport(report: SlimJsonReport): AuditReport {
           value: check.legacyValue ?? null,
           componentOccurrences: restored.length > 0 ? restored : undefined,
           componentEvidence: check.componentEvidence,
+          siteResourceOccurrences:
+            restoredResources.length > 0 ? restoredResources : undefined,
+          siteResourceEvidence: check.siteResourceEvidence,
         });
       }
     }
