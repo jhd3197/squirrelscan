@@ -47,6 +47,7 @@ import { parse as parseDomain } from "tldts";
 
 import { parseHTML } from "../../../packages/parser/src/dom.ts";
 import { featureSchema, featurizeDocument, FEATURIZER_VERSION } from "./featurize.ts";
+import { isHtmlType, unusableHtmlReason } from "./unusable-html.ts";
 import { silverPageType, silverRegionLabels } from "./silver-labels.ts";
 
 /** `silver-v1` is the 2026-09-19 build. A later, larger corpus sets
@@ -141,6 +142,8 @@ function sha256(value: string): string {
 interface IndexEntry {
   hash: string;
   url: string;
+  /** `pages.content_type` of the first url that won the hash. */
+  type: string | null;
 }
 
 /**
@@ -150,7 +153,7 @@ interface IndexEntry {
  * writes that hash back into the column), so this is the whole join.
  */
 function buildIndex(indexPath: string): void {
-  const seen = new Map<string, string>();
+  const seen = new Map<string, { url: string; type: string | null }>();
   let opened = 0;
   let failed = 0;
   let rows = 0;
@@ -175,7 +178,7 @@ function buildIndex(indexPath: string): void {
         db = new Database(dbPath, { readonly: true });
         const found = db
           .query(
-            "SELECT normalized_url AS url, content_hash AS hash FROM pages WHERE content_hash IS NOT NULL AND status = 200",
+            "SELECT normalized_url AS url, content_hash AS hash, content_type AS type FROM pages WHERE content_hash IS NOT NULL AND status = 200",
           )
           .all() as IndexEntry[];
         opened++;
@@ -183,7 +186,7 @@ function buildIndex(indexPath: string): void {
           rows++;
           // First url wins, so a re-crawl under a different alias does not make
           // the index depend on directory order.
-          if (!seen.has(row.hash)) seen.set(row.hash, row.url);
+          if (!seen.has(row.hash)) seen.set(row.hash, { url: row.url, type: row.type });
         }
       } catch {
         failed++;
@@ -197,8 +200,8 @@ function buildIndex(indexPath: string): void {
   }
 
   const lines: string[] = [];
-  for (const [hash, url] of [...seen].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
-    lines.push(JSON.stringify({ hash, url }));
+  for (const [hash, { url, type }] of [...seen].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+    lines.push(JSON.stringify({ hash, url, type }));
   }
   writeFileSync(indexPath, `${lines.join("\n")}\n`);
   log(
@@ -207,14 +210,19 @@ function buildIndex(indexPath: string): void {
   );
 }
 
-function loadIndex(indexPath: string): Map<string, string> {
-  const map = new Map<string, string>();
+function loadIndex(indexPath: string): {
+  urls: Map<string, string>;
+  types: Map<string, string | null>;
+} {
+  const urls = new Map<string, string>();
+  const types = new Map<string, string | null>();
   for (const line of readFileSync(indexPath, "utf8").split("\n")) {
     if (!line) continue;
     const entry = JSON.parse(line) as IndexEntry;
-    map.set(entry.hash, entry.url);
+    urls.set(entry.hash, entry.url);
+    types.set(entry.hash, entry.type ?? null);
   }
-  return map;
+  return { urls, types };
 }
 
 // ---------------------------------------------------------------------------
@@ -404,6 +412,7 @@ async function build(
   args: Args,
   selected: Map<string, Selection>,
   excluded: Record<string, number>,
+  contentTypes: Map<string, string | null>,
 ) {
   mkdirSync(outDir, { recursive: true });
 
@@ -431,7 +440,16 @@ async function build(
     divSoupPages: emptyBySplit(() => 0),
     regionTrainablePages: emptyBySplit(() => 0),
     nestedChrome: { articleHeader: 0, articleFooter: 0, siteHeader: 0, footer: 0 },
-    excluded: { ...excluded, not_selected: 0, too_large: 0, parse_failed: 0, no_candidates: 0 },
+    excluded: {
+      ...excluded,
+      not_selected: 0,
+      not_html: 0,
+      too_large: 0,
+      parse_failed: 0,
+      empty_html: 0,
+      no_document_element: 0,
+      no_candidates: 0,
+    },
     throughput: { pages: 0, seconds: 0, pagesPerSecond: 0, bytes: 0 },
   };
   const domainsSeen = emptyBySplit(() => new Set<string>());
@@ -491,6 +509,12 @@ async function build(
             continue;
           }
           if (processed >= args.limit) break;
+          // Selected first, excluded after, with no backfill, exactly as
+          // pagetype-queue.ts does, so the two agree on which pages exist.
+          if (!isHtmlType(contentTypes.get(row.hash))) {
+            stats.excluded.not_html = (stats.excluded.not_html ?? 0) + 1;
+            continue;
+          }
 
           let html: string;
           try {
@@ -503,6 +527,12 @@ async function build(
             html = raw.toString("utf8");
           } catch {
             stats.excluded.parse_failed = (stats.excluded.parse_failed ?? 0) + 1;
+            continue;
+          }
+          const unusable = unusableHtmlReason(html);
+          if (unusable) {
+            const key = unusable === "emptyHtml" ? "empty_html" : "no_document_element";
+            stats.excluded[key] = (stats.excluded[key] ?? 0) + 1;
             continue;
           }
 
@@ -651,12 +681,14 @@ async function main(): Promise<void> {
   // failure is invisible because `availableHashes()` does read both stores, so
   // the store-size logs look exactly right.
   const indexKey = sha256(storeRoots.join(":")).slice(0, 12);
-  const indexPath = `${cacheDir}/hash-url-index-${indexKey}.jsonl`;
+  // `v2` since the index carries each page's content type: a v1 file has none,
+  // and reusing it would switch the not-HTML filter off without a word.
+  const indexPath = `${cacheDir}/hash-url-index-v2-${indexKey}.jsonl`;
   if (args.rebuildIndex || !existsSync(indexPath)) buildIndex(indexPath);
   else log(`index: reusing ${indexPath}`);
   if (args.indexOnly) return;
 
-  const index = loadIndex(indexPath);
+  const { urls: index, types: contentTypes } = loadIndex(indexPath);
   log(`index: ${index.size} content hashes with a url`);
 
   const available = availableHashes();
@@ -728,7 +760,7 @@ async function main(): Promise<void> {
     log(`split: manifest written (${Object.keys(domainsToSplit).length} domains)`);
   }
 
-  await build(args, selected, excluded);
+  await build(args, selected, excluded, contentTypes);
 }
 
 await main();
