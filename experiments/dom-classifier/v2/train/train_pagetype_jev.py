@@ -41,7 +41,8 @@ import scipy.sparse as sp
 DATASET = os.environ.get("DOM_CLASSIFIER_DATASET_VERSION", "silver-v1")
 
 
-N_JOBS = 4
+#: Threads for LightGBM. 4 on the shared 16 GB Mac; a dedicated training box sets more.
+N_JOBS = int(os.environ.get("DOM_CLASSIFIER_JOBS", "4"))
 
 # Jev v7's label set, in a fixed order the artifact depends on.
 CLASSES = [

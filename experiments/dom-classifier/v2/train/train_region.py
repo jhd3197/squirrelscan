@@ -28,7 +28,8 @@ import scipy.sparse as sp
 DATASET = os.environ.get("DOM_CLASSIFIER_DATASET_VERSION", "silver-v1")
 
 
-N_JOBS = 4
+#: Threads for LightGBM. 4 on the shared 16 GB Mac; a dedicated training box sets more.
+N_JOBS = int(os.environ.get("DOM_CLASSIFIER_JOBS", "4"))
 
 REGION_CLASSES = [
     "site_header",
@@ -313,6 +314,11 @@ def main() -> None:
                         help="comma-separated feature sets for the val grid")
     parser.add_argument("--leaf-configs", default="31:40,63:20,127:20",
                         help="comma-separated numLeaves:minDataInLeaf pairs for the val grid")
+    parser.add_argument("--chosen-config", default="",
+                        help="JSON config already chosen on val by an earlier sweep of THIS "
+                             "sample; skips the sweep (it is not re-run)")
+    parser.add_argument("--chosen-val-macro-f1", type=float, default=None,
+                        help="the val macro-F1 that earlier sweep recorded for --chosen-config")
     parser.add_argument("--skip-ablations", action="store_true",
                         help="skip the holdout feature-set ablations (reporting only)")
     args = parser.parse_args()
@@ -387,6 +393,11 @@ def main() -> None:
 
     sweep = []
     best_config, best_val = None, -1.0
+    if args.chosen_config:
+        # The sweep ran already, on this same sample, and its winner is passed
+        # in: re-running it would re-read val for nothing.
+        best_config, best_val = json.loads(args.chosen_config), args.chosen_val_macro_f1
+        grid = []
     for config in grid:
         xt, xv = features_for(config["featureSet"])
         booster, seconds = train_one(xt, y_train, xv, y_val, args.rounds, config,
@@ -405,6 +416,7 @@ def main() -> None:
         del booster, val_pred
     cached.clear()
     report["selection"] = {"featureSets": args.feature_sets, "leafConfigs": args.leaf_configs,
+                           "sweptEarlier": bool(args.chosen_config),
                            "grid": sweep, "chosen": best_config, "chosenOn": "val macro-F1",
                            "chosenValMacroF1": best_val}
     print(f"chosen {best_config} (val macroF1 {best_val})", flush=True)
