@@ -483,6 +483,12 @@ def main() -> None:
         "confusion": confusion(y_hold, pred),
         "calibration": calibration(probs, y_hold),
         "coverageAtThreshold": coverage_at_threshold(probs, y_hold),
+        # The same table on VAL, which is what export_model.py picks the global
+        # threshold from: a threshold read off holdout would be tuned on the
+        # split that grades it.
+        "coverageAtThresholdVal": coverage_at_threshold(
+            booster.predict(xv, num_iteration=chosen_k), y_val
+        ),
     }
     report["sizeCurve"] = curve
     report["holdoutAtBudget"] = holdout_at

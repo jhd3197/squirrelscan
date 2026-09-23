@@ -83,7 +83,7 @@ def load_jev(path: Path) -> dict[str, dict]:
     return out
 
 
-def load_features(path: Path, n_numeric: int, n_tokens: int) -> dict[str, dict]:
+def load_features(path: Path, n_numeric: int, n_tokens: int, split: str) -> dict[str, dict]:
     out = {}
     width = n_numeric + n_tokens
     with gzip.open(path, "rt") as handle:
@@ -95,15 +95,19 @@ def load_features(path: Path, n_numeric: int, n_tokens: int) -> dict[str, dict]:
             vector[:n_numeric] = row["f"]
             for bucket in row["k"]:
                 vector[n_numeric + bucket] = 1.0
-            out[row["p"]] = {"x": vector, "d": row["d"], "silver": row["l"]}
+            out[row["p"]] = {"x": vector, "d": row["d"], "silver": row["l"], "s": split}
     return out
 
 
-def assemble(jev: dict, features: dict):
+def assemble(jev: dict, features: dict, splits: frozenset[str]):
+    """Rows for the labels whose page sits in `splits` of THIS dataset. The
+    dataset's split decides, not the label file's: a label written into
+    train.jsonl for a page whose domain the dataset puts in holdout would
+    otherwise be trained on and graded on at once."""
     xs, ys, groups, weights, silver, ids = [], [], [], [], [], []
     for page_id, label in jev.items():
         found = features.get(page_id)
-        if found is None or label["pageType"] not in CLASS_INDEX:
+        if found is None or found["s"] not in splits or label["pageType"] not in CLASS_INDEX:
             continue
         xs.append(found["x"])
         ys.append(CLASS_INDEX[label["pageType"]])
@@ -231,18 +235,22 @@ def main() -> None:
     features: dict[str, dict] = {}
     for split in ("train", "val", "holdout"):
         features.update(load_features(root / DATASET / f"pages-{split}.jsonl.gz",
-                                      n_numeric, n_tokens))
+                                      n_numeric, n_tokens, split))
 
-    pool_jev = {**load_jev(jev_dir / "train.jsonl"), **load_jev(jev_dir / "val.jsonl")}
-    hold_jev = load_jev(jev_dir / "holdout.jsonl")
-    x, y, groups, w, silver, _ = assemble(pool_jev, features)
-    xh, yh, _, _, silver_h, ids_h = assemble(hold_jev, features)
+    labels = {**load_jev(jev_dir / "train.jsonl"), **load_jev(jev_dir / "val.jsonl"),
+              **load_jev(jev_dir / "holdout.jsonl")}
+    x, y, groups, w, silver, _ = assemble(labels, features, frozenset({"train", "val"}))
+    xh, yh, _, _, silver_h, ids_h = assemble(labels, features, frozenset({"holdout"}))
+    split_moved = sum(1 for pid, row in labels.items()
+                      if pid in features and row.get("split") != features[pid]["s"])
+    print(f"labels whose file split differs from the dataset's: {split_moved}", flush=True)
     print(f"pool {x.shape[0]} pages / {len(set(groups))} domains, holdout {xh.shape[0]}",
           flush=True)
 
     report: dict = {
         "classes": CLASSES,
         "labelProvenance": "Jev v7 (dom-suggestions-v7), 11 classes",
+        "labelsSplitFromDataset": {"movedFromLabelFileSplit": split_moved},
         "protocol": "domain-grouped 5-fold CV inside train+val; holdout read once",
         "pool": {"pages": int(x.shape[0]), "domains": len(set(groups)),
                  "byClass": dict(Counter(CLASSES[i] for i in y).most_common())},

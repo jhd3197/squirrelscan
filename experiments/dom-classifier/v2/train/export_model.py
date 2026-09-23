@@ -231,8 +231,9 @@ def main() -> None:
     )
     page_report = json.loads(page_report_path.read_text())
 
-    # The threshold is read off the holdout coverage table: the LOWEST value at
-    # or above 0.5 whose covered accuracy clears 0.98.
+    # The threshold is read off the VAL coverage table (holdout for a report
+    # written before val had one): the LOWEST value at or above 0.5 whose
+    # covered accuracy clears 0.98.
     #
     # The floor of 0.5 matters. Without it the rule picks 0.0, because accuracy
     # at full coverage is already 0.968 -- a bar the untruncated model clears
@@ -240,7 +241,9 @@ def main() -> None:
     # 0.98 is the bar that actually separates: it lands on 0.7, keeping 96.6%
     # of nodes on the model at 98.1% accuracy and macro-F1 0.82 on those,
     # and handing the remaining 3.4% to the deterministic path.
-    coverage = region_report["shipped"]["coverageAtThreshold"]
+    coverage = region_report["shipped"].get(
+        "coverageAtThresholdVal", region_report["shipped"]["coverageAtThreshold"]
+    )
     region_threshold = next(
         (row["threshold"] for row in coverage
          if row["threshold"] >= 0.5 and row["accuracyOnCovered"] >= 0.98),
