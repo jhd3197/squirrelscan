@@ -39,10 +39,9 @@ V8_CLASSES = [
     "event", "job_posting", "local_business", "about", "contact", "docs", "legal", "pricing",
     "search_results", "listing_index", "other",
 ]
-V7_CLASSES = [
-    "article", "product_detail", "product_listing", "docs", "homepage", "pricing", "contact",
-    "about", "legal", "listing_index", "other",
-]
+# The v7 head's own class order (the artifact depends on it), NOT alphabetical:
+# indexing a v7 prediction with any other order silently scores the wrong class.
+from train_pagetype_jev import CLASSES as V7_CLASSES  # noqa: E402
 
 
 def jsonl(path: Path) -> list[dict]:
