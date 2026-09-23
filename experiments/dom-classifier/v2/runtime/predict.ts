@@ -136,7 +136,9 @@ export function classifyDocument(
     const scores = new Float32Array(usable.pageType.numClass);
     scoreRow(usable.pageType, values, scores);
     const { index, probability } = softmax(scores);
-    const threshold = options.threshold ?? usable.pageType.confidenceThreshold;
+    // Per class when the artifact carries them (page type v8); otherwise every
+    // entry equals the head's single confidenceThreshold.
+    const threshold = options.threshold ?? usable.pageType.classThresholds[index]!;
     pageType =
       probability >= threshold
         ? {

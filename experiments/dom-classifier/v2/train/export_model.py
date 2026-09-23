@@ -263,11 +263,20 @@ def main() -> None:
         region_threshold,
         class_thresholds,
     )
+    # Per-class page-type thresholds, chosen on val by the trainer, when it
+    # wrote them (v8 does); older heads fall back to the single 0.7.
+    page_threshold_path = page_dir / "class-thresholds.json"
+    page_class_thresholds = (
+        json.loads(page_threshold_path.read_text())["thresholds"]
+        if page_threshold_path.exists()
+        else None
+    )
     page_booster, page_head, page_ref = head(
         page_dir / "pagetype-model.txt",
         None,
         page_report["classes"],
         0.7,
+        page_class_thresholds,
     )
 
     artifact = {

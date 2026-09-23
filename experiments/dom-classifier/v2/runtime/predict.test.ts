@@ -118,9 +118,11 @@ describe.if(HAS_ARTIFACT)("with the real artifact", () => {
     const bytes = statSync(ARTIFACT).size;
     expect(bytes).toBeLessThanOrEqual(10_000_000);
     expect(model!.region.numClass).toBe(10);
-    // 11 page-type classes since the head moved to Jev labels: the schema-derived
-    // set could not express legal or pricing at all.
-    expect(model!.pageType.numClass).toBe(11);
+    // 11 page-type classes since the head moved to Jev labels (the schema-derived
+    // set could not express legal or pricing at all); v8 has one class per
+    // expected schema.org type, minus the rare ones merged away.
+    expect(model!.pageType.numClass).toBeGreaterThanOrEqual(11);
+    expect(model!.pageType.classThresholds.length).toBe(model!.pageType.numClass);
   });
 
   test("it loads (JSON parse + init) within 100 ms", () => {
