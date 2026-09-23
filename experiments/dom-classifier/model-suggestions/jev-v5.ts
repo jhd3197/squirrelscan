@@ -44,17 +44,51 @@ export const PROMPT_REVISION_V5 = "dom-suggestions-v5" as const;
 /** Revisions this module can run. Each has its own policy file; none overwrites another. */
 export const POLICY_REVISIONS = ["v5", "v6", "v7"] as const;
 export type PolicyRevision = (typeof POLICY_REVISIONS)[number];
-export type PromptRevision = `dom-suggestions-${PolicyRevision}`;
+/** Revisions a PAGE-TYPE run can use. v8 is page-type only: its policy has no
+ *  node sections, so the node runners (which check POLICY_REVISIONS) refuse it. */
+export const PAGE_TYPE_POLICY_REVISIONS = ["v5", "v6", "v7", "v8"] as const;
+export type PageTypePolicyRevision = (typeof PAGE_TYPE_POLICY_REVISIONS)[number];
+export type PromptRevision = `dom-suggestions-${PageTypePolicyRevision}`;
 export const PACKET_REVISION_V5 = "runtime-dom-text-v2";
 /** Packets built from full HTML, which carry attributes a capture cannot hold. */
 export const HTML_PACKET_REVISION_V5 = "runtime-dom-html-v1";
 export const PAGE_PACKET_REVISION_V5 = "dom-page-text-v2";
 export const POLICY_PATH = join(import.meta.dir, "..", "v2", "labels", "policy-v5.md");
-export function policyPath(revision: PolicyRevision): string {
+export function policyPath(revision: PageTypePolicyRevision): string {
   return join(import.meta.dir, "..", "v2", "labels", `policy-${revision}.md`);
 }
 
 export const PAGE_TYPES_V5 = pageTypeMap.classes as readonly string[];
+/** v8: one class per expected schema.org type (see policy-v8.md section 4). */
+export const PAGE_TYPES_V8 = [
+  "homepage",
+  "product_detail",
+  "product_listing",
+  "article",
+  "blog_post",
+  "faq",
+  "recipe",
+  "event",
+  "job_posting",
+  "local_business",
+  "about",
+  "contact",
+  "docs",
+  "legal",
+  "pricing",
+  "search_results",
+  "listing_index",
+  "other",
+] as const;
+/** The class list and mapping revision a policy revision asks for. */
+export function pageTypesFor(revision: PromptRevision): {
+  classes: readonly string[];
+  mappingRevision: string;
+} {
+  return revision === "dom-suggestions-v8"
+    ? { classes: PAGE_TYPES_V8, mappingRevision: "dom-pagetype-v8" }
+    : { classes: PAGE_TYPES_V5, mappingRevision: "dom-pagetype-v5" };
+}
 export const PAGE_TYPE_COLLAPSE = pageTypeMap.map as Record<string, string>;
 export const PURPOSES_V5 = Object.keys(purposeMap.retained).sort() as readonly string[];
 export const REGIONS_V5 = REGIONS as readonly string[];
@@ -555,7 +589,10 @@ export function buildPageTypeRequest(
             evidence: "page.packet",
           },
           criteria: Object.fromEntries(
-            PAGE_TYPES_V5.map((label) => [label, definitionFor("section 4 pageType", label)]),
+            pageTypesFor(policy.revision).classes.map((label) => [
+              label,
+              definitionFor("section 4 pageType", label),
+            ]),
           ),
         },
       },
@@ -573,10 +610,13 @@ export type PolicyDocument = { text: string; sha256: string; revision: PromptRev
  * row can never claim one revision while carrying another's bytes; both the
  * hash and the revision are written on every emitted row.
  */
-export function loadPolicy(revision: PolicyRevision = "v5"): PolicyDocument {
-  if (!POLICY_REVISIONS.includes(revision)) throw new Error(`unknown policy revision ${revision}`);
+export function loadPolicy(revision: PageTypePolicyRevision = "v5"): PolicyDocument {
+  if (!PAGE_TYPE_POLICY_REVISIONS.includes(revision))
+    throw new Error(`unknown policy revision ${revision}`);
   const text = readFileSync(policyPath(revision), "utf8");
-  if (!text.includes("## 1. componentType") || !text.includes("## 4. pageType"))
+  // v8 is page-type only; every other revision carries the node axes too.
+  const nodeAxes = revision !== "v8";
+  if ((nodeAxes && !text.includes("## 1. componentType")) || !text.includes("## 4. pageType"))
     throw new Error(`policy-${revision}.md is missing a required section`);
   if (!text.startsWith(`# Shared annotation policy, revision \`dom-suggestions-${revision}\``))
     throw new Error(`policy-${revision}.md does not declare revision ${revision}`);

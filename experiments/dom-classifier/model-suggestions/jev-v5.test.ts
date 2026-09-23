@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  buildPageTypeRequest,
   buildRequestV5,
   cleanText,
   COMPONENT_TYPES_V5,
@@ -12,6 +13,8 @@ import {
   PACKET_REVISION_V5,
   type ExtractedCandidate,
   PAGE_TYPES_V5,
+  PAGE_TYPES_V8,
+  pageTypesFor,
   pageEvidence,
   pageEvidenceFromHtml,
   PROMPT_REVISION_V5,
@@ -458,5 +461,25 @@ describe("pages with no usable HTML (#2307)", () => {
       "application/x-directory",
     ])
       expect(isHtmlType(type)).toBe(false);
+  });
+});
+
+describe("policy v8 (page type only)", () => {
+  test("loads without node sections and asks exactly the v8 classes", () => {
+    const policy = loadPolicy("v8");
+    expect(policy.revision).toBe("dom-suggestions-v8");
+    const evidence = pageEvidenceFromHtml(
+      "<html><body><p>A paragraph long enough to count as evidence about the page.</p></body></html>",
+      "https://example.com/blog/a-post",
+      "p1",
+    );
+    const { request } = buildPageTypeRequest(evidence, policy);
+    const criteria = (request.questions.page_type as { criteria: Record<string, string> }).criteria;
+    expect(Object.keys(criteria)).toEqual([...PAGE_TYPES_V8]);
+    expect(pageTypesFor(policy.revision).mappingRevision).toBe("dom-pagetype-v8");
+  });
+
+  test("v7 still asks its eleven classes", () => {
+    expect(pageTypesFor(loadPolicy("v7").revision).classes).toEqual(PAGE_TYPES_V5);
   });
 });

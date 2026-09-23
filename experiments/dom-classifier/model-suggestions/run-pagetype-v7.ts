@@ -30,11 +30,11 @@ import {
   evaluateWithBackoff,
   loadPolicy,
   pageEvidenceFromHtml,
-  PAGE_TYPES_V5,
-  POLICY_REVISIONS,
+  PAGE_TYPE_POLICY_REVISIONS,
+  pageTypesFor,
   sha256,
   snapshotHash,
-  type PolicyRevision,
+  type PageTypePolicyRevision,
 } from "./jev-v5.ts";
 import { type UnusableHtml, unusableHtmlReason } from "../v2/unusable-html.ts";
 
@@ -74,13 +74,14 @@ if (storePaths.length === 0) throw new Error("--store resolved to no paths");
 const outputPath = privatePath(argument("--output"));
 const concurrency = Number(argument("--concurrency", "4"));
 const limit = Number(argument("--limit", "0"));
-const policyRevision = argument("--policy-revision", "v7") as PolicyRevision;
-if (!POLICY_REVISIONS.includes(policyRevision))
-  throw new Error(`--policy-revision must be one of ${POLICY_REVISIONS.join(", ")}`);
+const policyRevision = argument("--policy-revision", "v7") as PageTypePolicyRevision;
+if (!PAGE_TYPE_POLICY_REVISIONS.includes(policyRevision))
+  throw new Error(`--policy-revision must be one of ${PAGE_TYPE_POLICY_REVISIONS.join(", ")}`);
 if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 4)
   throw new Error("--concurrency must be 1..4");
 
 const policy = loadPolicy(policyRevision);
+const pageTypes = pageTypesFor(policy.revision);
 const queue = readFileSync(pagesPath, "utf8")
   .split("\n")
   .filter(Boolean)
@@ -241,8 +242,8 @@ async function worker(): Promise<void> {
         probabilities?: Record<string, number>;
         confidence?: number;
       };
-      if (typeof answer?.choice !== "string" || !PAGE_TYPES_V5.includes(answer.choice))
-        throw new Error("page_type answer is not one of the eleven classes");
+      if (typeof answer?.choice !== "string" || !pageTypes.classes.includes(answer.choice))
+        throw new Error("page_type answer is not one of the policy's classes");
       appendFileSync(
         outputPath,
         `${JSON.stringify({
@@ -251,7 +252,7 @@ async function worker(): Promise<void> {
           modelId: "jev-1.13.0",
           promptRevision: policy.revision,
           policySha256: policy.sha256,
-          pageTypeMappingRevision: "dom-pagetype-v5",
+          pageTypeMappingRevision: pageTypes.mappingRevision,
           pageId: row.pageId,
           contentHash: resolved.hash,
           split: row.split,
