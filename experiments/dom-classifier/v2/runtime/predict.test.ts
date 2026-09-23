@@ -110,15 +110,31 @@ describe("artifact validation", () => {
 const artifactJson = (): Record<string, unknown> => JSON.parse(readFileSync(ARTIFACT, "utf8"));
 
 describe.if(HAS_ARTIFACT)("with the real artifact", () => {
-  test("it loads and fits the 2 MB budget", () => {
+  // G4 since 2026-09-23: the 2 MB limit was dropped in favour of a reliable
+  // model. The ceiling is 10 MB, and what matters at runtime is load time.
+  test("it loads and fits the 10 MB ceiling", () => {
     const { model } = tryLoadModel(artifactJson());
     expect(model).not.toBeNull();
     const bytes = statSync(ARTIFACT).size;
-    expect(bytes).toBeLessThanOrEqual(2_000_000);
+    expect(bytes).toBeLessThanOrEqual(10_000_000);
     expect(model!.region.numClass).toBe(10);
     // 11 page-type classes since the head moved to Jev labels: the schema-derived
     // set could not express legal or pricing at all.
     expect(model!.pageType.numClass).toBe(11);
+  });
+
+  test("it loads (JSON parse + init) within 100 ms", () => {
+    const text = readFileSync(ARTIFACT, "utf8");
+    // Best of three, so one scheduling hiccup on a loaded machine is not a
+    // failure; a model that is genuinely slow to load is slow every time.
+    let best = Number.POSITIVE_INFINITY;
+    for (let run = 0; run < 3; run++) {
+      const started = Bun.nanoseconds();
+      const { model } = tryLoadModel(JSON.parse(text));
+      best = Math.min(best, (Bun.nanoseconds() - started) / 1e6);
+      expect(model).not.toBeNull();
+    }
+    expect(best).toBeLessThanOrEqual(100);
   });
 
   test("predictions carry a source, and low confidence falls back to rules", () => {

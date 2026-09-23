@@ -308,7 +308,9 @@ def main() -> None:
     parser.add_argument("--data-root", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--rounds", type=int, default=400)
-    parser.add_argument("--region-budget-bytes", type=int, default=1_250_000)
+    parser.add_argument("--region-budget-bytes", type=int, default=0,
+                        help="cap the shipped region head at this many bytes; 0 (default) = "
+                             "no size cut, the iteration count is the best val macro-F1")
     parser.add_argument("--leaves", type=int, default=31)
     parser.add_argument("--feature-sets", default="full,no_tokens,no_curated_vocab,tokens_only",
                         help="comma-separated feature sets for the val grid")
@@ -446,10 +448,10 @@ def main() -> None:
               f"iters {booster.best_iteration} {seconds}s", flush=True)
         del xt, xv, xh, booster, probs, pred
 
-    # Size/accuracy curve. The artifact budget is 2 MB for BOTH heads, and the
-    # chosen config's full tree set is already over that on its own, so the
-    # shipped model is the same model READ AT FEWER ITERATIONS. One training
-    # run, several sizes, and the cut is chosen on val like everything else.
+    # Size/accuracy curve. The shipped iteration count is the best val
+    # macro-F1 among the cuts that fit --region-budget-bytes; with no budget
+    # (the default since the 2 MB artifact limit was dropped for reliability)
+    # every cut fits, so it is simply the best val cut. Holdout never picks it.
     xt, _ = select(x_train, blocks, ABLATIONS[best_config["featureSet"]])
     xv, _ = select(x_val, blocks, ABLATIONS[best_config["featureSet"]])
     xh, _ = select(x_hold, blocks, ABLATIONS[best_config["featureSet"]])
@@ -469,10 +471,11 @@ def main() -> None:
         )["macroF1"]
         curve.append({"iterations": k, "leaves": int(leaves_k), "bytes": int(bytes_k),
                       "valMacroF1": val_macro})
-        if bytes_k <= args.region_budget_bytes:
+        if not args.region_budget_bytes or bytes_k <= args.region_budget_bytes:
             chosen_k = k
     # Best val macro-F1 among the cuts that fit, not simply the largest that fits.
-    fitting = [c for c in curve if c["bytes"] <= args.region_budget_bytes]
+    fitting = [c for c in curve
+               if not args.region_budget_bytes or c["bytes"] <= args.region_budget_bytes]
     if fitting:
         chosen_k = max(fitting, key=lambda c: c["valMacroF1"])["iterations"]
     chosen_k = chosen_k or booster.best_iteration
