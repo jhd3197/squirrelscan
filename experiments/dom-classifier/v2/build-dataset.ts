@@ -75,6 +75,8 @@ interface Args {
   maxPerDomain: number;
   /** A prior split-manifest.json to check this build's splits against. */
   verifyAgainst: string;
+  /** An embargoed evaluation sample (`divsoup-eval-v1/sample.jsonl`). */
+  excludeSample: string;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -84,7 +86,10 @@ function parseArgs(argv: string[]): Args {
     limit: Number.POSITIVE_INFINITY,
     maxPerDomain: DEFAULT_MAX_PER_DOMAIN,
     verifyAgainst: "",
+    excludeSample: "",
   };
+  const exclude = argv.indexOf("--exclude-sample");
+  if (exclude !== -1 && argv[exclude + 1]) args.excludeSample = argv[exclude + 1]!;
   const verify = argv.indexOf("--verify-against");
   if (verify !== -1 && argv[verify + 1]) args.verifyAgainst = argv[verify + 1]!;
   const limit = argv.indexOf("--limit");
@@ -117,6 +122,14 @@ const storeRoots = (process.env.SQUIRREL_STORES ?? requireEnv("SQUIRREL_STORE"))
   .map((path) => path.trim())
   .filter(Boolean);
 if (storeRoots.length === 0) throw new Error("SQUIRREL_STORES resolved to no paths");
+/** Roots read for the hash -> url index ONLY; their content store is never
+ *  opened. Same contract as corpus/pagetype-queue.ts: a content-store snapshot
+ *  taken without its project databases gets its urls from the live projects,
+ *  while its bytes come from the snapshot, which nothing prunes. */
+const indexOnlyRoots = (process.env.SQUIRREL_INDEX_ONLY_ROOTS ?? "")
+  .split(":")
+  .map((path) => path.trim())
+  .filter(Boolean);
 const outDir = `${dataRoot}/${DATASET_VERSION}`;
 const cacheDir = `${dataRoot}/cache`;
 const logPath = `${dataRoot}/logs/build-dataset.log`;
@@ -159,7 +172,7 @@ function buildIndex(indexPath: string): void {
   let rows = 0;
   const started = Date.now();
 
-  for (const root of storeRoots) {
+  for (const root of [...storeRoots, ...indexOnlyRoots]) {
     const projectsDir = `${root}/projects`;
     if (!existsSync(projectsDir)) {
       log(`index: no projects/ under ${root}, skipping`);
@@ -290,10 +303,12 @@ function select(
   index: Map<string, string>,
   available: Set<string>,
   maxPerDomain: number,
+  embargo: { pageIds: Set<string>; domains: Set<string> },
 ): { selected: Map<string, Selection>; excluded: Record<string, number>; domains: number } {
   const byDomain = new Map<string, Array<{ hash: string; url: string }>>();
   const excluded: Record<string, number> = {
     no_domain: 0,
+    embargoed: 0,
     over_domain_cap: 0,
     pruned_from_store: 0,
   };
@@ -306,6 +321,11 @@ function select(
     const domain = registrableDomain(url);
     if (!domain) {
       excluded.no_domain = (excluded.no_domain ?? 0) + 1;
+      continue;
+    }
+    // Before the per-domain cap, so an embargoed domain never takes a slot.
+    if (embargo.domains.has(domain) || embargo.pageIds.has(hash.slice(0, 16))) {
+      excluded.embargoed = (excluded.embargoed ?? 0) + 1;
       continue;
     }
     const bucket = byDomain.get(domain);
@@ -680,7 +700,11 @@ async function main(): Promise<void> {
   // selected, and the run reports success having read nothing from it. The
   // failure is invisible because `availableHashes()` does read both stores, so
   // the store-size logs look exactly right.
-  const indexKey = sha256(storeRoots.join(":")).slice(0, 12);
+  const indexKey = sha256(
+    indexOnlyRoots.length
+      ? `${storeRoots.join(":")}|index-only:${indexOnlyRoots.join(":")}`
+      : storeRoots.join(":"),
+  ).slice(0, 12);
   // `v2` since the index carries each page's content type: a v1 file has none,
   // and reusing it would switch the not-HTML filter off without a word.
   const indexPath = `${cacheDir}/hash-url-index-v2-${indexKey}.jsonl`;
@@ -692,7 +716,19 @@ async function main(): Promise<void> {
   log(`index: ${index.size} content hashes with a url`);
 
   const available = availableHashes();
-  const { selected, excluded, domains } = select(index, available, args.maxPerDomain);
+  // The embargoed evaluation's pages AND every page of their registrable
+  // domains stay out of every split: a template the evaluation scores must not
+  // be trained on, nor used to pick a threshold. Throws on a missing file
+  // rather than quietly excluding nothing.
+  const embargo = { pageIds: new Set<string>(), domains: new Set<string>() };
+  if (args.excludeSample)
+    for (const line of readFileSync(args.excludeSample, "utf8").split("\n").filter(Boolean)) {
+      const row = JSON.parse(line) as { pageId: string; domain?: string };
+      embargo.pageIds.add(row.pageId);
+      if (row.domain) embargo.domains.add(row.domain);
+    }
+  log(`embargo: ${embargo.pageIds.size} pages, ${embargo.domains.size} domains excluded`);
+  const { selected, excluded, domains } = select(index, available, args.maxPerDomain, embargo);
   excluded.in_store_without_url = available.size - (index.size - (excluded.pruned_from_store ?? 0));
   log(`select: ${selected.size} pages across ${domains} registrable domains`);
 

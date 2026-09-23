@@ -83,6 +83,15 @@ const urlsPath = argument("--urls", `${sourceDir}/page-urls.json`);
 /** Domains that must not appear: our own val and holdout. */
 const excludeManifest = argument("--exclude-split-manifest", "");
 const limit = Number(argument("--limit", "0"));
+/** The embargoed div-soup evaluation sample: its registrable domains stay out
+ *  of training from every source, this cohort included. */
+const excludeSamplePath = argument("--exclude-sample", "");
+const embargoedDomains = new Set<string>();
+if (excludeSamplePath)
+  for (const line of readFileSync(excludeSamplePath, "utf8").split("\n").filter(Boolean)) {
+    const row = JSON.parse(line) as { domain?: string };
+    if (row.domain) embargoedDomains.add(row.domain);
+  }
 mkdirSync(outDir, { recursive: true, mode: 0o700 });
 
 const COHORT = "research/webclasseg25";
@@ -219,6 +228,7 @@ const stats = {
   pagesSkippedNoAnnotations: 0,
   pagesSkippedForbiddenDomain: 0,
   pagesSkippedNoUrl: 0,
+  pagesSkippedEmbargoedDomain: 0,
   parseFailed: 0,
   nodeRows: 0,
   labelledNodes: 0,
@@ -252,19 +262,26 @@ for await (const line of gzLines(`${sourceDir}/pages.jsonl.gz`)) {
   const url = pageUrls[page.page_id];
   // A page whose domain lands in OUR val or holdout is dropped outright. It is
   // the same web page a holdout domain would serve, so training on it is
-  // contamination however the row is tagged.
-  let domain = "";
-  if (url) {
-    domain = parseDomain(url, { allowPrivateDomains: true }).domain ?? "";
-    if (domain) {
-      const domainHash = sha256(domain).slice(0, 16);
-      if (forbidden.has(domainHash) || splitOf(domain) !== "train") {
-        stats.pagesSkippedForbiddenDomain++;
-        continue;
-      }
-    }
-  } else {
+  // contamination however the row is tagged. A page with no url, or a url with
+  // no domain, is dropped too: its domain cannot be checked, so it cannot be
+  // shown not to collide.
+  if (!url) {
     stats.pagesSkippedNoUrl++;
+    continue;
+  }
+  const parsedUrl = parseDomain(url, { allowPrivateDomains: true });
+  const domain = parsedUrl.domain ?? parsedUrl.hostname ?? "";
+  if (!domain) {
+    stats.pagesSkippedNoUrl++;
+    continue;
+  }
+  if (embargoedDomains.has(domain)) {
+    stats.pagesSkippedEmbargoedDomain++;
+    continue;
+  }
+  if (forbidden.has(sha256(domain).slice(0, 16)) || splitOf(domain) !== "train") {
+    stats.pagesSkippedForbiddenDomain++;
+    continue;
   }
 
   let featurized;
@@ -273,13 +290,9 @@ for await (const line of gzLines(`${sourceDir}/pages.jsonl.gz`)) {
   try {
     const { document } = parseHTML(page.html);
     hyuMap = hyuToNodeId(document as never);
-    featurized = featurizeDocument(
-      document as never,
-      url ?? `https://invalid.example/${page.page_id}`,
-      {
-        emitMasked: true,
-      },
-    );
+    featurized = featurizeDocument(document as never, url, {
+      emitMasked: true,
+    });
     regions = silverRegionLabels(featurized.nodes);
   } catch {
     stats.parseFailed++;
@@ -335,7 +348,7 @@ for await (const line of gzLines(`${sourceDir}/pages.jsonl.gz`)) {
   }
 
   const pageId = sha256(page.page_id).slice(0, 16);
-  const domainHash = domain ? sha256(domain).slice(0, 16) : sha256(page.page_id).slice(0, 16);
+  const domainHash = sha256(domain).slice(0, 16);
   domainsSeen.add(domainHash);
   const divSoup = !regions.regionTrainable;
   if (divSoup) stats.divSoupPages++;
@@ -365,8 +378,8 @@ for await (const line of gzLines(`${sourceDir}/pages.jsonl.gz`)) {
   await indexWriter.write(
     JSON.stringify({
       p: pageId,
-      u: url ?? "",
-      domain: domain || "(unknown)",
+      u: url,
+      domain,
       s: "train",
       cohort: COHORT,
     }),

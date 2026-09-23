@@ -17,7 +17,8 @@ Sampling policy:
   - every row of every rare class kept;
   - content_block downsampled to at most CONTENT_BLOCK_RATIO x the largest
     other class;
-  - total capped at --max-train-rows (see DEFAULT_MAX_TRAIN_ROWS).
+  - total capped at --max-train-rows, or, by default, at what fits
+    --memory-budget-gb (see budget_nodes). The cap is logged whenever it binds.
 
 Selection is deterministic: a row is kept when a hash of (pageId, nodeId) falls
 under the class's rate, so two runs pick the same rows and a rerun after a
@@ -52,6 +53,22 @@ CHUNK_ROWS = 50_000
 #: one extra row of supervision, unless this moves with it.
 DEFAULT_MAX_TRAIN_ROWS = 600_000
 CONTENT_BLOCK_RATIO = 3.0
+
+#: Default memory for the TRAINING matrix and what LightGBM builds from it.
+#: The fixed 600k default made a bigger corpus a silent no-op (the cap scaled
+#: every rare class back to the same row count), so the default now follows
+#: memory instead: as many nodes as fit this budget.
+DEFAULT_MEMORY_BUDGET_GB = 4.0
+#: CSR costs 4 bytes of float32 data + 4 of int32 index per non-zero, plus an
+#: 8-byte indptr entry per row. LightGBM's binned Dataset, the val matrix and
+#: the booster add roughly twice the train CSR again on this feature width.
+TRAINING_OVERHEAD = 3.0
+
+
+def budget_nodes(mean_nnz_per_row: float, budget_gb: float) -> int:
+    """Nodes whose masked AND unmasked rows fit `budget_gb` of training memory."""
+    bytes_per_node = 2 * (mean_nnz_per_row * 8 + 8) * TRAINING_OVERHEAD
+    return max(1, int(budget_gb * (1 << 30) / bytes_per_node))
 
 # The 10 product classes. article_footer folds into article_header as
 # `article_chrome`: both are a section's own chrome, the distinction does not
@@ -92,9 +109,11 @@ def rows(path: Path):
                 yield json.loads(line)
 
 
-def count_labels(path: Path) -> Counter:
+def count_labels(path: Path, nnz: list[int] | None = None) -> Counter:
     """Counts NODES, not rows: the masked and unmasked rows of one node are the
-    same node, so the sampling rates are computed from the unmasked half."""
+    same node, so the sampling rates are computed from the unmasked half.
+    `nnz`, when given, receives [rows, non-zeros] over the labelled unmasked
+    rows, for sizing the memory budget."""
     counts: Counter = Counter()
     for row in rows(path):
         if row["m"] != 0:
@@ -102,6 +121,9 @@ def count_labels(path: Path) -> Counter:
         label = collapse(row["l"])
         if label is not None:
             counts[label] += 1
+            if nnz is not None:
+                nnz[0] += 1
+                nnz[1] += sum(1 for value in row["f"] if value) + len(row["k"])
     return counts
 
 
@@ -285,8 +307,11 @@ def main() -> None:
     parser.add_argument("--extra-train-dataset", action="append", default=[],
                         help="another directory with nodes-train.jsonl.gz to fold into TRAIN "
                              "only; used for tagged research cohorts")
-    parser.add_argument("--max-train-rows", type=int, default=DEFAULT_MAX_TRAIN_ROWS,
-                        help="node budget for the training sample; see DEFAULT_MAX_TRAIN_ROWS")
+    parser.add_argument("--max-train-rows", type=int, default=0,
+                        help="node budget for the training sample; 0 (default) sizes it "
+                             "from --memory-budget-gb. 600000 reproduces the silver-v1 run")
+    parser.add_argument("--memory-budget-gb", type=float, default=DEFAULT_MEMORY_BUDGET_GB,
+                        help="training-memory budget the node cap is derived from")
     parser.add_argument("--jev-labels", default=None,
                         help="run-divsoup-v7.ts output; adds Jev as a third label source")
     args = parser.parse_args()
@@ -319,9 +344,24 @@ def main() -> None:
         print(json.dumps({"jevLabels": jev_counts}), flush=True)
 
     print("counting train labels", flush=True)
-    counts = count_labels(dataset / "nodes-train.jsonl.gz")
-    rates = sampling_rates(counts, args.max_train_rows)
-    print(json.dumps({"counts": dict(counts), "rates": rates}, indent=2), flush=True)
+    nnz = [0, 0]
+    counts = count_labels(dataset / "nodes-train.jsonl.gz", nnz)
+    mean_nnz = nnz[1] / nnz[0] if nnz[0] else 0.0
+    max_train_rows = args.max_train_rows or budget_nodes(mean_nnz, args.memory_budget_gb)
+    rates = sampling_rates(counts, max_train_rows)
+    kept_nodes = {name: round(counts[name] * rates[name]) for name in counts}
+    # Said out loud: a cap that binds decides how much of a bigger corpus is
+    # used, which is exactly how the 600k default made more data a no-op.
+    binds = sum(counts.values()) > max_train_rows
+    rare_scaled = {n: round(r, 4) for n, r in rates.items() if n != "content_block" and r < 1.0}
+    print(json.dumps({
+        "counts": dict(counts), "rates": rates, "keptNodesByClass": kept_nodes,
+        "maxTrainRows": max_train_rows, "meanNnzPerRow": round(mean_nnz, 1),
+        "memoryBudgetGb": None if args.max_train_rows else args.memory_budget_gb,
+        "capBinds": binds, "rareClassesScaledByCap": rare_scaled,
+    }, indent=2), flush=True)
+    if rare_scaled:
+        print(f"WARNING: the node cap scaled rare classes down: {rare_scaled}", flush=True)
 
     manifest: dict[str, object] = {
         "featurizerVersion": schema["featurizerVersion"],
@@ -329,7 +369,10 @@ def main() -> None:
         "classes": REGION_CLASSES,
         "trainLabelCounts": dict(counts),
         "samplingRates": rates,
-        "maxTrainRows": args.max_train_rows,
+        "maxTrainRows": max_train_rows,
+        "memoryBudgetGb": None if args.max_train_rows else args.memory_budget_gb,
+        "meanNnzPerRow": round(mean_nnz, 1),
+        "keptNodesByClass": kept_nodes,
         "contentBlockRatio": CONTENT_BLOCK_RATIO,
         "jevLabelFile": args.jev_labels,
         "jevNodeLabels": len(jev) if jev is not None else 0,
@@ -398,6 +441,7 @@ def main() -> None:
         print(f"{split}: {matrix.shape[0]} rows, {matrix.nnz} nnz, {len(set(groups))} domains, "
               f"jev-only={sources.get('jev-only', 0)}, disagree={disagree}/{agree + disagree}",
               flush=True)
+        print(json.dumps({"split": split, "rowsByClass": dict(by_class)}), flush=True)
         del matrix, labels, groups, refs, masked, weights, kept
 
     (out / "sample-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
