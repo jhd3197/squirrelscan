@@ -309,6 +309,12 @@ def main() -> None:
     parser.add_argument("--rounds", type=int, default=400)
     parser.add_argument("--region-budget-bytes", type=int, default=1_250_000)
     parser.add_argument("--leaves", type=int, default=31)
+    parser.add_argument("--feature-sets", default="full,no_tokens,no_curated_vocab,tokens_only",
+                        help="comma-separated feature sets for the val grid")
+    parser.add_argument("--leaf-configs", default="31:40,63:20,127:20",
+                        help="comma-separated numLeaves:minDataInLeaf pairs for the val grid")
+    parser.add_argument("--skip-ablations", action="store_true",
+                        help="skip the holdout feature-set ablations (reporting only)")
     args = parser.parse_args()
 
     sample = Path(args.sample)
@@ -362,9 +368,12 @@ def main() -> None:
     # no_curated_vocab ahead -- which is exactly the number a selection rule
     # must not be allowed to read. Widening the VAL grid is the fix; the
     # decision rule is still argmax of val macro-F1 and holdout is not consulted.
+    # Narrowing the grid is a cost knob, not a selection one: whatever is in it,
+    # the winner is still argmax of val macro-F1.
+    leaf_configs = [tuple(int(v) for v in pair.split(":")) for pair in args.leaf_configs.split(",")]
     grid = []
-    for feature_set in ("full", "no_tokens", "no_curated_vocab", "tokens_only"):
-        for leaves, min_data in ((31, 40), (63, 20), (127, 20)):
+    for feature_set in args.feature_sets.split(","):
+        for leaves, min_data in leaf_configs:
             grid.append({**DEFAULT_CONFIG, "featureSet": feature_set,
                          "numLeaves": leaves, "minDataInLeaf": min_data,
                          "learningRate": 0.08})
@@ -395,11 +404,14 @@ def main() -> None:
             best_config, best_val = config, val_macro
         del booster, val_pred
     cached.clear()
-    report["selection"] = {"grid": sweep, "chosen": best_config, "chosenOn": "val macro-F1",
+    report["selection"] = {"featureSets": args.feature_sets, "leafConfigs": args.leaf_configs,
+                           "grid": sweep, "chosen": best_config, "chosenOn": "val macro-F1",
                            "chosenValMacroF1": best_val}
     print(f"chosen {best_config} (val macroF1 {best_val})", flush=True)
 
     for name, names in ABLATIONS.items():
+        if args.skip_ablations and name != best_config["featureSet"]:
+            continue
         xt, columns = select(x_train, blocks, names)
         xv, _ = select(x_val, blocks, names)
         xh, _ = select(x_hold, blocks, names)
