@@ -28,12 +28,18 @@ import os
 from collections import Counter
 from pathlib import Path
 
+import hashlib
+
 import numpy as np
 import scipy.sparse as sp
 
 from schema_labels_v8 import V7_REUSED
 
 N_JOBS = int(os.environ.get("DOM_CLASSIFIER_JOBS", "4"))
+#: Schema family a class recommends: two classes in one family recommend
+#: compatible markup (BlogPosting is an Article), so confusing them is not a
+#: wrong recommendation.
+FAMILY = {"article": "Article", "blog_post": "Article"}
 V8_CLASSES = [
     "homepage", "product_detail", "product_listing", "article", "blog_post", "faq", "recipe",
     "event", "job_posting", "local_business", "about", "contact", "docs", "legal", "pricing",
@@ -124,6 +130,14 @@ def main() -> None:
     parser.add_argument("--target-precision", type=float, default=0.95)
     parser.add_argument("--min-fires", type=int, default=20)
     parser.add_argument("--rounds", type=int, default=1000)
+    parser.add_argument("--extra-features", action="append", default=[],
+                        help="jsonl of {p, f:[...]} appended to every page's vector (a page "
+                             "missing from the file gets zeros); repeatable")
+    parser.add_argument("--cv-folds", type=int, default=0,
+                        help="pick thresholds on domain-grouped out-of-fold predictions over "
+                             "train+val and ship a model refit on train+val; 0 = val split")
+    parser.add_argument("--score-holdout", action="store_true",
+                        help="score holdout (only for a KEPT candidate; the loop counts touches)")
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
 
@@ -164,6 +178,12 @@ def main() -> None:
     schema_features = json.loads((dataset / "feature-schema.json").read_text())
     features = load_features(dataset, schema_features["pageFeatureCount"],
                              schema_features["tokenBuckets"])
+    for extra_path in args.extra_features:
+        extra = {r["p"]: r["f"] for r in jsonl(Path(extra_path))}
+        width = len(next(iter(extra.values())))
+        for page_id, feat in features.items():
+            feat["x"] = np.concatenate([feat["x"], np.asarray(extra.get(page_id, [0.0] * width),
+                                                               dtype=np.float32)])
     rows = {"train": ([], [], [], []), "val": ([], [], [], []), "holdout": ([], [], [], [])}
     sources: dict[str, Counter] = {s: Counter() for s in rows}
     counts: dict[str, Counter] = {s: Counter() for s in rows}
@@ -191,8 +211,8 @@ def main() -> None:
         x, y, w, ids = rows[split]
         return sp.csr_matrix(np.vstack(x)), np.asarray(y), np.asarray(w), ids
 
-    xt, yt, wt, _ = matrix("train")
-    xv, yv, wv, _ = matrix("val")
+    xt, yt, wt, ids_t = matrix("train")
+    xv, yv, wv, ids_v = matrix("val")
     xh, yh, _, ids_h = matrix("holdout")
     print(json.dumps({"classes": classes, "counts": {s: dict(c) for s, c in counts.items()},
                       "sources": {s: dict(c) for s, c in sources.items()},
@@ -215,13 +235,57 @@ def main() -> None:
         if best is None or val_f1 > best[0]:
             best = (val_f1, booster, vp)
     _, booster, vp = best
-    thresholds = pick_thresholds(vp, yv, classes, args.target_precision, args.min_fires)
+    iterations = int(booster.best_iteration)
+    selection = {"yEval": yv, "probs": vp, "name": "val"}
+    if args.cv_folds > 0:
+        # Thresholds from domain-grouped out-of-fold predictions over train+val:
+        # every pool page is scored by a model that never saw its domain, and
+        # holdout plays no part. The shipped model is refit on the whole pool.
+        chosen_leaves = grid[max(range(len(grid)), key=lambda i: grid[i]["valMacroF1"])]["leaves"]
+        params = {**base, "num_leaves": chosen_leaves, "learning_rate": 0.05, "min_data_in_leaf": 20}
+        xp = sp.vstack([xt, xv], format="csr")
+        yp = np.concatenate([yt, yv])
+        wp = np.concatenate([wt, wv])
+        groups = [features[p]["d"] for p in [*ids_t, *ids_v]]
+        fold_of = np.asarray([int(hashlib.sha256(g.encode()).hexdigest()[:8], 16) % args.cv_folds
+                              for g in groups])
+        oof = np.zeros((xp.shape[0], len(classes)))
+        for f in range(args.cv_folds):
+            test = fold_of == f
+            fb = lgb.train(params, lgb.Dataset(xp[~test], label=yp[~test], weight=wp[~test]),
+                           num_boost_round=iterations)
+            oof[test] = fb.predict(xp[test])
+        booster = lgb.train(params, lgb.Dataset(xp, label=yp, weight=wp),
+                            num_boost_round=iterations)
+        booster.best_iteration = iterations
+        selection = {"yEval": yp, "probs": oof, "name": f"oof-{args.cv_folds}fold"}
+    thresholds = pick_thresholds(selection["probs"], selection["yEval"], classes,
+                                 args.target_precision, args.min_fires)
     thr = np.asarray(thresholds)
 
-    def score(x, y):
-        probs = booster.predict(x, num_iteration=booster.best_iteration)
+    def score_probs(probs, y):
         pred = probs.argmax(1)
-        return per_class(y, pred, probs.max(1) >= thr[pred], classes)
+        out = per_class(y, pred, probs.max(1) >= thr[pred], classes)
+        # Schema level: a recommendation is right when it names the right schema
+        # family, so article <-> blog_post (BlogPosting is an Article) is not an error.
+        fam = np.asarray([FAMILY.get(classes[i], classes[i]) for i in range(len(classes))])
+        fp, fy = fam[pred], fam[y]
+        fires = probs.max(1) >= thr[pred]
+        levels = {}
+        for family in sorted(set(fam)):
+            fired = fires & (fp == family)
+            n = int(fired.sum())
+            support = int((fy == family).sum())
+            levels[family] = {
+                "support": support, "fires": n,
+                "precisionAtThreshold": round(float((fy[fired] == family).mean()), 4) if n else None,
+                "coverageAtThreshold": round(int((fy[fired] == family).sum()) / support, 4)
+                if support else None}
+        out["schemaLevel"] = levels
+        return out
+
+    def score(x, y):
+        return score_probs(booster.predict(x, num_iteration=booster.best_iteration), y)
 
     report = {
         "classes": classes, "merge": merge,
@@ -233,14 +297,18 @@ def main() -> None:
         "grid": grid, "iterations": int(booster.best_iteration),
         "thresholds": dict(zip(classes, thresholds, strict=True)),
         "targetPrecision": args.target_precision,
-        "val": score(xv, yv), "holdout": score(xh, yh),
+        "thresholdsFrom": selection["name"],
+        "selection": score_probs(selection["probs"], selection["yEval"]),
+        "holdoutScored": bool(args.score_holdout),
     }
+    if args.score_holdout:
+        report["holdout"] = score(xh, yh)
     # "Correct schema" holdout pages: declared schema agrees with Jev v8.
     keep = np.asarray([schema.get(p) is not None and fold(schema[p]) == classes[y]
                        for p, y in zip(ids_h, yh, strict=True)])
-    if keep.any():
+    if args.score_holdout and keep.any():
         report["schemaHidden"] = score(xh[keep], yh[keep])
-    if args.v7_model:
+    if args.v7_model and args.score_holdout:
         v7_booster = lgb.Booster(model_file=args.v7_model)
         v7_pred = v7_booster.predict(xh).argmax(1)
         shared = [c for c in V7_CLASSES if c in index]
@@ -263,9 +331,10 @@ def main() -> None:
     (out / "class-thresholds.json").write_text(json.dumps({"classes": classes,
                                                             "thresholds": thresholds}) + "\n")
     (out / "pagetype-jev-report.json").write_text(json.dumps(report, indent=2) + "\n")
-    h = report["holdout"]
-    print(json.dumps({"holdoutMacroF1": h["macroF1"], "holdoutAccuracy": h["accuracy"],
-                      "coverage": h["coverage"], "accuracyWhenFiring": h["accuracyWhenFiring"]}))
+    h = report.get("holdout") or report["selection"]
+    print(json.dumps({"scoredOn": "holdout" if args.score_holdout else selection["name"],
+                      "macroF1": h["macroF1"], "coverage": h["coverage"],
+                      "accuracyWhenFiring": h["accuracyWhenFiring"]}))
 
 
 if __name__ == "__main__":
