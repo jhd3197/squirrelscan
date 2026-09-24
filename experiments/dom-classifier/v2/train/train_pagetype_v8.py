@@ -30,6 +30,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import hashlib
+import re
 
 import numpy as np
 import scipy.sparse as sp
@@ -446,6 +447,13 @@ def main() -> None:
         seg = [segments_of(p) for p in ids_h]
         non_root = np.asarray([bool(sg) or q for sg, q in seg])
         not_blog = np.asarray(["blog" not in sg for sg, _ in seg])
+        about_url = re.compile(r"about|team|company|who-we-are|uber-uns|ueber-uns|a-propos|chi-siamo|"
+                               r"sobre|quienes-somos|nosotros|over-ons|om-oss|firma|unternehmen|"
+                               r"equipe|story|mission")
+        contact_url = re.compile(r"contact|kontakt|contacto|contatti|support|help|hilfe|aide|ayuda")
+        path_of = [urlsplit(urls.get(p, "")).path.lower() for p in ids_h]
+        no_about_word = np.asarray([not about_url.search(path) for path in path_of])
+        no_contact_word = np.asarray([not contact_url.search(path) for path in path_of])
 
         def slice_scores(xm):
             probs = booster.predict(xm, num_iteration=booster.best_iteration)
@@ -453,7 +461,9 @@ def main() -> None:
             fires = conf >= thr[pred]
             out = {}
             for name, cls, mask in (("homepageNonRoot", "homepage", non_root),
-                                    ("blogPostNotUnderBlog", "blog_post", not_blog)):
+                                    ("blogPostNotUnderBlog", "blog_post", not_blog),
+                                    ("aboutNoAboutWordInPath", "about", no_about_word),
+                                    ("contactNoContactWordInPath", "contact", no_contact_word)):
                 i = index[cls]
                 fired = mask & fires & (pred == i)
                 support = int((mask & (yh == i)).sum())
@@ -465,6 +475,15 @@ def main() -> None:
             return out
 
         report["holdoutSlices"] = slice_scores(xh)
+        # Per-page holdout predictions, private output, so later slices need no
+        # new holdout touch.
+        probs_h = booster.predict(xh, num_iteration=booster.best_iteration)
+        with (out / "holdout-predictions.jsonl").open("w") as handle:
+            for pid, y, pr in zip(ids_h, yh, probs_h, strict=True):
+                top = int(pr.argmax())
+                handle.write(json.dumps({"pageId": pid, "label": classes[int(y)],
+                                         "pred": classes[top], "conf": round(float(pr[top]), 4),
+                                         "fires": bool(pr[top] >= thr[top])}) + "\n")
         if xh.shape[1] > base_width:
             # Without the link graph: every cross-page column missing.
             dense = xh.toarray()
