@@ -52,43 +52,51 @@ def main() -> None:
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
 
-    pages = [json.loads(line) for line in Path(args.context).read_text().splitlines() if line]
+    # Two streaming passes: a site's page list is small, its links are not.
+    def stream():
+        with Path(args.context).open() as handle:
+            for line in handle:
+                if line.strip():
+                    yield json.loads(line)
+
     by_url: dict[tuple[str, str], str] = {}
     domain_pages: Counter = Counter()
     clusters: Counter = Counter()
-    for page in pages:
+    meta: dict[str, tuple[str, str, int]] = {}
+    for page in stream():
         if page.get("url"):
             by_url[(page["d"], page["url"])] = page["p"]
         domain_pages[page["d"]] += 1
         clusters[(page["d"], page["skeleton"])] += 1
-    inbound: dict[str, list[tuple[str, str]]] = defaultdict(list)
-    for page in pages:
+        meta[page["p"]] = (page["d"], page["skeleton"], len(page["links"]))
+    regions_in: dict[str, Counter] = defaultdict(Counter)
+    anchor_in: dict[str, Counter] = defaultdict(Counter)
+    chrome_in: dict[str, Counter] = defaultdict(Counter)
+    for page in stream():
         for link in page["links"]:
             target = by_url.get((page["d"], link["t"]))
-            if target and target != page["p"]:
-                inbound[target].append((link["a"], link["r"]))
+            if not target or target == page["p"]:
+                continue
+            regions_in[target][link["r"]] += 1
+            regions_in[target]["total"] += 1
+            for cat, rx in COMPILED.items():
+                if rx.search(link["a"]):
+                    anchor_in[target][cat] += 1
+                    if link["r"] in ("nav", "header", "footer"):
+                        chrome_in[target][cat] += 1
 
     with Path(args.out).open("w") as handle:
-        for page in pages:
-            links = inbound.get(page["p"], [])
-            regions = Counter(r for _, r in links)
-            f = [math.log1p(len(links))] + [math.log1p(regions[r]) for r in REGIONS]
-            total = max(len(links), 1)
-            anchor = Counter()
-            chrome = Counter()
-            for text, region in links:
-                for cat, rx in COMPILED.items():
-                    if rx.search(text):
-                        anchor[cat] += 1
-                        if region in ("nav", "header", "footer"):
-                            chrome[cat] += 1
-            f += [anchor[c] / total for c in CATEGORIES]
-            f += [1.0 if chrome[c] else 0.0 for c in CATEGORIES]
-            size = clusters[(page["d"], page["skeleton"])]
-            f += [math.log1p(size), size / domain_pages[page["d"]], math.log1p(len(page["links"]))]
-            handle.write(json.dumps({"p": page["p"], "f": [round(v, 5) for v in f]}) + "\n")
+        for page_id, (domain, skel, outbound) in meta.items():
+            regions = regions_in.get(page_id, Counter())
+            total = max(regions["total"], 1)
+            f = [math.log1p(regions["total"])] + [math.log1p(regions[r]) for r in REGIONS]
+            f += [anchor_in.get(page_id, Counter())[c] / total for c in CATEGORIES]
+            f += [1.0 if chrome_in.get(page_id, Counter())[c] else 0.0 for c in CATEGORIES]
+            size = clusters[(domain, skel)]
+            f += [math.log1p(size), size / domain_pages[domain], math.log1p(outbound)]
+            handle.write(json.dumps({"p": page_id, "f": [round(v, 5) for v in f]}) + "\n")
     Path(args.out).with_suffix(".names.json").write_text(json.dumps(names()) + "\n")
-    print(json.dumps({"pages": len(pages), "withInbound": sum(1 for p in pages if inbound.get(p["p"])),
+    print(json.dumps({"pages": len(meta), "withInbound": len(regions_in),
                       "features": len(names())}))
 
 

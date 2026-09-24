@@ -118,6 +118,29 @@ def pick_thresholds(probs: np.ndarray, y: np.ndarray, classes: list[str], target
     return out
 
 
+def pick_thresholds_lcb(probs: np.ndarray, y: np.ndarray, folds: np.ndarray, classes: list[str],
+                        target: float, min_fires: int) -> list[float]:
+    """Lowest threshold whose per-fold precision, mean minus one standard
+    deviation, clears `target`: a margin sized by how much precision moves from
+    one set of domains to another, measured without touching holdout."""
+    top = probs.argmax(axis=1)
+    conf = probs.max(axis=1)
+    out = []
+    for i in range(len(classes)):
+        chosen = 1.01
+        for t in np.arange(0.3, 1.0, 0.01):
+            fires = (top == i) & (conf >= t)
+            if int(fires.sum()) < min_fires:
+                break
+            per_fold = [float((y[fires & (folds == f)] == i).mean())
+                        for f in np.unique(folds) if int((fires & (folds == f)).sum()) >= 5]
+            if len(per_fold) >= 3 and np.mean(per_fold) - np.std(per_fold) >= target:
+                chosen = round(float(t), 2)
+                break
+        out.append(chosen)
+    return out
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-root", required=True)
@@ -137,6 +160,10 @@ def main() -> None:
     parser.add_argument("--jev-override", action="append", default=[],
                         help="later Jev label files (e.g. a v8.1 relabel of a model-independent "
                              "page set) that replace the v8 label for their pages; repeatable")
+    parser.add_argument("--drop-disagreeing", default="",
+                        help="Jev relabel file: pool (train/val) pages whose label there differs "
+                             "from their v8 label are dropped from TRAINING as ambiguous; "
+                             "holdout labels are untouched")
     parser.add_argument("--policy-rules", action="store_true",
                         help="correct Jev labels that contradict policy-v8's own decision rules, "
                              "on every split alike (model-independent): the site root without "
@@ -145,6 +172,13 @@ def main() -> None:
     parser.add_argument("--cv-folds", type=int, default=0,
                         help="pick thresholds on domain-grouped out-of-fold predictions over "
                              "train+val and ship a model refit on train+val; 0 = val split")
+    parser.add_argument("--template-stack", default="",
+                        help="jsonl {p, cluster}: with --cv-folds, add each page's leave-one-out "
+                             "mean stage-1 probability over the other pages of its template "
+                             "cluster, then refit (stage 2)")
+    parser.add_argument("--lcb", action="store_true",
+                        help="with --cv-folds: a threshold must give mean-1sd of the per-fold "
+                             "precision >= target, not just pooled precision (fold-variance margin)")
     parser.add_argument("--dump-selection", action="store_true",
                         help="write the selection split's per-page predictions (OOF with "
                              "--cv-folds) for error audits; never holdout")
@@ -170,6 +204,12 @@ def main() -> None:
     for name in ("noise", "holdout", "val", "train"):
         for row in jsonl(jev_dir / f"{name}.jsonl"):
             jev8[row["pageId"]] = row
+    ambiguous: set[str] = set()
+    if args.drop_disagreeing:
+        for row in jsonl(Path(args.drop_disagreeing)):
+            first = jev8.get(row["pageId"])
+            if first is not None and first["pageType"] != row.get("pageType"):
+                ambiguous.add(row["pageId"])
     overridden = 0
     for path in args.jev_override:
         for row in jsonl(Path(path)):
@@ -221,7 +261,7 @@ def main() -> None:
             label, weight, source = v7[page_id]["pageType"], v7[page_id].get("confidence"), "jev-v7"
         elif split != "holdout" and schema.get(page_id) in free_ok:
             label, weight, source = schema[page_id], agreement[schema[page_id]], "schema"
-        if label is None:
+        if label is None or (split != "holdout" and page_id in ambiguous):
             continue
         if args.policy_rules and source in ("jev-v8", "jev-v7") and page_id in urls:
             parts = urlsplit(urls[page_id])
@@ -294,10 +334,51 @@ def main() -> None:
         booster = lgb.train(params, lgb.Dataset(xp, label=yp, weight=wp),
                             num_boost_round=iterations)
         booster.best_iteration = iterations
+        if args.template_stack:
+            # Stage 2: a page rendered by the same template as its siblings
+            # probably has their type. Each page gets the mean stage-1
+            # probability of the OTHER pages in its (domain, skeleton) cluster:
+            # out-of-fold for the pool (a cluster is one domain, so one fold),
+            # the pool model's for holdout (unseen domains either way).
+            cluster = {r["p"]: r["cluster"] for r in jsonl(Path(args.template_stack))}
+            pool_ids = [*ids_t, *ids_v]
+
+            def stacked(ids, probs):
+                sums: dict = {}
+                for pid, pr in zip(ids, probs, strict=True):
+                    key = cluster.get(pid)
+                    if key is None:
+                        continue
+                    total, n = sums.get(key, (np.zeros(probs.shape[1]), 0))
+                    sums[key] = (total + pr, n + 1)
+                rows_out = []
+                for pid, pr in zip(ids, probs, strict=True):
+                    total, n = sums.get(cluster.get(pid), (np.zeros(probs.shape[1]), 0))
+                    others = n - 1
+                    mean = (total - pr) / others if others > 0 else np.zeros(probs.shape[1])
+                    rows_out.append(np.concatenate([mean, [np.log1p(max(others, 0))]]))
+                return sp.csr_matrix(np.asarray(rows_out, dtype=np.float32))
+
+            xp = sp.hstack([xp, stacked(pool_ids, oof)], format="csr")
+            xh = sp.hstack([xh, stacked(ids_h, booster.predict(xh))], format="csr")
+            oof = np.zeros((xp.shape[0], len(classes)))
+            for f in range(args.cv_folds):
+                test = fold_of == f
+                fb = lgb.train(params, lgb.Dataset(xp[~test], label=yp[~test], weight=wp[~test]),
+                               num_boost_round=iterations)
+                oof[test] = fb.predict(xp[test])
+            booster = lgb.train(params, lgb.Dataset(xp, label=yp, weight=wp),
+                                num_boost_round=iterations)
+            booster.best_iteration = iterations
         selection = {"yEval": yp, "probs": oof, "name": f"oof-{args.cv_folds}fold",
-                     "ids": [*ids_t, *ids_v]}
-    thresholds = pick_thresholds(selection["probs"], selection["yEval"], classes,
-                                 args.target_precision, args.min_fires)
+                     "ids": [*ids_t, *ids_v], "folds": fold_of}
+    if args.lcb and "folds" in selection:
+        thresholds = pick_thresholds_lcb(selection["probs"], selection["yEval"], selection["folds"],
+                                         classes, args.target_precision, args.min_fires)
+        selection["name"] += "-lcb"
+    else:
+        thresholds = pick_thresholds(selection["probs"], selection["yEval"], classes,
+                                     args.target_precision, args.min_fires)
     thr = np.asarray(thresholds)
 
     def score_probs(probs, y):
@@ -332,6 +413,7 @@ def main() -> None:
         "sources": {s: dict(c) for s, c in sources.items()},
         "policyRuleCorrections": {s: dict(c) for s, c in corrected.items()},
         "jevOverrides": overridden,
+        "droppedAmbiguous": len(ambiguous),
         "freeAgreement": agreement, "freeClassesUsed": sorted(free_ok),
         "grid": grid, "iterations": int(booster.best_iteration),
         "thresholds": dict(zip(classes, thresholds, strict=True)),

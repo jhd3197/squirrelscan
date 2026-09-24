@@ -160,7 +160,10 @@ def main() -> None:
         domains = [m["d"] for m in mt] + [m["d"] for m in mv]
         fold = np.asarray([int(hashlib.sha256(d.encode()).hexdigest()[:8], 16) % args.cv_folds
                            for d in domains])
-        judged = np.concatenate([np.asarray([m["src"] != "negative" for m in mt]),
+        # Thresholds are judged on Jev rows only: a free label is itself only
+        # ~0.85-0.98 precise, so counting it as truth caps the reachable
+        # precision below the target and every class would abstain.
+        judged = np.concatenate([np.asarray([m["src"] == "jev" for m in mt]),
                                  np.ones(len(yv), bool)])
         oof = np.zeros((xp.shape[0], len(classes)))
         for f in range(args.cv_folds):
