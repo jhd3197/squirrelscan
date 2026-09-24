@@ -134,6 +134,9 @@ def main() -> None:
     parser.add_argument("--extra-features", action="append", default=[],
                         help="jsonl of {p, f:[...]} appended to every page's vector (a page "
                              "missing from the file gets zeros); repeatable")
+    parser.add_argument("--jev-override", action="append", default=[],
+                        help="later Jev label files (e.g. a v8.1 relabel of a model-independent "
+                             "page set) that replace the v8 label for their pages; repeatable")
     parser.add_argument("--policy-rules", action="store_true",
                         help="correct Jev labels that contradict policy-v8's own decision rules, "
                              "on every split alike (model-independent): the site root without "
@@ -167,6 +170,12 @@ def main() -> None:
     for name in ("noise", "holdout", "val", "train"):
         for row in jsonl(jev_dir / f"{name}.jsonl"):
             jev8[row["pageId"]] = row
+    overridden = 0
+    for path in args.jev_override:
+        for row in jsonl(Path(path)):
+            if row.get("pageType") in V8_CLASSES:
+                jev8[row["pageId"]] = row
+                overridden += 1
     # Free-label agreement per class, measured on the noise sample BEFORE merging.
     noise = jsonl(jev_dir / "noise.jsonl")
     agree: Counter = Counter()
@@ -322,6 +331,7 @@ def main() -> None:
         "counts": {s: dict(c) for s, c in counts.items()},
         "sources": {s: dict(c) for s, c in sources.items()},
         "policyRuleCorrections": {s: dict(c) for s, c in corrected.items()},
+        "jevOverrides": overridden,
         "freeAgreement": agreement, "freeClassesUsed": sorted(free_ok),
         "grid": grid, "iterations": int(booster.best_iteration),
         "thresholds": dict(zip(classes, thresholds, strict=True)),

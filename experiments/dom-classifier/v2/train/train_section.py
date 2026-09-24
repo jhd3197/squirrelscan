@@ -82,6 +82,12 @@ def main() -> None:
     parser.add_argument("--rounds", type=int, default=800)
     parser.add_argument("--negative-weight", type=float, default=0.5,
                         help="weight of the random unlabelled `none` rows (they can hide a section)")
+    parser.add_argument("--leaves", default="63,127", help="num_leaves grid")
+    parser.add_argument("--drop-classes", default="",
+                        help="comma list folded into `none` (no data to learn or evaluate them)")
+    parser.add_argument("--cv-folds", type=int, default=0,
+                        help="thresholds from domain-grouped OOF over train+val (needs `d` in "
+                             "the sample meta); 0 = val split")
     parser.add_argument("--balance-power", type=float, default=0.0,
                         help="class-balance exponent: rows weighted by (median/class count)^p")
     args = parser.parse_args()
@@ -91,8 +97,13 @@ def main() -> None:
     sample = Path(args.sample)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    classes = json.loads((sample / "classes.json").read_text())["classes"]
+    all_classes = json.loads((sample / "classes.json").read_text())["classes"]
+    dropped = {c for c in args.drop_classes.split(",") if c}
+    classes = [c for c in all_classes if c not in dropped]
+    remap = np.asarray([classes.index(c) if c in classes else classes.index("none")
+                        for c in all_classes])
     xt, yt, wt, mt = load(sample, "train")
+    yt = remap[yt]
     wt = wt.copy()
     negative = np.asarray([m["src"] == "negative" for m in mt])
     wt[negative] = args.negative_weight
@@ -106,10 +117,11 @@ def main() -> None:
     # prediction on one would count as a false positive it may not be.
     xv, yv, wv, mv = load(sample, "val")
     keep_v = np.asarray([m["src"] == "jev" for m in mv])
-    xv, yv, wv = xv[keep_v], yv[keep_v], wv[keep_v]
+    xv, yv, wv = xv[keep_v], remap[yv[keep_v]], wv[keep_v]
+    mv = [m for m, k in zip(mv, keep_v, strict=True) if k]
     xh, yh, _, mh = load(sample, "holdout")
     keep_h = np.asarray([m["src"] == "jev" for m in mh])
-    xh, yh = xh[keep_h], yh[keep_h]
+    xh, yh = xh[keep_h], remap[yh[keep_h]]
     mh = [m for m, k in zip(mh, keep_h, strict=True) if k]
     print(f"train {xt.shape} val {xv.shape} holdout {xh.shape}", flush=True)
 
@@ -120,7 +132,7 @@ def main() -> None:
     # before the rare classes are learned. One long run per config, read at
     # several iteration counts, and the count is picked on val macro-F1.
     best, grid = None, []
-    for leaves in (63, 127):
+    for leaves in [int(v) for v in args.leaves.split(",")]:
         params = {**base, "num_leaves": leaves, "learning_rate": 0.05, "min_data_in_leaf": 10}
         booster = lgb.train(params, lgb.Dataset(xt, label=yt, weight=wt), num_boost_round=args.rounds)
         for k in range(100, args.rounds + 1, 100):
@@ -132,13 +144,52 @@ def main() -> None:
                 best = (val, booster, vp, k)
     _, booster, vp, chosen_k = best
     booster.best_iteration = chosen_k
-    thresholds = pick_thresholds(vp, yv, len(classes), args.target_precision, args.min_fires)
+    sel_probs, sel_y = vp, yv
+    if args.cv_folds > 0:
+        # Domain-grouped out-of-fold probabilities over train + val (val's Jev
+        # rows, train's rows as sampled), for thresholds that do not lean on one
+        # split's domains. The shipped model stays the one fit on train.
+        import hashlib
+
+        leaves_k = max(grid, key=lambda g: g["valMacroF1NonNone"])
+        params = {**base, "num_leaves": leaves_k["leaves"], "learning_rate": 0.05,
+                  "min_data_in_leaf": 10}
+        xp = sp.vstack([xt, xv], format="csr")
+        yp = np.concatenate([yt, yv])
+        wp = np.concatenate([wt, wv])
+        domains = [m["d"] for m in mt] + [m["d"] for m in mv]
+        fold = np.asarray([int(hashlib.sha256(d.encode()).hexdigest()[:8], 16) % args.cv_folds
+                           for d in domains])
+        judged = np.concatenate([np.asarray([m["src"] != "negative" for m in mt]),
+                                 np.ones(len(yv), bool)])
+        oof = np.zeros((xp.shape[0], len(classes)))
+        for f in range(args.cv_folds):
+            test = fold == f
+            fb = lgb.train(params, lgb.Dataset(xp[~test], label=yp[~test], weight=wp[~test]),
+                           num_boost_round=chosen_k)
+            oof[test] = fb.predict(xp[test])
+        sel_probs, sel_y = oof[judged], yp[judged]
+    thresholds = pick_thresholds(sel_probs, sel_y, len(classes), args.target_precision,
+                                 args.min_fires)
     thresholds[classes.index("none")] = 0.0
     hp = booster.predict(xh, num_iteration=booster.best_iteration)
     report = {
         "classes": classes, "grid": grid, "iterations": int(booster.best_iteration),
         "thresholds": dict(zip(classes, thresholds, strict=True)),
         "targetPrecision": args.target_precision,
+        "thresholdsFrom": f"oof-{args.cv_folds}fold" if args.cv_folds else "val",
+        "droppedClasses": sorted(dropped),
+        # Why a class abstains: its precision and fire count on the selection
+        # set at a few thresholds.
+        "selectionCurve": {
+            name: {f"{t:.2f}": [int(((sel_probs.argmax(1) == i) & (sel_probs.max(1) >= t)).sum()),
+                                round(float((sel_y[(sel_probs.argmax(1) == i)
+                                                   & (sel_probs.max(1) >= t)] == i).mean()), 3)
+                                if ((sel_probs.argmax(1) == i) & (sel_probs.max(1) >= t)).any()
+                                else None]
+                   for t in (0.5, 0.7, 0.9, 0.95, 0.99)}
+            for i, name in enumerate(classes)},
+        "selectionRows": int(len(sel_y)),
         "val": score(vp, yv, thresholds, classes), "holdout": score(hp, yh, thresholds, classes),
     }
     ad = classes.index("ad")

@@ -46,7 +46,7 @@ export const POLICY_REVISIONS = ["v5", "v6", "v7"] as const;
 export type PolicyRevision = (typeof POLICY_REVISIONS)[number];
 /** Revisions a PAGE-TYPE run can use. v8 is page-type only: its policy has no
  *  node sections, so the node runners (which check POLICY_REVISIONS) refuse it. */
-export const PAGE_TYPE_POLICY_REVISIONS = ["v5", "v6", "v7", "v8"] as const;
+export const PAGE_TYPE_POLICY_REVISIONS = ["v5", "v6", "v7", "v8", "v8.1"] as const;
 export type PageTypePolicyRevision = (typeof PAGE_TYPE_POLICY_REVISIONS)[number];
 export type PromptRevision = `dom-suggestions-${PageTypePolicyRevision}`;
 export const PACKET_REVISION_V5 = "runtime-dom-text-v2";
@@ -85,7 +85,7 @@ export function pageTypesFor(revision: PromptRevision): {
   classes: readonly string[];
   mappingRevision: string;
 } {
-  return revision === "dom-suggestions-v8"
+  return revision.startsWith("dom-suggestions-v8")
     ? { classes: PAGE_TYPES_V8, mappingRevision: "dom-pagetype-v8" }
     : { classes: PAGE_TYPES_V5, mappingRevision: "dom-pagetype-v5" };
 }
@@ -615,7 +615,7 @@ export function loadPolicy(revision: PageTypePolicyRevision = "v5"): PolicyDocum
     throw new Error(`unknown policy revision ${revision}`);
   const text = readFileSync(policyPath(revision), "utf8");
   // v8 is page-type only; every other revision carries the node axes too.
-  const nodeAxes = revision !== "v8";
+  const nodeAxes = !revision.startsWith("v8");
   if ((nodeAxes && !text.includes("## 1. componentType")) || !text.includes("## 4. pageType"))
     throw new Error(`policy-${revision}.md is missing a required section`);
   if (!text.startsWith(`# Shared annotation policy, revision \`dom-suggestions-${revision}\``))

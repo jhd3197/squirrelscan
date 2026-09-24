@@ -130,7 +130,7 @@ def main() -> None:
             data.extend(vec[nz]); indices.extend(nz); indptr.append(len(indices))
             labels.append(index[label]); weights.append(float(weight))
             ad = jev[key].get("adToken") if key in jev else free.get(key, {}).get("adToken")
-            meta.append({"p": row["p"], "n": row["n"], "src": source, "adToken": ad})
+            meta.append({"p": row["p"], "n": row["n"], "d": row["d"], "src": source, "adToken": ad})
             counts[(label, source)] += 1
         for page, rows in negatives_by_page.items():
             rows.sort(key=lambda r: rank(page, r["n"]))
@@ -142,7 +142,8 @@ def main() -> None:
                 nz = np.flatnonzero(vec)
                 data.extend(vec[nz]); indices.extend(nz); indptr.append(len(indices))
                 labels.append(index["none"]); weights.append(0.5)
-                meta.append({"p": page, "n": row["n"], "src": "negative", "adToken": None})
+                meta.append({"p": page, "n": row["n"], "d": row["d"], "src": "negative",
+                             "adToken": None})
                 counts[("none", "negative")] += 1
         matrix = sp.csr_matrix((np.asarray(data, np.float32), np.asarray(indices, np.int32),
                                 np.asarray(indptr, np.int64)), shape=(len(labels), width))
