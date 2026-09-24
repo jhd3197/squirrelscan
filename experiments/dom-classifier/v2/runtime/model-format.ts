@@ -43,6 +43,8 @@ export interface ArtifactJson {
   tokenBuckets: number;
   region: HeadJson;
   pageType: HeadJson;
+  /** Optional third head: section purpose per candidate node (#2307). */
+  section?: HeadJson;
 }
 
 export interface Head {
@@ -73,6 +75,8 @@ export interface Model {
   tokenBuckets: number;
   region: Head;
   pageType: Head;
+  /** Section purpose per node, or null for an artifact without that head. */
+  section: Head | null;
 }
 
 export class ArtifactError extends Error {}
@@ -173,6 +177,7 @@ export function loadModel(json: unknown): Model {
     tokenBuckets: artifact.tokenBuckets,
     region: decodeHead(artifact.region),
     pageType: decodeHead(artifact.pageType),
+    section: artifact.section ? decodeHead(artifact.section) : null,
   };
 }
 

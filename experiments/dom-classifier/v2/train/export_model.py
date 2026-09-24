@@ -214,6 +214,9 @@ def main() -> None:
     parser.add_argument("--data-root", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--parity-rows", type=int, default=10_000)
+    parser.add_argument("--section-dir", default="",
+                        help="trained section-purpose head (section-model.txt, "
+                             "class-thresholds.json, sample/X-holdout.npz); optional third head")
     parser.add_argument("--pagetype-dir", default="pagetype",
                         help="subdirectory of --models holding the page-type head")
     args = parser.parse_args()
@@ -290,6 +293,17 @@ def main() -> None:
         "pageType": page_head,
         "pageTypeLabelSource": page_report.get("labelProvenance", "silver"),
     }
+    section_booster = section_ref = None
+    if args.section_dir:
+        section_dir = Path(args.section_dir)
+        section_thresholds = json.loads((section_dir / "class-thresholds.json").read_text())
+        section_booster, artifact["section"], section_ref = head(
+            section_dir / "section-model.txt",
+            None,
+            section_thresholds["classes"],
+            1.01,
+            section_thresholds["thresholds"],
+        )
     artifact_path = out / "classifier-v2.json"
     artifact_path.write_text(json.dumps(artifact, separators=(",", ":")))
     size = artifact_path.stat().st_size
@@ -337,6 +351,31 @@ def main() -> None:
     }
     (out / "parity-region.json").write_text(json.dumps(fixture, separators=(",", ":")))
 
+    section_parity = None
+    if section_booster is not None:
+        # Same fixture, for the section head: its rows are the section sample's
+        # own holdout (a region-sample row is not necessarily a section row).
+        xs = sp.load_npz(Path(args.section_dir) / "sample" / "X-holdout.npz").tocsr()
+        full_s = np.asarray(xs[: args.parity_rows].todense(), dtype=np.float32)
+        ref_s = evaluate(section_ref, full_s)
+        lgb_s = section_booster.predict(full_s)
+        section_parity = {
+            "maxAbsProbDiff": float(np.abs(ref_s - lgb_s).max()),
+            "argmaxAgreement": float(np.mean(ref_s.argmax(axis=1) == lgb_s.argmax(axis=1))),
+            "rows": int(full_s.shape[0]),
+        }
+        if section_parity["argmaxAgreement"] < 1.0:
+            raise SystemExit("float32 packing changed a section argmax; refusing to ship")
+        rows_s = []
+        for row in full_s:
+            nz = np.flatnonzero(row)
+            rows_s.append({"i": nz.tolist(), "v": [float(row[j]) for j in nz]})
+        (out / "parity-section.json").write_text(json.dumps({
+            "featurizerVersion": schema["featurizerVersion"], "rows": int(full_s.shape[0]),
+            "width": int(full_s.shape[1]), "x": rows_s,
+            "probs": [[float(v) for v in row] for row in ref_s],
+        }, separators=(",", ":")))
+
     (out / "export-report.json").write_text(
         json.dumps(
             {
@@ -346,6 +385,8 @@ def main() -> None:
                 "regionClassThresholds": class_thresholds,
                 "regionTrees": region_head["numTrees"],
                 "pageTypeTrees": page_head["numTrees"],
+                "sectionTrees": artifact["section"]["numTrees"] if "section" in artifact else None,
+                "sectionFloat32VsLightGBM": section_parity,
                 "float32VsLightGBM": {
                     "maxAbsProbDiff": max_diff,
                     "argmaxAgreement": argmax_agreement,

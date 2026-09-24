@@ -48,6 +48,10 @@ export interface NodePrediction extends Prediction<RegionLabel> {
   /** Stable reference to the node within this page: its preorder element
    *  index, the tag, and the id attribute when the page provided one. */
   nodeRef: { nodeId: number; tag: string; elementId: string };
+  /** The node's section purpose (ad, cookie_consent, faq_block, ...), present
+   *  only when the artifact has a section head AND the class clears its
+   *  per-class threshold. Absent means `none` or abstained. */
+  section?: { label: string; confidence: number };
 }
 
 export interface PageClassification {
@@ -211,6 +215,36 @@ export function classifyDocument(
         rawLabel: usable.region.classes[index],
         rawConfidence: probability,
       });
+    }
+  }
+
+  // Section purpose: a separate head over the SAME candidate vectors, for every
+  // node (a declared <nav> can still hold the site's breadcrumbs). One entry is
+  // pushed per featurized node above, so the arrays line up by position.
+  const section = usable?.section ?? null;
+  if (section && !budgetSpent) {
+    const sectionScores = new Float32Array(section.numClass);
+    let sectionValues: Float32Array | null = null;
+    let sectionTokens: number[] | null = null;
+    for (let i = 0; i < featurized.nodes.length; i++) {
+      if ((i & 31) === 0 && Date.now() - started > budget) {
+        degraded = degraded || `time budget ${budget}ms exceeded`;
+        break;
+      }
+      const node = featurized.nodes[i]!;
+      sectionValues = toVector(
+        node.features,
+        node.tokens,
+        usable!.nodeFeatureCount,
+        sectionValues,
+        sectionTokens,
+      );
+      sectionTokens = node.tokens;
+      scoreRow(section, sectionValues, sectionScores);
+      const { index, probability } = softmax(sectionScores);
+      const label = section.classes[index]!;
+      if (label !== "none" && probability >= section.classThresholds[index]!)
+        nodes[i]!.section = { label, confidence: probability };
     }
   }
 
