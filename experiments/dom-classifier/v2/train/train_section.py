@@ -79,7 +79,11 @@ def main() -> None:
     parser.add_argument("--out", required=True)
     parser.add_argument("--target-precision", type=float, default=0.95)
     parser.add_argument("--min-fires", type=int, default=15)
-    parser.add_argument("--rounds", type=int, default=1500)
+    parser.add_argument("--rounds", type=int, default=800)
+    parser.add_argument("--negative-weight", type=float, default=0.5,
+                        help="weight of the random unlabelled `none` rows (they can hide a section)")
+    parser.add_argument("--balance-power", type=float, default=0.0,
+                        help="class-balance exponent: rows weighted by (median/class count)^p")
     args = parser.parse_args()
 
     import lightgbm as lgb
@@ -88,27 +92,46 @@ def main() -> None:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     classes = json.loads((sample / "classes.json").read_text())["classes"]
-    xt, yt, wt, _ = load(sample, "train")
-    xv, yv, wv, _ = load(sample, "val")
+    xt, yt, wt, mt = load(sample, "train")
+    wt = wt.copy()
+    negative = np.asarray([m["src"] == "negative" for m in mt])
+    wt[negative] = args.negative_weight
+    if args.balance_power > 0:
+        counts = np.bincount(yt, minlength=len(classes)).astype(np.float64)
+        median = float(np.median(counts[counts > 0]))
+        factor = np.where(counts > 0, (median / np.maximum(counts, 1)) ** args.balance_power, 0.0)
+        wt = wt * factor[yt]
+    # Val and holdout are scored on Jev-labelled rows ONLY. The random
+    # unlabelled `none` rows the sample adds can hide a real section, and a
+    # prediction on one would count as a false positive it may not be.
+    xv, yv, wv, mv = load(sample, "val")
+    keep_v = np.asarray([m["src"] == "jev" for m in mv])
+    xv, yv, wv = xv[keep_v], yv[keep_v], wv[keep_v]
     xh, yh, _, mh = load(sample, "holdout")
+    keep_h = np.asarray([m["src"] == "jev" for m in mh])
+    xh, yh = xh[keep_h], yh[keep_h]
+    mh = [m for m, k in zip(mh, keep_h, strict=True) if k]
     print(f"train {xt.shape} val {xv.shape} holdout {xh.shape}", flush=True)
 
     base = {"objective": "multiclass", "num_class": len(classes), "feature_fraction": 0.8,
             "bagging_fraction": 0.8, "bagging_freq": 1, "max_bin": 63, "num_threads": N_JOBS,
             "verbose": -1, "seed": 20260924}
+    # No early stopping on weighted log-loss: with ~40k `none` rows it stops
+    # before the rare classes are learned. One long run per config, read at
+    # several iteration counts, and the count is picked on val macro-F1.
     best, grid = None, []
     for leaves in (63, 127):
         params = {**base, "num_leaves": leaves, "learning_rate": 0.05, "min_data_in_leaf": 10}
-        booster = lgb.train(params, lgb.Dataset(xt, label=yt, weight=wt), num_boost_round=args.rounds,
-                            valid_sets=[lgb.Dataset(xv, label=yv, weight=wv)],
-                            callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(0)])
-        vp = booster.predict(xv, num_iteration=booster.best_iteration)
-        val = score(vp, yv, [0.0] * len(classes), classes)["macroF1NonNone"]
-        grid.append({"leaves": leaves, "iters": booster.best_iteration, "valMacroF1NonNone": val})
-        print(json.dumps(grid[-1]), flush=True)
-        if best is None or val > best[0]:
-            best = (val, booster, vp)
-    _, booster, vp = best
+        booster = lgb.train(params, lgb.Dataset(xt, label=yt, weight=wt), num_boost_round=args.rounds)
+        for k in range(100, args.rounds + 1, 100):
+            vp = booster.predict(xv, num_iteration=k)
+            val = score(vp, yv, [0.0] * len(classes), classes)["macroF1NonNone"]
+            grid.append({"leaves": leaves, "iters": k, "valMacroF1NonNone": val})
+            print(json.dumps(grid[-1]), flush=True)
+            if best is None or val > best[0]:
+                best = (val, booster, vp, k)
+    _, booster, vp, chosen_k = best
+    booster.best_iteration = chosen_k
     thresholds = pick_thresholds(vp, yv, len(classes), args.target_precision, args.min_fires)
     thresholds[classes.index("none")] = 0.0
     hp = booster.predict(xh, num_iteration=booster.best_iteration)

@@ -27,6 +27,7 @@ import json
 import os
 from collections import Counter
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import hashlib
 
@@ -133,9 +134,17 @@ def main() -> None:
     parser.add_argument("--extra-features", action="append", default=[],
                         help="jsonl of {p, f:[...]} appended to every page's vector (a page "
                              "missing from the file gets zeros); repeatable")
+    parser.add_argument("--policy-rules", action="store_true",
+                        help="correct Jev labels that contradict policy-v8's own decision rules, "
+                             "on every split alike (model-independent): the site root without "
+                             "a query is `homepage`; a page under a /blog/ path segment that Jev "
+                             "called docs/article/other is `blog_post` (rule 1: presentation wins)")
     parser.add_argument("--cv-folds", type=int, default=0,
                         help="pick thresholds on domain-grouped out-of-fold predictions over "
                              "train+val and ship a model refit on train+val; 0 = val split")
+    parser.add_argument("--dump-selection", action="store_true",
+                        help="write the selection split's per-page predictions (OOF with "
+                             "--cv-folds) for error audits; never holdout")
     parser.add_argument("--score-holdout", action="store_true",
                         help="score holdout (only for a KEPT candidate; the loop counts touches)")
     parser.add_argument("--out", required=True)
@@ -184,6 +193,13 @@ def main() -> None:
         for page_id, feat in features.items():
             feat["x"] = np.concatenate([feat["x"], np.asarray(extra.get(page_id, [0.0] * width),
                                                                dtype=np.float32)])
+    urls: dict[str, str] = {}
+    if args.policy_rules:
+        with gzip.open(dataset / "page-index.jsonl.gz", "rt") as handle:
+            for line in handle:
+                row = json.loads(line)
+                urls[row["p"]] = row["u"]
+    corrected: dict[str, Counter] = {s: Counter() for s in ("train", "val", "holdout")}
     rows = {"train": ([], [], [], []), "val": ([], [], [], []), "holdout": ([], [], [], [])}
     sources: dict[str, Counter] = {s: Counter() for s in rows}
     counts: dict[str, Counter] = {s: Counter() for s in rows}
@@ -198,6 +214,17 @@ def main() -> None:
             label, weight, source = schema[page_id], agreement[schema[page_id]], "schema"
         if label is None:
             continue
+        if args.policy_rules and source in ("jev-v8", "jev-v7") and page_id in urls:
+            parts = urlsplit(urls[page_id])
+            segments = [s for s in parts.path.lower().split("/") if s]
+            fixed = label
+            if not segments and not parts.query:
+                fixed = "homepage"
+            elif "blog" in segments[:-1] and label in ("docs", "article", "other"):
+                fixed = "blog_post"
+            if fixed != label:
+                corrected[split][f"{label}->{fixed}"] += 1
+                label = fixed
         label = fold(label)
         x, y, w, ids = rows[split]
         x.append(feat["x"])
@@ -236,7 +263,7 @@ def main() -> None:
             best = (val_f1, booster, vp)
     _, booster, vp = best
     iterations = int(booster.best_iteration)
-    selection = {"yEval": yv, "probs": vp, "name": "val"}
+    selection = {"yEval": yv, "probs": vp, "name": "val", "ids": ids_v}
     if args.cv_folds > 0:
         # Thresholds from domain-grouped out-of-fold predictions over train+val:
         # every pool page is scored by a model that never saw its domain, and
@@ -258,7 +285,8 @@ def main() -> None:
         booster = lgb.train(params, lgb.Dataset(xp, label=yp, weight=wp),
                             num_boost_round=iterations)
         booster.best_iteration = iterations
-        selection = {"yEval": yp, "probs": oof, "name": f"oof-{args.cv_folds}fold"}
+        selection = {"yEval": yp, "probs": oof, "name": f"oof-{args.cv_folds}fold",
+                     "ids": [*ids_t, *ids_v]}
     thresholds = pick_thresholds(selection["probs"], selection["yEval"], classes,
                                  args.target_precision, args.min_fires)
     thr = np.asarray(thresholds)
@@ -293,6 +321,7 @@ def main() -> None:
                            "+ declared schema (agreement-qualified classes, schema hidden)",
         "counts": {s: dict(c) for s, c in counts.items()},
         "sources": {s: dict(c) for s, c in sources.items()},
+        "policyRuleCorrections": {s: dict(c) for s, c in corrected.items()},
         "freeAgreement": agreement, "freeClassesUsed": sorted(free_ok),
         "grid": grid, "iterations": int(booster.best_iteration),
         "thresholds": dict(zip(classes, thresholds, strict=True)),
@@ -310,7 +339,9 @@ def main() -> None:
         report["schemaHidden"] = score(xh[keep], yh[keep])
     if args.v7_model and args.score_holdout:
         v7_booster = lgb.Booster(model_file=args.v7_model)
-        v7_pred = v7_booster.predict(xh).argmax(1)
+        # The v7 head saw only the base page vector; --extra-features columns
+        # are appended after it, so the prefix is exactly what v7 was trained on.
+        v7_pred = v7_booster.predict(xh[:, : v7_booster.num_feature()]).argmax(1)
         shared = [c for c in V7_CLASSES if c in index]
         v7_as_v8 = np.asarray([index.get(fold(V7_CLASSES[i]), -1) for i in v7_pred])
         v8_pred = booster.predict(xh, num_iteration=booster.best_iteration).argmax(1)
@@ -327,6 +358,14 @@ def main() -> None:
                     "precision": round(p, 4), "recall": round(r, 4),
                     "f1": round(2 * p * r / (p + r), 4) if p + r else 0.0}
         report["vsV7"] = both
+    if args.dump_selection:
+        with (out / "selection-predictions.jsonl").open("w") as handle:
+            for page_id, y, probs in zip(selection["ids"], selection["yEval"], selection["probs"],
+                                         strict=True):
+                top = int(probs.argmax())
+                handle.write(json.dumps({"pageId": page_id, "label": classes[int(y)],
+                                         "pred": classes[top], "conf": round(float(probs[top]), 4),
+                                         "fires": bool(probs[top] >= thr[top])}) + "\n")
     booster.save_model(str(out / "pagetype-model.txt"), num_iteration=booster.best_iteration)
     (out / "class-thresholds.json").write_text(json.dumps({"classes": classes,
                                                             "thresholds": thresholds}) + "\n")
