@@ -54,9 +54,15 @@ function argument(name: string, fallback?: string): string {
 }
 
 const LABELS_DIR = join(import.meta.dir, "..", "v2", "labels");
-const policyText = readFileSync(join(LABELS_DIR, "policy-section-v2.md"), "utf8");
+/** v2 = tightest container; v3 = region level (see policy-section-v3.md). The
+ *  class list is shared. */
+const policyRevision = Bun.argv.includes("--policy-revision")
+  ? Bun.argv[Bun.argv.indexOf("--policy-revision") + 1]!
+  : "v2";
+if (!["v2", "v3"].includes(policyRevision)) throw new Error("--policy-revision must be v2 or v3");
+const policyText = readFileSync(join(LABELS_DIR, `policy-section-${policyRevision}.md`), "utf8");
 const POLICY = {
-  revision: "section-purpose-v2",
+  revision: `section-purpose-${policyRevision}`,
   sha256: sha256(policyText),
   text: policyText,
 };
@@ -158,7 +164,9 @@ function buildRequest(
       instructions: {
         node: node.nodeId,
         judgment:
-          "What is this element for? Choose exactly one section purpose from `policy.text`; label it only when the element is the tightest container of that whole section, otherwise `none`.",
+          policyRevision === "v2"
+            ? "What is this element for? Choose exactly one section purpose from `policy.text`; label it only when the element is the tightest container of that whole section, otherwise `none`."
+            : "What is this element for? Choose exactly one section purpose from `policy.text`: label it when its content IS that section (the section, a wrapper around only it, or its main list); answer `none` for a fragment of a section or an element with substantial unrelated content.",
       },
       criteria: Object.fromEntries(
         SECTION_CLASSES.map((label) => [

@@ -176,6 +176,10 @@ def main() -> None:
                         help="jsonl {p, cluster}: with --cv-folds, add each page's leave-one-out "
                              "mean stage-1 probability over the other pages of its template "
                              "cluster, then refit (stage 2)")
+    parser.add_argument("--dropout-extra", type=float, default=0.0,
+                        help="share of train/val pages whose --extra-features block is set to "
+                             "MISSING (NaN, LightGBM-native), so the model also works without "
+                             "the link graph; holdout is then scored with and without it")
     parser.add_argument("--lcb", action="store_true",
                         help="with --cv-folds: a threshold must give mean-1sd of the per-fold "
                              "precision >= target, not just pooled precision (fold-variance margin)")
@@ -242,8 +246,17 @@ def main() -> None:
         for page_id, feat in features.items():
             feat["x"] = np.concatenate([feat["x"], np.asarray(extra.get(page_id, [0.0] * width),
                                                                dtype=np.float32)])
+    base_width = schema_features["pageFeatureCount"] + schema_features["tokenBuckets"]
+    if args.dropout_extra > 0:
+        for page_id, feat in features.items():
+            if feat["s"] == "holdout":
+                continue
+            bucket = int(hashlib.sha256(f"drop:{page_id}".encode()).hexdigest()[:8], 16) % 1000
+            if bucket < args.dropout_extra * 1000:
+                feat["x"] = feat["x"].copy()
+                feat["x"][base_width:] = np.nan
     urls: dict[str, str] = {}
-    if args.policy_rules:
+    if args.policy_rules or args.score_holdout:
         with gzip.open(dataset / "page-index.jsonl.gz", "rt") as handle:
             for line in handle:
                 row = json.loads(line)
@@ -424,6 +437,41 @@ def main() -> None:
     }
     if args.score_holdout:
         report["holdout"] = score(xh, yh)
+        # The non-trivial slices: a site root IS a homepage (a rule, and the
+        # model can read urlIsRoot), and a /blog/ path says blog_post.
+        def segments_of(pid):
+            parts = urlsplit(urls.get(pid, ""))
+            return [s for s in parts.path.lower().split("/") if s], bool(parts.query)
+
+        seg = [segments_of(p) for p in ids_h]
+        non_root = np.asarray([bool(sg) or q for sg, q in seg])
+        not_blog = np.asarray(["blog" not in sg for sg, _ in seg])
+
+        def slice_scores(xm):
+            probs = booster.predict(xm, num_iteration=booster.best_iteration)
+            pred, conf = probs.argmax(1), probs.max(1)
+            fires = conf >= thr[pred]
+            out = {}
+            for name, cls, mask in (("homepageNonRoot", "homepage", non_root),
+                                    ("blogPostNotUnderBlog", "blog_post", not_blog)):
+                i = index[cls]
+                fired = mask & fires & (pred == i)
+                support = int((mask & (yh == i)).sum())
+                n = int(fired.sum())
+                out[name] = {"support": support, "fires": n,
+                             "precisionAtThreshold": round(float((yh[fired] == i).mean()), 4) if n else None,
+                             "coverageAtThreshold": round(int((yh[fired] == i).sum()) / support, 4)
+                             if support else None}
+            return out
+
+        report["holdoutSlices"] = slice_scores(xh)
+        if xh.shape[1] > base_width:
+            # Without the link graph: every cross-page column missing.
+            dense = xh.toarray()
+            dense[:, base_width:] = np.nan
+            xm = sp.csr_matrix(dense)
+            report["holdoutNoGraph"] = score(xm, yh)
+            report["holdoutNoGraphSlices"] = slice_scores(xm)
     # "Correct schema" holdout pages: declared schema agrees with Jev v8.
     keep = np.asarray([schema.get(p) is not None and fold(schema[p]) == classes[y]
                        for p, y in zip(ids_h, yh, strict=True)])
