@@ -675,3 +675,35 @@ describe("listItemTextShare with nested lists", () => {
     expect(value).toBeLessThan(0.5);
   });
 });
+
+// Section purpose (#2307) is labelled FROM microdata, so microdata must never
+// reach a feature: a node's vector has to be identical with and without
+// itemscope/itemtype/itemprop, or the head learns to read the answer key.
+describe("microdata never reaches a feature", () => {
+  const body = (attrs: (name: string) => string) => `<html><body>
+    <nav class="crumbs"${attrs("BreadcrumbList")}><ol>
+      <li${attrs("ListItem")}><a href="/">Home</a></li>
+      <li${attrs("ListItem")}><a href="/shop">Shop</a></li></ol></nav>
+    <section class="faq"${attrs("FAQPage")}>
+      <div${attrs("Question")}><h3>How long is shipping?</h3><p>Three to five working days.</p></div>
+      <div${attrs("Question")}><h3>Can I return it?</h3><p>Within thirty days, unused.</p></div>
+    </section>
+    <div class="offer"${attrs("Offer")}><span class="price">$20</span><button>Add to cart</button></div>
+  </body></html>`;
+  const plain = body(() => "");
+  const marked = body(
+    (type) => ` itemscope itemtype="https://schema.org/${type}" itemprop="${type.toLowerCase()}"`,
+  );
+
+  test("vectors and tokens are byte-identical", () => {
+    const a = featurizePage(plain, "https://example.com/p");
+    const b = featurizePage(marked, "https://example.com/p");
+    expect(b.nodes.length).toBe(a.nodes.length);
+    for (let i = 0; i < a.nodes.length; i++) {
+      expect([...b.nodes[i]!.features]).toEqual([...a.nodes[i]!.features]);
+      expect(b.nodes[i]!.tokens).toEqual(a.nodes[i]!.tokens);
+    }
+    expect([...b.page.features]).toEqual([...a.page.features]);
+    expect(b.page.tokens).toEqual(a.page.tokens);
+  });
+});
