@@ -1,0 +1,28 @@
+{
+  "revision": "section-purpose-v2",
+  "note": "One label per candidate node. schemaType is the schema.org type a correctly marked-up page carries for that section, or null for a purpose with no schema (those exist for issue de-dupe: the same widget repeated across pages becomes one finding).",
+  "classes": [
+    { "name": "faq_block", "schemaType": "FAQPage" },
+    { "name": "reviews", "schemaType": "Review" },
+    { "name": "breadcrumbs", "schemaType": "BreadcrumbList" },
+    { "name": "business_info", "schemaType": "LocalBusiness" },
+    { "name": "product_offer", "schemaType": "Offer" },
+    { "name": "recipe_card", "schemaType": "Recipe" },
+    { "name": "event_details", "schemaType": "Event" },
+    { "name": "author_byline", "schemaType": "Person" },
+    { "name": "video_embed", "schemaType": "VideoObject" },
+    { "name": "ad", "schemaType": null },
+    { "name": "cookie_consent", "schemaType": null },
+    { "name": "newsletter_signup", "schemaType": null },
+    { "name": "social_share", "schemaType": null },
+    { "name": "related_content", "schemaType": null },
+    { "name": "comments", "schemaType": null },
+    { "name": "chat_widget", "schemaType": null },
+    { "name": "promo_banner", "schemaType": null },
+    { "name": "pagination", "schemaType": null },
+    { "name": "table_of_contents", "schemaType": null },
+    { "name": "account_login", "schemaType": null },
+    { "name": "locale_switcher", "schemaType": null },
+    { "name": "none", "schemaType": null }
+  ]
+}
