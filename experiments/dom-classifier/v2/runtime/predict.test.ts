@@ -15,6 +15,7 @@ import { isRootPath } from "./rules-fallback.ts";
 const DATA_ROOT = process.env.DOM_CLASSIFIER_DATA_ROOT ?? "";
 const ARTIFACT = `${DATA_ROOT}/models/artifact/classifier-v2.json`;
 const PARITY = `${DATA_ROOT}/models/artifact/parity-region.json`;
+const PARITY_SECTION = `${DATA_ROOT}/models/artifact/parity-section.json`;
 const HAS_ARTIFACT = DATA_ROOT !== "" && existsSync(ARTIFACT);
 const HAS_PARITY = DATA_ROOT !== "" && existsSync(PARITY);
 
@@ -240,6 +241,54 @@ describe.if(HAS_ARTIFACT && HAS_PARITY)("G4 parity with the Python evaluator", (
     }
     expect(argmaxMatches).toBe(fixture.rows);
     expect(maxDiff).toBeLessThan(1e-5);
+  });
+});
+
+describe.if(HAS_ARTIFACT && existsSync(PARITY_SECTION))("section head parity (#2307)", () => {
+  test("holdout rows: identical argmax to the Python reference, probabilities within 1e-5", () => {
+    const model = loadModel(artifactJson());
+    expect(model.section).not.toBeNull();
+    const fixture = JSON.parse(readFileSync(PARITY_SECTION, "utf8")) as {
+      rows: number;
+      width: number;
+      x: Array<{ i: number[]; v: number[] }>;
+      probs: number[][];
+    };
+    const head = model.section!;
+    const values = new Float32Array(fixture.width);
+    const scores = new Float32Array(head.numClass);
+    let maxDiff = 0;
+    let argmaxMatches = 0;
+    for (let row = 0; row < fixture.rows; row++) {
+      values.fill(0);
+      const sparse = fixture.x[row]!;
+      for (let k = 0; k < sparse.i.length; k++) values[sparse.i[k]!] = sparse.v[k]!;
+      scoreRow(head, values, scores);
+      const { index } = softmax(scores);
+      const expected = fixture.probs[row]!;
+      let expectedArgmax = 0;
+      for (let c = 1; c < expected.length; c++) {
+        if (expected[c]! > expected[expectedArgmax]!) expectedArgmax = c;
+      }
+      if (index === expectedArgmax) argmaxMatches++;
+      for (let c = 0; c < expected.length; c++)
+        maxDiff = Math.max(maxDiff, Math.abs(scores[c]! - expected[c]!));
+    }
+    expect(argmaxMatches).toBe(fixture.rows);
+    expect(maxDiff).toBeLessThan(1e-5);
+  });
+
+  test("a node carries a section only when a class clears its threshold, never `none`", () => {
+    const { model } = tryLoadModel(artifactJson());
+    const out = classifyPage(PAGE, URL, { model });
+    for (const node of out.nodes) {
+      if (!node.section) continue;
+      expect(node.section.label).not.toBe("none");
+      const index = model!.section!.classes.indexOf(node.section.label);
+      expect(node.section.confidence).toBeGreaterThanOrEqual(
+        model!.section!.classThresholds[index]!,
+      );
+    }
   });
 });
 
