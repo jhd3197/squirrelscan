@@ -83,6 +83,11 @@ def main() -> None:
     parser.add_argument("--negative-weight", type=float, default=0.5,
                         help="weight of the random unlabelled `none` rows (they can hide a section)")
     parser.add_argument("--leaves", default="63,127", help="num_leaves grid")
+    parser.add_argument("--labels", default="",
+                        help="replace the sample's Jev labels with these (e.g. a region-level v3 "
+                             "relabel of the same nodes): jsonl {pageId, nodeId, section}")
+    parser.add_argument("--dump-val", action="store_true",
+                        help="write val predictions (for FP audits; never holdout)")
     parser.add_argument("--drop-classes", default="",
                         help="comma list folded into `none` (no data to learn or evaluate them)")
     parser.add_argument("--cv-folds", type=int, default=0,
@@ -103,7 +108,24 @@ def main() -> None:
     remap = np.asarray([classes.index(c) if c in classes else classes.index("none")
                         for c in all_classes])
     xt, yt, wt, mt = load(sample, "train")
-    yt = remap[yt]
+    relabel: dict = {}
+    if args.labels:
+        for line in Path(args.labels).read_text().splitlines():
+            if line.strip():
+                row = json.loads(line)
+                if row.get("section") in all_classes:
+                    relabel[(row["pageId"], row["nodeId"])] = all_classes.index(row["section"])
+
+    def apply(y, meta):
+        if not relabel:
+            return y
+        y = y.copy()
+        for i, m in enumerate(meta):
+            if m["src"] == "jev" and (m["p"], m["n"]) in relabel:
+                y[i] = relabel[(m["p"], m["n"])]
+        return y
+
+    yt = remap[apply(yt, mt)]
     wt = wt.copy()
     negative = np.asarray([m["src"] == "negative" for m in mt])
     wt[negative] = args.negative_weight
@@ -116,10 +138,12 @@ def main() -> None:
     # unlabelled `none` rows the sample adds can hide a real section, and a
     # prediction on one would count as a false positive it may not be.
     xv, yv, wv, mv = load(sample, "val")
+    yv = apply(yv, mv)
     keep_v = np.asarray([m["src"] == "jev" for m in mv])
     xv, yv, wv = xv[keep_v], remap[yv[keep_v]], wv[keep_v]
     mv = [m for m, k in zip(mv, keep_v, strict=True) if k]
     xh, yh, _, mh = load(sample, "holdout")
+    yh = apply(yh, mh)
     keep_h = np.asarray([m["src"] == "jev" for m in mh])
     xh, yh = xh[keep_h], remap[yh[keep_h]]
     mh = [m for m, k in zip(mh, keep_h, strict=True) if k]
@@ -208,6 +232,13 @@ def main() -> None:
             "argmaxRecall": round(float((top[mask] == ad).mean()), 4) if n else None,
         }
     report["adGeneralization"] = gen
+    if args.dump_val:
+        with (out / "val-predictions.jsonl").open("w") as handle:
+            for m, y, pr in zip(mv, yv, vp, strict=True):
+                top = int(pr.argmax())
+                handle.write(json.dumps({"p": m["p"], "n": m["n"], "label": classes[int(y)],
+                                         "pred": classes[top], "conf": round(float(pr[top]), 4),
+                                         "fires": bool(pr[top] >= thresholds[top])}) + "\n")
     booster.save_model(str(out / "section-model.txt"), num_iteration=booster.best_iteration)
     (out / "class-thresholds.json").write_text(
         json.dumps({"classes": classes, "thresholds": thresholds}) + "\n")
