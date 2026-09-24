@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -86,6 +87,15 @@ def main() -> None:
     parser.add_argument("--labels", default="",
                         help="replace the sample's Jev labels with these (e.g. a region-level v3 "
                              "relabel of the same nodes): jsonl {pageId, nodeId, section}")
+    parser.add_argument("--tightest-labels", default="",
+                        help="v2 (tightest-node) Jev labels; with --tightest-classes, those "
+                             "classes take their label from here and every other class from --labels")
+    parser.add_argument("--tightest-classes", default="table_of_contents")
+    parser.add_argument("--ad-markers", default="",
+                        help="jsonl {pageId, nodeId} of nodes carrying third-party ad markup "
+                             "(network token, known ad host, EasyList match). Rule, every split: "
+                             "an ad/promo_banner label becomes `ad` on a marked node and "
+                             "`promo_banner` (the site's own promo) on an unmarked one")
     parser.add_argument("--dump-val", action="store_true",
                         help="write val predictions (for FP audits; never holdout)")
     parser.add_argument("--drop-classes", default="",
@@ -116,13 +126,40 @@ def main() -> None:
                 if row.get("section") in all_classes:
                     relabel[(row["pageId"], row["nodeId"])] = all_classes.index(row["section"])
 
+    tightest: dict = {}
+    tight_ids = {all_classes.index(c) for c in args.tightest_classes.split(",") if c in all_classes}
+    if args.tightest_labels:
+        for line in Path(args.tightest_labels).read_text().splitlines():
+            if line.strip():
+                row = json.loads(line)
+                if row.get("section") in all_classes:
+                    tightest[(row["pageId"], row["nodeId"])] = all_classes.index(row["section"])
+    markers: set = set()
+    if args.ad_markers:
+        for line in Path(args.ad_markers).read_text().splitlines():
+            if line.strip():
+                row = json.loads(line)
+                markers.add((row["pageId"], row["nodeId"]))
+    ad_i, promo_i = all_classes.index("ad"), all_classes.index("promo_banner")
+    rule_counts: Counter = Counter()
+
     def apply(y, meta):
-        if not relabel:
-            return y
         y = y.copy()
         for i, m in enumerate(meta):
-            if m["src"] == "jev" and (m["p"], m["n"]) in relabel:
-                y[i] = relabel[(m["p"], m["n"])]
+            key = (m["p"], m["n"])
+            if m["src"] == "jev" and key in relabel:
+                y[i] = relabel[key]
+            if tight_ids and m["src"] == "jev" and key in tightest:
+                old = tightest[key]
+                # A node either class calls a tightest-granularity class takes
+                # the tightest-node answer.
+                if old in tight_ids or y[i] in tight_ids:
+                    y[i] = old
+            if args.ad_markers and y[i] in (ad_i, promo_i):
+                new = ad_i if key in markers else promo_i
+                if new != y[i]:
+                    rule_counts[f"{all_classes[y[i]]}->{all_classes[new]}"] += 1
+                    y[i] = new
         return y
 
     yt = remap[apply(yt, mt)]
@@ -206,6 +243,7 @@ def main() -> None:
         "targetPrecision": args.target_precision,
         "thresholdsFrom": f"oof-{args.cv_folds}fold" if args.cv_folds else "val",
         "droppedClasses": sorted(dropped),
+        "promoAdRule": dict(rule_counts),
         # Why a class abstains: its precision and fire count on the selection
         # set at a few thresholds.
         "selectionCurve": {
