@@ -164,8 +164,10 @@ def run_item(item: dict, args, packets: dict, system: dict, ad_marked: set, guar
         return {**row, "error": "invalid_output"}
     raw_label = answer["label"]
     if item["axis"] == "page":
-        mapped = page_rules(raw_label, item["url"])
-        runner = page_rules(answer["runner_up"], item["url"]) if answer["runner_up"] != "-" else None
+        mapped = page_rules(raw_label, item["url"], item.get("platform"))
+        runner = (
+            page_rules(answer["runner_up"], item["url"], item.get("platform")) if answer["runner_up"] != "-" else None
+        )
     else:
         marked = f"{item['pageId']}#{item['nodeId']}" in ad_marked
         mapped = section_rules(raw_label, marked)

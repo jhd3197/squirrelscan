@@ -51,7 +51,9 @@ def main() -> None:
     for path in sorted(args.answers.glob("*/answers*.jsonl")):
         arm = path.parent.name
         mode = path.stem.split("-", 1)[1] if "-" in path.stem else "batch"
-        arms[f"{arm}/{mode}"] = {r["itemId"]: r for r in jsonl(path)}
+        # Answers made under a superseded policy for some classes (stale-*.txt) are left out.
+        stale = {line.strip() for f in path.parent.glob("stale-*.txt") for line in f.read_text().splitlines()}
+        arms[f"{arm}/{mode}"] = {r["itemId"]: r for r in jsonl(path) if r["itemId"] not in stale}
     report = {"arms": {}}
     for name, answers in arms.items():
         ok = {k: a for k, a in answers.items() if not a.get("error") and k in items}

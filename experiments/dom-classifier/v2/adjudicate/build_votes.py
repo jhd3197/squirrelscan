@@ -8,7 +8,7 @@ Input to label_model.py. One row per (item, source):
   {key, axis, source, label, conf?}
 key is the pageId (page type) or "pageId#nodeId" (section). Labels are mapped
 the way the training pipeline maps them, so sources compare like for like:
-page type through policy v8's URL rules and the 12-class fold; sections
+page type through policy v8.2's URL rules (policy_rules.py) and the 12-class fold; sections
 through the S9 fold and the promo/ad markup rule.
 
 Page-type sources: jev81 (Common Crawl pages), jev8 / jev7 (older pages; v7 only
@@ -34,7 +34,8 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from confident_learning import jsonl, load_pages, page_rules
+from confident_learning import jsonl, load_pages
+from policy_rules import page_rules_v82
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "train"))
 from schema_labels_v8 import TEMPLATE_PRONE, V7_REUSED, page_label  # noqa: E402
@@ -81,7 +82,13 @@ def page_votes(args, pages: dict, keep: set | None):
             return None
         if page_id not in pages or label is None:
             return None
-        row = {"key": page_id, "axis": "page", "source": source, "label": page_rules(label, pages[page_id]["url"])}
+        meta = pages[page_id]
+        row = {
+            "key": page_id,
+            "axis": "page",
+            "source": source,
+            "label": page_rules_v82(label, meta["url"], meta["platform"]),
+        }
         if conf is not None:
             row["conf"] = conf
         return row
