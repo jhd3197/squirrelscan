@@ -354,6 +354,275 @@ export const STATEFUL_COMPONENT_TYPES = {
   open: ["dialog", "drawer", "popover", "dropdown"],
   sticky: ["navigation_menu", "banner"],
 } as const;
+/**
+ * Gold review axes. They ask the exact questions a trained head is scored on,
+ * so they are separate from the descriptive v2 taxonomy above rather than a
+ * projection of it: `legal` here covers v2's privacy/terms/policy, and v2 has
+ * no single `docs` or `listing_index` value. Rows without these axes are
+ * unchanged.
+ *
+ * Page type v8 (policy-v8.1): the 12 classes of the page-type head. The six
+ * rare v8 classes (event, search_results, local_business, job_posting, faq,
+ * recipe) are `other` here.
+ */
+export const PAGE_TYPES_V8 = [
+  "homepage",
+  "about",
+  "contact",
+  "legal",
+  "pricing",
+  "blog_post",
+  "article",
+  "docs",
+  "listing_index",
+  "product_detail",
+  "product_listing",
+  "other",
+] as const;
+/**
+ * Section purpose at policy-section-v3 granularity (region level, with the
+ * table of contents at its tightest node). recipe_card, event_details and
+ * chat_widget fold into `none`, as in the section head.
+ */
+export const SECTION_PURPOSES_V3 = [
+  "faq_block",
+  "reviews",
+  "breadcrumbs",
+  "business_info",
+  "product_offer",
+  "author_byline",
+  "video_embed",
+  "ad",
+  "cookie_consent",
+  "newsletter_signup",
+  "social_share",
+  "related_content",
+  "comments",
+  "promo_banner",
+  "pagination",
+  "table_of_contents",
+  "account_login",
+  "locale_switcher",
+  "none",
+] as const;
+export const GOLD_POLICY_REVISIONS = {
+  pageTypeV8: "dom-suggestions-v8.1",
+  sectionPurposeV3: "section-purpose-v3",
+} as const;
+/** The reviewer's prompt for one class: a concrete yes/no question and the policy one-liner. */
+export type GoldQuestion = { label: string; name: string; question: string; definition: string };
+export const PAGE_TYPE_V8_QUESTIONS: readonly GoldQuestion[] = [
+  {
+    label: "homepage",
+    name: "Homepage",
+    question: "Is this page the site's homepage?",
+    definition:
+      "The site's root page: the top-level entry point that introduces the whole site rather than one subject.",
+  },
+  {
+    label: "about",
+    name: "About",
+    question: "Is this page an About page?",
+    definition:
+      "Who the organisation or person is: story, mission, team, history, careers overview.",
+  },
+  {
+    label: "contact",
+    name: "Contact",
+    question: "Is this page a Contact page?",
+    definition:
+      "How to reach a person: contact or support form, phone, addresses, office hours. A help centre of self-service answers is Docs.",
+  },
+  {
+    label: "legal",
+    name: "Legal",
+    question: "Is this page a Legal page?",
+    definition:
+      "Terms, privacy, cookie or accessibility policy, licence or other formal policy text.",
+  },
+  {
+    label: "pricing",
+    name: "Pricing",
+    question: "Is this page a Pricing page?",
+    definition:
+      "Plans, tiers or rates presented for comparison, with the intention of choosing one.",
+  },
+  {
+    label: "blog_post",
+    name: "Blog post",
+    question: "Is this page a blog post?",
+    definition:
+      "One entry of a blog: an individual, usually dated post under a blog section (/blog/ path, a blog label, or post chrome). When nothing says blog, it is Article.",
+  },
+  {
+    label: "article",
+    name: "Article",
+    question: "Is this page an Article (not a blog post)?",
+    definition:
+      "One editorial, news or informational piece read start to end: news story, press release, feature, case study or guide not presented as a blog entry.",
+  },
+  {
+    label: "docs",
+    name: "Docs",
+    question: "Is this page documentation?",
+    definition:
+      "Product or API docs, reference, how-to or tutorial written to be consulted while doing something; also a help centre of self-service answers.",
+  },
+  {
+    label: "listing_index",
+    name: "Listing (non-product)",
+    question: "Is this page an index of other pages that are not products?",
+    definition:
+      "The page's own content is a list: blog or news index, category or tag archive, docs index, event or job listing, directory.",
+  },
+  {
+    label: "product_detail",
+    name: "Product detail",
+    question: "Is this page about ONE purchasable product?",
+    definition:
+      "One product, item or plan with its own price, variants, availability or buy control, even with related products below it.",
+  },
+  {
+    label: "product_listing",
+    name: "Product listing",
+    question: "Is this page a listing of MANY purchasable products?",
+    definition:
+      "Two or more purchasable items presented as equals, each linking to its own page: shop category, collection, product search grid.",
+  },
+  {
+    label: "other",
+    name: "Other",
+    question: "Is this page Other (none of the 11 specific page types)?",
+    definition:
+      "Account, login, cart, checkout, error, landing and service pages; also a single event, job, recipe, FAQ page, local-business page or search results.",
+  },
+];
+export const SECTION_PURPOSE_V3_QUESTIONS: readonly GoldQuestion[] = [
+  {
+    label: "faq_block",
+    name: "FAQ block",
+    question: "Is the outlined element an FAQ block?",
+    definition: "Two or more question-and-answer pairs.",
+  },
+  {
+    label: "reviews",
+    name: "Reviews",
+    question: "Is the outlined element a reviews or testimonials section?",
+    definition: "Customer reviews or testimonials, or the rating summary for them.",
+  },
+  {
+    label: "breadcrumbs",
+    name: "Breadcrumbs",
+    question: "Is the outlined element a breadcrumb trail?",
+    definition: "The trail of links from the site root to this page.",
+  },
+  {
+    label: "business_info",
+    name: "Business info",
+    question: "Is the outlined element a business info block?",
+    definition:
+      "A business's postal address, opening hours and/or phone as a block, not a single phone link in a menu.",
+  },
+  {
+    label: "product_offer",
+    name: "Product offer",
+    question: "Is the outlined element the price and buy control of what this page sells?",
+    definition: "The price plus add to cart, buy now or book, for the thing this page sells.",
+  },
+  {
+    label: "author_byline",
+    name: "Author byline",
+    question: "Is the outlined element the author byline of this page's content?",
+    definition:
+      "The name of the author of this page's content, often with a date. Comment authors and testimonial names are not bylines.",
+  },
+  {
+    label: "video_embed",
+    name: "Video embed",
+    question: "Is the outlined element an embedded video player?",
+    definition: "A video the visitor can play. A muted, autoplaying background video is none.",
+  },
+  {
+    label: "ad",
+    name: "Ad (third-party)",
+    question: "Is the outlined element a third-party ad?",
+    definition:
+      "A display, native or sponsored ad, ad slot or ad iframe from an ad network. The site's own promotions are Promo banner.",
+  },
+  {
+    label: "cookie_consent",
+    name: "Cookie consent",
+    question: "Is the outlined element a cookie consent banner?",
+    definition: "A cookie or privacy consent banner or dialog.",
+  },
+  {
+    label: "newsletter_signup",
+    name: "Newsletter signup",
+    question: "Is the outlined element a newsletter signup?",
+    definition: "A form or call to action to subscribe by email.",
+  },
+  {
+    label: "social_share",
+    name: "Social share",
+    question: "Is the outlined element a set of buttons that share this page?",
+    definition:
+      "Buttons that share THIS page to social networks, not links to the site's own social profiles.",
+  },
+  {
+    label: "related_content",
+    name: "Related content",
+    question: "Is the outlined element a related-content list?",
+    definition: "Other articles, posts or products offered as related, recommended or read next.",
+  },
+  {
+    label: "comments",
+    name: "Comments",
+    question: "Is the outlined element a comments section?",
+    definition: "The discussion thread under the content, or its reply form.",
+  },
+  {
+    label: "promo_banner",
+    name: "Promo banner (own site)",
+    question: "Is the outlined element the site's own promo or announcement bar?",
+    definition:
+      "A site-wide announcement or promotion bar (shipping offer, sale, notice), usually a thin strip at the top. Third-party ads are Ad.",
+  },
+  {
+    label: "pagination",
+    name: "Pagination",
+    question: "Is the outlined element pagination?",
+    definition: "Controls to move between pages of a list (1 2 3 next).",
+  },
+  {
+    label: "table_of_contents",
+    name: "Table of contents",
+    question: "Is the outlined element this page's table of contents?",
+    definition:
+      "A list of in-page links to this page's own sections. Yes only for the TIGHTEST element holding the whole list.",
+  },
+  {
+    label: "account_login",
+    name: "Account login",
+    question: "Is the outlined element a sign-in or registration form or panel?",
+    definition: "A sign-in or registration form or panel.",
+  },
+  {
+    label: "locale_switcher",
+    name: "Locale switcher",
+    question: "Is the outlined element a language, region or currency selector?",
+    definition: "A language, region or currency selector.",
+  },
+  {
+    label: "none",
+    name: "None",
+    question: "Is the outlined element none of the section types?",
+    definition:
+      "Headers, footers, menus, main content or a page column, or only a fragment of a section (one FAQ question, one review, one breadcrumb link).",
+  },
+];
+/** Shown with every section question: v3 judges the whole region, not the tightest node. */
+export const SECTION_V3_GRANULARITY =
+  "Yes when the outline's content IS that section: the section, a wrapper around only it, or its main list. A fragment, or a box with substantial unrelated content, is No (none).";
 export const BOUNDARIES = ["correct", "too_broad", "too_narrow", "mixed", "unsure"] as const;
 export const DECISIONS = ["label", "accept", "reject", "unsure"] as const;
 
@@ -366,6 +635,10 @@ export type Purpose = (typeof PURPOSES)[number];
 export type ObservedState = (typeof OBSERVED_STATES)[number];
 export type PageType = (typeof PAGE_TYPES)[number];
 export type ContentKind = (typeof CONTENT_KINDS)[number];
+export type PageTypeV8 = (typeof PAGE_TYPES_V8)[number];
+export type SectionPurposeV3 = (typeof SECTION_PURPOSES_V3)[number];
+/** Which gold axis a suggestion asks about. */
+export type GoldAxis = keyof typeof GOLD_POLICY_REVISIONS;
 export type ComponentProjection = {
   componentType: ComponentType;
   provenance: "legacy-v1-v2";
@@ -444,6 +717,8 @@ export type CapturedPage = {
   /** Known content date when distinct from the replay and rendering dates. */
   contentOriginDate?: string | null;
   assetMode?: "live" | "hybrid" | "offline";
+  /** Whether a replay ran the stored page's scripts. Absent on fresh captures. */
+  scriptMode?: "enabled" | "disabled";
 };
 
 export type AnnotationInput = {
@@ -465,6 +740,8 @@ export type AnnotationInput = {
   /** States seen by the annotator, never inferred by the capture process. */
   observedState?: readonly ObservedState[];
   purposes?: readonly Purpose[];
+  /** Gold axis: section purpose at policy-section-v3 granularity. Exactly one value. */
+  sectionPurposesV3?: readonly SectionPurposeV3[];
   comment?: string;
   boundary: Boundary;
   clientRequestId: string;
@@ -487,6 +764,7 @@ export type Annotation = Omit<
   | "componentSubtype"
   | "observedState"
   | "purposes"
+  | "sectionPurposesV3"
   | "comment"
   | "captureHash"
   | "supersedes"
@@ -501,6 +779,8 @@ export type Annotation = Omit<
   componentSubtype: string | null;
   observedState: ObservedState[];
   purposes: Purpose[];
+  /** Present only on gold-axis answers; rows without it are unchanged. */
+  sectionPurposesV3?: SectionPurposeV3[];
   /** 0 means a v1/v2 compatibility projection, not a new human v3 claim. */
   componentSchemaVersion: 0 | 3;
   componentProjection: ComponentProjection | null;
@@ -524,6 +804,8 @@ export type PageAnnotationInput = {
   /** Read-only for the same reason as `AnnotationInput`'s axes. */
   pageTypes?: readonly PageType[];
   contentKinds?: readonly ContentKind[];
+  /** Gold axis: page type v8 (policy-v8.1). Exactly one value. */
+  pageTypesV8?: readonly PageTypeV8[];
   comment?: string;
   clientRequestId: string;
   captureHash?: string;
@@ -534,11 +816,13 @@ export type PageAnnotationInput = {
 
 export type PageAnnotation = Omit<
   PageAnnotationInput,
-  "pageTypes" | "contentKinds" | "comment" | "captureHash" | "supersedes"
+  "pageTypes" | "contentKinds" | "pageTypesV8" | "comment" | "captureHash" | "supersedes"
 > & {
   id: string;
   pageTypes: PageType[];
   contentKinds: ContentKind[];
+  /** Present only on gold-axis answers; rows without it are unchanged. */
+  pageTypesV8?: PageTypeV8[];
   comment: string | null;
   captureHash: string;
   supersedes: string | null;
@@ -629,6 +913,17 @@ export type ModelSuggestion = {
     componentType?: ComponentType;
     pageTypes?: PageType[];
     contentKinds?: ContentKind[];
+    /** Gold axes: one value each. A suggestion carrying one is a gold question. */
+    pageTypeV8?: PageTypeV8[];
+    sectionPurposeV3?: SectionPurposeV3[];
+  };
+  /**
+   * Likely other answers for a gold question, most likely first, offered as
+   * one-click fixes after Not OK. Never includes the suggested value.
+   */
+  alternatives?: {
+    pageTypeV8?: PageTypeV8[];
+    sectionPurposeV3?: SectionPurposeV3[];
   };
   axisProbabilities?: {
     regions?: ModelLabelProbability<Region>[];
@@ -639,6 +934,22 @@ export type ModelSuggestion = {
   };
   componentTypeChoice?: ModelComponentTypeChoice;
   createdAt: string;
+};
+
+/**
+ * One gold question in review order (sidecar order across cohorts). `status`
+ * is the latest effective human action bound to this suggestion.
+ */
+export type GoldQueueItem = {
+  suggestionId: string;
+  pageId: string;
+  nodeId: string | null;
+  captureHash: string;
+  cohortId: string;
+  axis: GoldAxis;
+  label: string;
+  alternatives: string[];
+  status: "pending" | "accepted" | "corrected" | "rejected";
 };
 
 /** Read-only projection over the append-only journals for the current captures. */

@@ -272,6 +272,20 @@ const state = {
   loadGeneration: 0,
   pickerMode: "sections",
   queueQuery: "",
+  // Gold review: one yes/no question per item, in the server's interleaved
+  // order, across pages. Answers are ordinary journal rows bound to the
+  // question's suggestion id, so undo and stats work as for any model review.
+  gold: {
+    catalogue: null,
+    items: [],
+    position: -1,
+    phase: "question",
+    skipped: new Set(),
+    undo: [],
+    focusedSuggestionId: null,
+    // The suggestion whose capture is loaded and drawn; answers wait for it.
+    readyFor: null,
+  },
 };
 const $ = (id) => document.getElementById(id);
 const el = (tag, props = {}, children = []) => {
@@ -355,6 +369,20 @@ function pageModelSuggestionFor() {
           !suggestion.nodeId &&
           suggestion.captureHash === state.page?.captureHash,
       ) || null
+  );
+}
+/** Gold questions are answered only in the Gold pane, never by the element or page cards. */
+function isGoldSuggestion(suggestion) {
+  const labels = suggestion?.mappedLabels || {};
+  return Boolean(labels.pageTypeV8?.length || labels.sectionPurposeV3?.length);
+}
+/**
+ * Gold answers stay out of the element and page cards' "latest label" view, so
+ * a gold answer never reads as a descriptive label or carries its binding.
+ */
+function descriptiveOnly(annotations) {
+  return (annotations || []).filter(
+    (annotation) => !annotation.pageTypesV8?.length && !annotation.sectionPurposesV3?.length,
   );
 }
 function savedModelReviewFor(suggestion) {
@@ -487,7 +515,9 @@ function showStatus(message, kind = "") {
 }
 function renderUndoAction() {
   const button = $("undo-last-review");
-  button.disabled = !state.lastUndoableReview || state.saving || state.undoRestoring;
+  const undoable =
+    state.labelMode === "gold" ? state.gold.undo.length > 0 : state.lastUndoableReview;
+  button.disabled = !undoable || state.saving || state.undoRestoring;
 }
 function rememberUndoableReview(action) {
   state.lastUndoableReview = {
@@ -539,8 +569,8 @@ async function undoLastReview() {
             (summary.pageReviewedCount || 0) - last.summaryDelta,
           );
       }
-      state.annotations = response.annotations || [];
-      state.pageAnnotations = response.pageAnnotations || [];
+      state.annotations = descriptiveOnly(response.annotations);
+      state.pageAnnotations = descriptiveOnly(response.pageAnnotations);
       state.modelReviews = response.modelReviews || [];
       if (last.labelMode === "page") {
         setLabelMode("page");
@@ -993,7 +1023,7 @@ function renderQueue() {
       type: "button",
       className: `page-item${index === state.currentPageIndex ? " active" : ""}`,
       "aria-current": index === state.currentPageIndex ? "page" : "false",
-      onClick: () => loadPage(index),
+      onClick: () => browsePage(index),
     });
     let title = page.title || "Captured page";
     if (!page.title) {
@@ -1049,9 +1079,22 @@ function renderStage() {
   }
   syncNodeStates();
   focusSelectedNode();
+  focusGoldTarget();
 }
 function syncNodeStates() {
+  if (state.labelMode === "gold") {
+    const target = currentGoldItem();
+    const targetId = target && target.pageId === state.page?.id ? target.nodeId : null;
+    for (const region of $("node-layer").children) {
+      const isTarget = Boolean(targetId) && region.dataset.nodeId === targetId;
+      region.classList.toggle("selected", isTarget);
+      region.classList.toggle("gold-target", isTarget);
+      region.classList.remove("model-target", "hovered", "labeled");
+    }
+    return;
+  }
   for (const region of $("node-layer").children) {
+    region.classList.remove("gold-target");
     const id = region.dataset.nodeId;
     const isCurrentTarget = state.labelMode === "element" && id === state.selectedId;
     const reviewingModel = Boolean(
@@ -2116,11 +2159,17 @@ function setLabelMode(mode) {
   state.labelMode = mode;
   $("element-pane").hidden = mode !== "element";
   $("page-pane").hidden = mode !== "page";
+  $("gold-pane").hidden = mode !== "gold";
   $("element-tab").classList.toggle("active", mode === "element");
   $("page-tab").classList.toggle("active", mode === "page");
+  $("gold-tab").classList.toggle("active", mode === "gold");
   $("element-tab").setAttribute("aria-selected", String(mode === "element"));
   $("page-tab").setAttribute("aria-selected", String(mode === "page"));
+  $("gold-tab").setAttribute("aria-selected", String(mode === "gold"));
   if (mode === "page") renderPageLabel();
+  if (mode !== "gold" && state.selectedId === currentGoldItem()?.nodeId) applyClearSelection();
+  syncNodeStates();
+  renderUndoAction();
 }
 async function savePageAnnotation({ advance = false } = {}) {
   if (!state.page || state.saving) return;
@@ -2219,9 +2268,11 @@ async function loadPageNow(index) {
     if (generation !== state.loadGeneration) return;
     state.page = result;
     state.nodes = result.nodes || [];
-    state.annotations = result.annotations || [];
-    state.pageAnnotations = result.pageAnnotations || [];
-    state.modelSuggestions = result.modelSuggestions || [];
+    state.annotations = descriptiveOnly(result.annotations);
+    state.pageAnnotations = descriptiveOnly(result.pageAnnotations);
+    state.modelSuggestions = (result.modelSuggestions || []).filter(
+      (suggestion) => !isGoldSuggestion(suggestion),
+    );
     state.modelReviews = result.modelReviews || [];
     if (state.labelMode === "page") renderPageLabel();
     const selectPageModelOnLoad = state.advancePageModelOnLoad;
@@ -2441,13 +2492,15 @@ function installListeners() {
     syncNodeStates();
   });
   $("screenshot-stage").addEventListener("click", (event) => {
+    // The gold target is fixed by the question; clicking never moves it.
+    if (state.labelMode === "gold") return;
     const node = findPointNode(event);
     if (node) selectNode(node.id);
   });
   $("parent-button").addEventListener("click", chooseParent);
   $("child-button").addEventListener("click", chooseChild);
-  $("previous-page").addEventListener("click", () => loadPage(state.currentPageIndex - 1));
-  $("next-page").addEventListener("click", () => loadPage(state.currentPageIndex + 1));
+  $("previous-page").addEventListener("click", () => browsePage(state.currentPageIndex - 1));
+  $("next-page").addEventListener("click", () => browsePage(state.currentPageIndex + 1));
   $("next-suggestion").addEventListener("click", chooseNextSuggestion);
   $("next-model-suggestion").addEventListener("click", chooseNextModelSuggestion);
   $("zoom-select").addEventListener("change", (event) => {
@@ -2501,6 +2554,14 @@ function installListeners() {
   $("page-model-skip").addEventListener("click", () => skipModelReview(true));
   $("element-tab").addEventListener("click", () => setLabelMode("element"));
   $("page-tab").addEventListener("click", () => setLabelMode("page"));
+  $("gold-tab").addEventListener("click", () => enterGoldMode());
+  $("gold-ok").addEventListener("click", () => saveGoldAnswer("accept"));
+  $("gold-not-ok").addEventListener("click", () => goldNotOk());
+  $("gold-skip").addEventListener("click", () => skipGoldItem());
+  $("gold-review-skipped").addEventListener("click", () => {
+    state.gold.skipped.clear();
+    showGoldItem(nextGoldPosition(-1));
+  });
   $("page-type-search").addEventListener("input", () =>
     renderPageTypes($("page-type-search").value),
   );
@@ -2555,7 +2616,9 @@ function installListeners() {
     renderPageLabel();
     if (action) action();
   });
-  $("undo-last-review").addEventListener("click", undoLastReview);
+  $("undo-last-review").addEventListener("click", () =>
+    state.labelMode === "gold" ? undoGoldAnswer() : undoLastReview(),
+  );
   $("shortcut-toggle").addEventListener("click", () => $("shortcuts-dialog").showModal());
   $("shortcut-close").addEventListener("click", () => $("shortcuts-dialog").close());
   const saveCurrent = (advance = false) =>
@@ -2565,6 +2628,11 @@ function installListeners() {
   window.addEventListener("keydown", (event) => {
     if (event.repeat || event.isComposing || event.defaultPrevented) return;
     const dialogOpen = Boolean(document.querySelector("dialog[open]"));
+    // Gold mode owns the keyboard, so no key falls through to an element or page save.
+    if (state.labelMode === "gold" && !dialogOpen) {
+      handleGoldKey(event);
+      return;
+    }
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
       if (dialogOpen || isEditingTarget(event.target)) return;
       event.preventDefault();
@@ -2649,6 +2717,405 @@ function installListeners() {
     }
   });
 }
+function currentGoldItem() {
+  return state.gold.items[state.gold.position] || null;
+}
+function goldQuestionFor(axis, label) {
+  return (state.gold.catalogue?.[axis] || []).find((entry) => entry.label === label) || null;
+}
+function goldClassName(axis, label) {
+  return goldQuestionFor(axis, label)?.name || label;
+}
+/** Loads the gold queue; returns true when gold review took over the start-up page. */
+async function loadGoldQueue() {
+  try {
+    state.gold.items = (await api("/api/gold-queue")).items || [];
+  } catch {
+    state.gold.items = [];
+  }
+  $("gold-tab").hidden = state.gold.items.length === 0;
+  if (!state.gold.items.some((item) => item.status === "pending")) return false;
+  enterGoldMode();
+  return true;
+}
+function enterGoldMode() {
+  if (!state.gold.items.length) return;
+  if (state.dirty || state.pageDirty) {
+    showStatus("Finish or discard the current draft before gold review", "error");
+    return;
+  }
+  setLabelMode("gold");
+  const current = currentGoldItem();
+  showGoldItem(
+    current && current.status === "pending" ? state.gold.position : nextGoldPosition(-1),
+  );
+}
+/** The next pending, unskipped question after `from`, wrapping once; -1 when none is left. */
+function nextGoldPosition(from) {
+  const items = state.gold.items;
+  for (let step = 1; step <= items.length; step += 1) {
+    const position = (from + step + items.length) % items.length;
+    const item = items[position];
+    if (item.status === "pending" && !state.gold.skipped.has(item.suggestionId)) return position;
+  }
+  return -1;
+}
+async function showGoldItem(position) {
+  state.gold.phase = "question";
+  if (position < 0) {
+    state.gold.position = -1;
+    renderGold();
+    syncNodeStates();
+    return;
+  }
+  const item = state.gold.items[position];
+  state.gold.position = position;
+  state.gold.focusedSuggestionId = null;
+  state.gold.readyFor = null;
+  renderGold();
+  if (state.page?.id !== item.pageId) {
+    const index = state.pages.findIndex((page) => page.id === item.pageId);
+    if (index < 0) {
+      showStatus("This question's capture is not mounted", "error");
+      return;
+    }
+    state.advanceModelOnLoad = false;
+    state.advancePageModelOnLoad = false;
+    await loadPage(index);
+  } else {
+    syncNodeStates();
+    focusGoldTarget();
+  }
+}
+function renderGold() {
+  const item = currentGoldItem();
+  const items = state.gold.items;
+  const answered = items.filter((entry) => entry.status !== "pending").length;
+  $("gold-progress").textContent = `${answered} / ${items.length} answered${
+    state.gold.skipped.size ? ` · ${state.gold.skipped.size} skipped` : ""
+  }`;
+  $("gold-done").hidden = Boolean(item);
+  $("gold-actions").hidden = !item;
+  $("gold-fix").hidden = !item || state.gold.phase !== "fix";
+  if (!item) {
+    $("gold-kind").textContent = "";
+    $("gold-question").textContent = state.gold.skipped.size
+      ? "Only skipped questions are left."
+      : "Every gold question has an answer.";
+    $("gold-definition").textContent = "";
+    $("gold-rule").hidden = true;
+    $("gold-status").textContent = "";
+    $("gold-done-copy").textContent = `${answered} of ${items.length} answered.`;
+    $("gold-review-skipped").hidden = state.gold.skipped.size === 0;
+    return;
+  }
+  const question = goldQuestionFor(item.axis, item.label);
+  $("gold-kind").textContent =
+    item.axis === "pageTypeV8"
+      ? `Page type · item ${state.gold.position + 1}`
+      : `Section · item ${state.gold.position + 1}`;
+  $("gold-question").textContent = question?.question || `Is this ${item.label}?`;
+  $("gold-definition").textContent = question?.definition || "";
+  $("gold-rule").hidden = item.axis !== "sectionPurposeV3";
+  $("gold-rule").textContent = state.gold.catalogue?.sectionGranularity || "";
+  $("gold-status").textContent =
+    item.status === "pending"
+      ? ""
+      : `Saved: ${item.status === "accepted" ? "OK" : item.status === "corrected" ? "fixed" : "Not OK"}. A new answer replaces it.`;
+  if (state.gold.phase === "fix") renderGoldFix(item);
+}
+/** The one-click fixes: the suggestion's alternatives first, then every other class. */
+function goldFixOptions(item) {
+  const all = (state.gold.catalogue?.[item.axis] || []).map((entry) => entry.label);
+  const first = item.alternatives.filter((label) => label !== item.label && all.includes(label));
+  const rest = all.filter((label) => label !== item.label && !first.includes(label));
+  return { first, rest, ordered: [...first, ...rest] };
+}
+function renderGoldFix(item) {
+  const { first, rest, ordered } = goldFixOptions(item);
+  $("gold-fix-heading").textContent =
+    `Not ${goldClassName(item.axis, item.label)}. What is it instead?`;
+  const button = (label) => {
+    const number = ordered.indexOf(label) + 1;
+    return el(
+      "button",
+      {
+        type: "button",
+        title: goldQuestionFor(item.axis, label)?.definition || "",
+        onClick: () => saveGoldAnswer("correct", label),
+      },
+      [
+        ...(number <= 9 ? [el("kbd", { text: String(number) }), " "] : []),
+        goldClassName(item.axis, label),
+      ],
+    );
+  };
+  $("gold-alternatives").replaceChildren(...first.map(button));
+  $("gold-more").replaceChildren(...rest.map(button));
+}
+function focusGoldTarget() {
+  const item = currentGoldItem();
+  if (state.labelMode !== "gold" || !item || state.page?.id !== item.pageId) return;
+  const canvas = $("canvas-scroll");
+  const image = $("page-image");
+  if (!canvas || !image.clientWidth || !image.complete || !image.naturalWidth) return;
+  state.gold.readyFor = item.suggestionId;
+  const isNewTarget = state.gold.focusedSuggestionId !== item.suggestionId;
+  const node = item.nodeId ? nodeById(item.nodeId) : null;
+  if (isNewTarget) {
+    state.gold.focusedSuggestionId = item.suggestionId;
+    // A small target is zoomed so its outline is legible, but never past the
+    // width that still shows all of it; a wide bar and a page question stay fitted.
+    let zoom = "fit";
+    if (node) {
+      const fitScale = (canvas.clientWidth * 0.85) / state.page.width;
+      const shortestSide = Math.min(node.rect.width, node.rect.height);
+      const widest = (canvas.clientWidth * 0.9) / node.rect.width;
+      if (shortestSide * fitScale < 32 && node.rect.width * fitScale < canvas.clientWidth * 0.5) {
+        const targetPercent = Math.min(200, Math.max(50, (32 / shortestSide) * 100));
+        const level = [50, 75, 100, 150, 200].find((value) => value >= targetPercent) || 200;
+        const fitting = [200, 150, 100, 75, 50].find((value) => value <= level && value / 100 <= widest);
+        if (fitting && fitting / 100 > fitScale) zoom = String(fitting);
+      }
+    }
+    if (state.zoom !== zoom) {
+      state.zoom = zoom;
+      $("zoom-select").value = zoom;
+      renderStage();
+      return;
+    }
+  }
+  if (!node) {
+    canvas.scrollTo({ left: 0, top: 0, behavior: "instant" });
+    return;
+  }
+  const region = $("node-layer").querySelector(`[data-node-id="${CSS.escape(node.id)}"]`);
+  if (!region) return;
+  const target = region.getBoundingClientRect();
+  const viewport = canvas.getBoundingClientRect();
+  canvas.scrollTo({
+    // A target wider than the view starts at its left edge, so its label stays visible.
+    left: Math.max(
+      0,
+      canvas.scrollLeft +
+        target.left -
+        viewport.left -
+        Math.max(16, (canvas.clientWidth - target.width) / 2),
+    ),
+    // Tall regions start near the top of the view rather than centred past their heading.
+    top: Math.max(
+      0,
+      canvas.scrollTop +
+        target.top -
+        viewport.top -
+        Math.max(24, (canvas.clientHeight - target.height) / 2),
+    ),
+    behavior: "instant",
+  });
+}
+/** True once the question's own screenshot is loaded and drawn. */
+function goldReady(item) {
+  if (item && state.gold.readyFor === item.suggestionId && state.page?.id === item.pageId) return true;
+  showStatus("Wait for the page to load before answering");
+  return false;
+}
+function goldNotOk() {
+  const item = currentGoldItem();
+  if (!item || state.saving || !goldReady(item)) return;
+  if (state.gold.phase === "fix") {
+    saveGoldAnswer("reject");
+    return;
+  }
+  state.gold.phase = "fix";
+  renderGold();
+}
+function skipGoldItem() {
+  const item = currentGoldItem();
+  if (!item || state.saving) return;
+  if (item.status === "pending") state.gold.skipped.add(item.suggestionId);
+  showStatus("Skipped for this session");
+  showGoldItem(nextGoldPosition(state.gold.position));
+}
+function previousGoldItem() {
+  if (state.saving || state.gold.position <= 0) return;
+  showGoldItem(state.gold.position - 1);
+}
+/**
+ * Save one gold answer: OK binds the shown class as an acceptance, a fix binds
+ * the chosen class as a correction, and Not OK alone is a standalone rejection.
+ */
+async function saveGoldAnswer(review, fixLabel = null) {
+  const item = currentGoldItem();
+  if (!item || state.saving || !goldReady(item)) return;
+  const position = state.gold.position;
+  const previousStatus = item.status;
+  const post = (path, body) =>
+    api(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...body, clientRequestId: crypto.randomUUID() }),
+    });
+  state.saving = true;
+  renderUndoAction();
+  showStatus("Saving answer…");
+  try {
+    let action;
+    if (review === "reject") {
+      const response = await post("/api/model-reviews", {
+        pageId: item.pageId,
+        nodeId: item.nodeId,
+        modelSuggestionId: item.suggestionId,
+        review: "reject",
+        captureHash: item.captureHash,
+      });
+      action = { kind: "model_review", id: response.modelReview.id };
+    } else {
+      const label = review === "accept" ? item.label : fixLabel;
+      const binding = {
+        decision: "label",
+        captureHash: item.captureHash,
+        modelSuggestionId: item.suggestionId,
+        modelReview: review,
+      };
+      if (item.nodeId) {
+        const response = await post("/api/annotations", {
+          ...binding,
+          pageId: item.pageId,
+          nodeId: item.nodeId,
+          sectionPurposesV3: [label],
+          boundary: "correct",
+        });
+        action = { kind: "annotation", id: response.annotation.id };
+      } else {
+        const response = await post("/api/page-annotations", {
+          ...binding,
+          pageId: item.pageId,
+          pageTypesV8: [label],
+        });
+        action = { kind: "page_annotation", id: response.annotation.id };
+      }
+    }
+    item.status = review === "accept" ? "accepted" : review === "correct" ? "corrected" : "rejected";
+    state.gold.undo.push({ position, item, previousStatus, action });
+    state.gold.skipped.delete(item.suggestionId);
+    showStatus(
+      review === "accept" ? "Saved OK" : review === "correct" ? "Saved fix" : "Saved Not OK",
+      "success",
+    );
+    refreshStats();
+  } catch {
+    showStatus("Couldn’t save this answer. Check the connection and try again.", "error");
+    state.saving = false;
+    renderUndoAction();
+    return;
+  }
+  state.saving = false;
+  renderUndoAction();
+  showGoldItem(nextGoldPosition(position));
+}
+async function undoGoldAnswer() {
+  if (state.saving || !state.gold.undo.length) return;
+  const last = state.gold.undo.pop();
+  state.saving = true;
+  renderUndoAction();
+  showStatus("Undoing last answer…");
+  try {
+    await api("/api/review-actions/undo", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pageId: last.item.pageId,
+        nodeId: last.item.nodeId,
+        captureHash: last.item.captureHash,
+        action: last.action,
+      }),
+    });
+    last.item.status = last.previousStatus;
+    state.gold.skipped.delete(last.item.suggestionId);
+    showStatus("Last answer undone", "success");
+    refreshStats();
+  } catch {
+    state.gold.undo.push(last);
+    showStatus("Couldn’t undo the last answer. Try again.", "error");
+    state.saving = false;
+    renderUndoAction();
+    return;
+  }
+  state.saving = false;
+  renderUndoAction();
+  showGoldItem(last.position);
+}
+/** Manual page browsing leaves gold review unless the page has a gold question. */
+function browsePage(index) {
+  if (state.labelMode === "gold") {
+    const page = state.pages[index];
+    const position = state.gold.items.findIndex((item) => item.pageId === page?.id);
+    if (position >= 0) {
+      showGoldItem(position);
+      return;
+    }
+    setLabelMode("element");
+  }
+  loadPage(index);
+}
+/** Gold-mode keys; returns true when the key was handled here. */
+function handleGoldKey(event) {
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
+    if (isEditingTarget(event.target)) return false;
+    event.preventDefault();
+    undoGoldAnswer();
+    return true;
+  }
+  if (isEditingTarget(event.target) || event.metaKey || event.ctrlKey || event.altKey) return false;
+  const key = event.key.toLowerCase();
+  if (key === "enter") {
+    if (event.target?.closest?.("button, a, [role='button']")) return false;
+    event.preventDefault();
+    if (state.gold.phase === "question") saveGoldAnswer("accept");
+    return true;
+  }
+  if (key === "x") {
+    event.preventDefault();
+    goldNotOk();
+    return true;
+  }
+  if (key === "j") {
+    event.preventDefault();
+    skipGoldItem();
+    return true;
+  }
+  if (key === "k") {
+    event.preventDefault();
+    previousGoldItem();
+    return true;
+  }
+  if (key === "escape") {
+    event.preventDefault();
+    if (state.gold.phase === "fix") {
+      state.gold.phase = "question";
+      renderGold();
+    }
+    return true;
+  }
+  if (key === "[" || key === "]") {
+    event.preventDefault();
+    browsePage(state.currentPageIndex + (key === "]" ? 1 : -1));
+    return true;
+  }
+  if (/^[1-9]$/.test(key) && state.gold.phase === "fix") {
+    event.preventDefault();
+    const item = currentGoldItem();
+    const label = item && goldFixOptions(item).ordered[Number(key) - 1];
+    if (label) saveGoldAnswer("correct", label);
+    return true;
+  }
+  if (key === "?" || (event.shiftKey && key === "/")) {
+    event.preventDefault();
+    $("shortcuts-dialog").showModal();
+    return true;
+  }
+  return false;
+}
 async function bootstrap() {
   installListeners();
   renderUndoAction();
@@ -2675,6 +3142,8 @@ async function bootstrap() {
     );
     renderQueue();
     refreshStats();
+    state.gold.catalogue = data.gold || null;
+    if (await loadGoldQueue()) return;
     if (state.pages.length) loadPage(0);
     else {
       $("empty-canvas").textContent = "No captured pages are ready for review.";

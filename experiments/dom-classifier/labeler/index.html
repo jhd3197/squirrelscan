@@ -323,9 +323,58 @@
           >
             Element</button
           ><button id="page-tab" class="label-tab" type="button" role="tab" aria-selected="false">
-            Page
+            Page</button
+          ><button
+            id="gold-tab"
+            class="label-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            hidden
+          >
+            Gold
           </button>
         </div>
+        <section id="gold-pane" hidden aria-labelledby="gold-heading">
+          <div class="suggestion-section model-suggestion gold-card" id="gold-card">
+            <div class="section-title-row">
+              <h2 id="gold-heading">Gold review</h2>
+              <span class="muted" id="gold-progress"></span>
+            </div>
+            <p class="gold-kind" id="gold-kind">Page type</p>
+            <p class="model-review-question gold-question" id="gold-question">
+              Loading gold questions…
+            </p>
+            <p class="gold-definition" id="gold-definition"></p>
+            <p class="gold-rule" id="gold-rule" hidden></p>
+            <div class="fast-review-actions" id="gold-actions">
+              <button id="gold-not-ok" type="button">Not OK <kbd>X</kbd></button
+              ><button id="gold-skip" type="button">Skip <kbd>J</kbd></button
+              ><button id="gold-ok" type="button">OK <kbd>Enter</kbd></button>
+            </div>
+            <div class="gold-fix" id="gold-fix" hidden>
+              <p class="gold-fix-heading" id="gold-fix-heading">What is it instead?</p>
+              <div class="gold-options" id="gold-alternatives"></div>
+              <p class="gold-fix-more">Other classes</p>
+              <div class="gold-options gold-options-more" id="gold-more"></div>
+              <p class="gold-fix-hint">
+                <kbd>X</kbd> again saves Not OK without a fix · <kbd>Esc</kbd> goes back
+              </p>
+            </div>
+            <p class="model-review-context" id="gold-status"></p>
+            <div class="gold-done" id="gold-done" hidden>
+              <p id="gold-done-copy">Every gold question has an answer.</p>
+              <button class="quiet-action" id="gold-review-skipped" type="button" hidden>
+                Review skipped questions
+              </button>
+            </div>
+          </div>
+          <p class="gold-note">
+            One question per item. OK saves the shown class as your answer, Not OK records a
+            rejection and offers one-click fixes. Partial sessions are fine: the queue is
+            interleaved, so any prefix is a balanced sample.
+          </p>
+        </section>
         <div id="element-pane">
           <section
             class="suggestion-section model-suggestion swipe-review-card"
@@ -716,6 +765,10 @@
         <div>
           <dt><kbd>J</kbd></dt>
           <dd>Skip the current model target for this session</dd>
+        </div>
+        <div>
+          <dt><kbd>1</kbd>–<kbd>9</kbd></dt>
+          <dd>Gold review, after Not OK: pick the class it is instead</dd>
         </div>
         <div>
           <dt><kbd>K</kbd></dt>

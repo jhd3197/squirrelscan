@@ -17,9 +17,11 @@ import {
   OBSERVED_STATES,
   CONTENT_KINDS,
   PAGE_TYPES,
+  PAGE_TYPES_V8,
   PURPOSES,
   REGIONS,
   ROLES,
+  SECTION_PURPOSES_V3,
   STATEFUL_COMPONENT_TYPES,
   TAXONOMY_REVISION,
   COHORT_ID_PATTERN,
@@ -31,6 +33,8 @@ import {
   type ContentKind,
   type ComponentType,
   type FunctionLabel,
+  type GoldAxis,
+  type GoldQueueItem,
   type ModelReview,
   type ModelReviewInput,
   type ModelReviewRecord,
@@ -41,10 +45,12 @@ import {
   type PageAnnotation,
   type PageAnnotationInput,
   type PageType,
+  type PageTypeV8,
   type Region,
   type Role,
   type ReviewActionKind,
   type ReviewUndoRecord,
+  type SectionPurposeV3,
 } from "./types.ts";
 
 const annotationFile = "annotations.jsonl";
@@ -461,6 +467,84 @@ export class LabelStore {
     });
   }
 
+  /** Captures are immutable, so a page's node ids are read once per process. */
+  private readonly goldTargets = new Map<string, { captureHash: string; nodeIds: Set<string> }>();
+
+  /**
+   * Gold questions in review order: sidecar order, primary first, then each
+   * cohort in mount order. Status is the latest effective human action bound
+   * to the suggestion, so an undone answer reads as pending again.
+   */
+  goldQueue(): GoldQueueItem[] {
+    const decided = new Map<
+      string,
+      { status: GoldQueueItem["status"]; timestamp: number; order: number }
+    >();
+    let order = 0;
+    const consider = (suggestionId: string | null, review: ModelReview | null, timestamp: string) => {
+      order += 1;
+      if (!suggestionId || !review) return;
+      const status =
+        review === "accept" ? "accepted" : review === "correct" ? "corrected" : "rejected";
+      const candidate = { status, timestamp: Date.parse(timestamp) || 0, order } as const;
+      const existing = decided.get(suggestionId);
+      if (
+        !existing ||
+        candidate.timestamp > existing.timestamp ||
+        (candidate.timestamp === existing.timestamp && candidate.order > existing.order)
+      )
+        decided.set(suggestionId, candidate);
+    };
+    for (const annotation of this.effectiveAnnotations())
+      consider(annotation.modelSuggestionId, annotation.modelReview, annotation.timestamp);
+    for (const annotation of this.effectivePageAnnotations())
+      consider(annotation.modelSuggestionId, annotation.modelReview, annotation.timestamp);
+    for (const review of this.effectiveModelReviews())
+      consider(review.modelSuggestionId, review.review, review.timestamp);
+
+    const items: GoldQueueItem[] = [];
+    const seen = new Set<string>();
+    for (const suggestion of this.readModelSuggestions()) {
+      const axis = goldAxisOf(suggestion.mappedLabels);
+      if (!axis || seen.has(suggestion.id)) continue;
+      const target = this.goldTarget(suggestion.pageId);
+      if (
+        !target ||
+        target.captureHash !== suggestion.captureHash ||
+        (suggestion.nodeId !== null && !target.nodeIds.has(suggestion.nodeId))
+      )
+        continue;
+      seen.add(suggestion.id);
+      items.push({
+        suggestionId: suggestion.id,
+        pageId: suggestion.pageId,
+        nodeId: suggestion.nodeId,
+        captureHash: suggestion.captureHash,
+        cohortId: this.cohortIdForPage(suggestion.pageId),
+        axis,
+        label: suggestion.mappedLabels[axis]![0]!,
+        alternatives: [...(suggestion.alternatives?.[axis] ?? [])],
+        status: decided.get(suggestion.id)?.status ?? "pending",
+      });
+    }
+    return items;
+  }
+
+  private goldTarget(pageId: string) {
+    if (!this.goldTargets.has(pageId)) {
+      try {
+        const page = this.readPage(pageId);
+        this.goldTargets.set(pageId, {
+          captureHash: page.captureHash,
+          nodeIds: new Set(page.nodes.map((node) => node.id)),
+        });
+      } catch {
+        return null;
+      }
+    }
+    return this.goldTargets.get(pageId)!;
+  }
+
   modelReviewsForPage(pageId: string) {
     const page = this.readPage(pageId);
     return this.effectiveModelReviews().filter(
@@ -690,10 +774,12 @@ export class LabelStore {
       throw new StoreError(409, "Capture is stale; reload the page");
     const labels = labelsForInput(input);
     const component = componentForInput(input);
+    const sectionPurposesV3 = goldAxis(input.sectionPurposesV3, SECTION_PURPOSES_V3, "sectionPurposesV3");
     if (
       input.decision === "label" &&
       labels.regions.length + labels.functions.length + component.purposes.length === 0 &&
-      !component.componentType
+      !component.componentType &&
+      sectionPurposesV3.length === 0
     )
       throw new StoreError(
         400,
@@ -731,12 +817,19 @@ export class LabelStore {
         labels.functions.length ||
         component.componentType ||
         component.purposes.length ||
-        component.observedState.length)
+        component.observedState.length ||
+        sectionPurposesV3.length)
     )
       throw new StoreError(400, "Unsure decisions cannot carry labels or context");
     const persistedRole =
       input.decision === "accept" ? (input.role ?? node.suggestion!.role) : (input.role ?? null);
-    const modelReview = this.modelReviewForNode(input, page.captureHash, labels, component);
+    const modelReview = this.modelReviewForNode(
+      input,
+      page.captureHash,
+      labels,
+      component,
+      sectionPurposesV3,
+    );
     this.ensureDirectories();
     this.acquireLock();
     try {
@@ -752,6 +845,7 @@ export class LabelStore {
             persistedRole,
             component,
             modelReview,
+            sectionPurposesV3,
           )
         )
           throw new StoreError(409, "clientRequestId was already used for a different annotation");
@@ -790,6 +884,8 @@ export class LabelStore {
         componentSubtype: component.componentSubtype,
         observedState: component.observedState,
         purposes: component.purposes,
+        // Written only when present, so rows without the gold axis are unchanged.
+        ...(sectionPurposesV3.length ? { sectionPurposesV3 } : {}),
         componentSchemaVersion: component.hasV3Data ? 3 : 0,
         componentProjection: null,
         purposeProjection: null,
@@ -827,10 +923,23 @@ export class LabelStore {
       input.contentKinds === undefined
         ? []
         : checkedAxis(input.contentKinds, CONTENT_KINDS, "contentKinds");
-    const modelReview = this.modelReviewForPage(input, page.captureHash, pageTypes, contentKinds);
-    if (input.decision === "label" && pageTypes.length + contentKinds.length === 0)
+    const pageTypesV8 = goldAxis(input.pageTypesV8, PAGE_TYPES_V8, "pageTypesV8");
+    const modelReview = this.modelReviewForPage(
+      input,
+      page.captureHash,
+      pageTypes,
+      contentKinds,
+      pageTypesV8,
+    );
+    if (
+      input.decision === "label" &&
+      pageTypes.length + contentKinds.length + pageTypesV8.length === 0
+    )
       throw new StoreError(400, "Page labels need a page type or content kind");
-    if (input.decision === "unsure" && (pageTypes.length || contentKinds.length))
+    if (
+      input.decision === "unsure" &&
+      (pageTypes.length || contentKinds.length || pageTypesV8.length)
+    )
       throw new StoreError(400, "Unsure page decisions cannot carry labels");
     this.ensureDirectories();
     this.acquireLock();
@@ -846,6 +955,7 @@ export class LabelStore {
             pageTypes,
             contentKinds,
             modelReview,
+            pageTypesV8,
           )
         )
           throw new StoreError(
@@ -871,6 +981,8 @@ export class LabelStore {
         decision: input.decision,
         pageTypes,
         contentKinds,
+        // Written only when present, so rows without the gold axis are unchanged.
+        ...(pageTypesV8.length ? { pageTypesV8 } : {}),
         comment: input.comment ?? null,
         clientRequestId: input.clientRequestId,
         captureHash: page.captureHash,
@@ -956,6 +1068,7 @@ export class LabelStore {
     captureHash: string,
     labels: { regions: Region[]; functions: FunctionLabel[] },
     component: ReturnType<typeof componentForInput>,
+    sectionPurposesV3: SectionPurposeV3[],
   ) {
     const review = this.resolveModelReview(input, captureHash, input.nodeId);
     if (review?.review === "accept") {
@@ -964,7 +1077,8 @@ export class LabelStore {
         mapped.regions?.length ||
         mapped.functions?.length ||
         mapped.purposes?.length ||
-        mapped.componentType,
+        mapped.componentType ||
+        mapped.sectionPurposeV3?.length,
       );
       if (!hasMappedAxis)
         throw new StoreError(400, "Model suggestion has no applicable mapped labels");
@@ -972,7 +1086,8 @@ export class LabelStore {
         !includesAll(labels.regions, mapped.regions ?? []) ||
         !includesAll(labels.functions, mapped.functions ?? []) ||
         !includesAll(component.purposes, mapped.purposes ?? []) ||
-        (mapped.componentType !== undefined && component.componentType !== mapped.componentType)
+        (mapped.componentType !== undefined && component.componentType !== mapped.componentType) ||
+        !includesAll(sectionPurposesV3, mapped.sectionPurposeV3 ?? [])
       )
         throw new StoreError(400, "Accept must include this model suggestion's mapped labels");
     }
@@ -984,16 +1099,20 @@ export class LabelStore {
     captureHash: string,
     pageTypes: PageType[],
     contentKinds: ContentKind[],
+    pageTypesV8: PageTypeV8[],
   ) {
     const review = this.resolveModelReview(input, captureHash, null);
     if (review?.review === "accept") {
       const mapped = review.suggestion.mappedLabels;
-      const hasMappedAxis = Boolean(mapped.pageTypes?.length || mapped.contentKinds?.length);
+      const hasMappedAxis = Boolean(
+        mapped.pageTypes?.length || mapped.contentKinds?.length || mapped.pageTypeV8?.length,
+      );
       if (!hasMappedAxis)
         throw new StoreError(400, "Model suggestion has no applicable mapped labels");
       if (
         !includesAll(pageTypes, mapped.pageTypes ?? []) ||
-        !includesAll(contentKinds, mapped.contentKinds ?? [])
+        !includesAll(contentKinds, mapped.contentKinds ?? []) ||
+        !includesAll(pageTypesV8, mapped.pageTypeV8 ?? [])
       )
         throw new StoreError(400, "Accept must include this model suggestion's mapped labels");
     }
@@ -1050,10 +1169,12 @@ function sameAnnotationRequest(
   persistedRole: Role | null,
   component: ReturnType<typeof componentForInput>,
   modelReview: { id: string; review: ModelReview } | null,
+  sectionPurposesV3: SectionPurposeV3[],
 ) {
   return (
     annotation.pageId === input.pageId &&
     annotation.nodeId === input.nodeId &&
+    sameLabels(annotation.sectionPurposesV3 ?? [], sectionPurposesV3) &&
     annotation.decision === input.decision &&
     annotation.role === persistedRole &&
     annotation.context === (input.context ?? null) &&
@@ -1107,10 +1228,12 @@ function samePageAnnotationRequest(
   pageTypes: PageType[],
   contentKinds: ContentKind[],
   modelReview: { id: string; review: ModelReview } | null,
+  pageTypesV8: PageTypeV8[],
 ) {
   return (
     annotation.pageId === input.pageId &&
     annotation.decision === input.decision &&
+    sameLabels(annotation.pageTypesV8 ?? [], pageTypesV8) &&
     sameLabels(annotation.pageTypes, pageTypes) &&
     sameLabels(annotation.contentKinds, contentKinds) &&
     annotation.comment === (input.comment ?? null) &&
@@ -1260,6 +1383,14 @@ function checkedAxis<T extends string>(value: unknown, allowed: readonly T[], na
   return labels;
 }
 
+/** A gold answer is one class: absent means no gold claim, never a negative. */
+function goldAxis<T extends string>(value: unknown, allowed: readonly T[], name: string): T[] {
+  if (value === undefined) return [];
+  const labels = checkedAxis(value, allowed, name);
+  if (labels.length > 1) throw new StoreError(400, `${name} takes one value`);
+  return labels;
+}
+
 function includesAll<T>(labels: T[], required: T[]) {
   return required.every((label) => labels.includes(label));
 }
@@ -1329,12 +1460,18 @@ function normalizeStoredAnnotation(value: unknown): Annotation | null {
           purposes: [] as Purpose[],
           hasV3Data: false,
         };
+    const sectionPurposesV3 = goldAxis(
+      annotation.sectionPurposesV3,
+      SECTION_PURPOSES_V3,
+      "sectionPurposesV3",
+    );
     return {
       ...annotation,
       role,
       context,
       regions: labels.regions,
       functions: labels.functions,
+      ...(sectionPurposesV3.length ? { sectionPurposesV3 } : {}),
       labelSchemaVersion: hasV2Axes ? 2 : 1,
       componentType: component.componentType,
       componentSubtype: component.componentSubtype,
@@ -1375,10 +1512,12 @@ function normalizePageAnnotation(value: unknown): PageAnnotation | null {
   )
     return null;
   try {
+    const pageTypesV8 = goldAxis(annotation.pageTypesV8, PAGE_TYPES_V8, "pageTypesV8");
     return {
       ...annotation,
       pageTypes: checkedAxis(annotation.pageTypes, PAGE_TYPES, "pageTypes"),
       contentKinds: checkedAxis(annotation.contentKinds, CONTENT_KINDS, "contentKinds"),
+      ...(pageTypesV8.length ? { pageTypesV8 } : {}),
       modelSuggestionId:
         typeof annotation.modelSuggestionId === "string" ? annotation.modelSuggestionId : null,
       modelReview:
@@ -1481,6 +1620,7 @@ function normalizeModelSuggestion(value: unknown): ModelSuggestion | null {
     return null;
   try {
     const mappedLabels = normalizeMappedLabels(row.mappedLabels);
+    const alternatives = normalizeAlternatives(row.alternatives, mappedLabels, row.nodeId);
     const axisProbabilities = normalizeAxisProbabilities(row.axisProbabilities);
     const componentTypeChoice = normalizeComponentTypeChoice(row.componentTypeChoice);
     const usage = normalizeUsage(row.usage);
@@ -1502,6 +1642,7 @@ function normalizeModelSuggestion(value: unknown): ModelSuggestion | null {
       ...(usage === undefined ? {} : { usage }),
       provisional: row.provisional,
       mappedLabels,
+      ...(alternatives === undefined ? {} : { alternatives }),
       ...(axisProbabilities === undefined ? {} : { axisProbabilities }),
       ...(componentTypeChoice === undefined ? {} : { componentTypeChoice }),
       createdAt: row.createdAt,
@@ -1523,10 +1664,18 @@ function normalizeMappedLabels(value: ModelSuggestion["mappedLabels"]) {
           "componentType",
           "pageTypes",
           "contentKinds",
+          "pageTypeV8",
+          "sectionPurposeV3",
         ].includes(key),
     )
   )
     throw new StoreError(400, "Invalid model mappedLabels");
+  const pageTypeV8 = goldAxis(labels.pageTypeV8, PAGE_TYPES_V8, "model pageTypeV8");
+  const sectionPurposeV3 = goldAxis(
+    labels.sectionPurposeV3,
+    SECTION_PURPOSES_V3,
+    "model sectionPurposeV3",
+  );
   const componentType = labels.componentType;
   if (
     componentType !== undefined &&
@@ -1550,7 +1699,44 @@ function normalizeMappedLabels(value: ModelSuggestion["mappedLabels"]) {
     ...(labels.contentKinds === undefined
       ? {}
       : { contentKinds: checkedAxis(labels.contentKinds, CONTENT_KINDS, "model contentKinds") }),
+    ...(pageTypeV8.length ? { pageTypeV8 } : {}),
+    ...(sectionPurposeV3.length ? { sectionPurposeV3 } : {}),
   } as ModelSuggestion["mappedLabels"];
+}
+
+/**
+ * A gold question asks one axis about one target: page type about a page,
+ * section purpose about a node. Its alternatives are other values on that axis.
+ */
+function normalizeAlternatives(
+  value: unknown,
+  mapped: ModelSuggestion["mappedLabels"],
+  nodeId: string | null,
+): ModelSuggestion["alternatives"] | undefined {
+  const axis = goldAxisOf(mapped);
+  if (axis && Object.keys(mapped).length !== 1)
+    throw new StoreError(400, "A gold suggestion carries only its gold axis");
+  if (axis === "pageTypeV8" && nodeId !== null)
+    throw new StoreError(400, "Page type v8 is asked about a page");
+  if (axis === "sectionPurposeV3" && nodeId === null)
+    throw new StoreError(400, "Section purpose v3 is asked about a node");
+  if (value === undefined) return undefined;
+  if (!axis || !value || typeof value !== "object" || Array.isArray(value))
+    throw new StoreError(400, "Invalid model alternatives");
+  const entries = value as Record<string, unknown>;
+  if (Object.keys(entries).some((key) => key !== axis))
+    throw new StoreError(400, "Alternatives must use the suggestion's gold axis");
+  const allowed = axis === "pageTypeV8" ? PAGE_TYPES_V8 : SECTION_PURPOSES_V3;
+  const labels = checkedAxis(entries[axis] ?? [], allowed as readonly string[], "alternatives");
+  if (labels.some((label) => (mapped[axis] as string[]).includes(label)))
+    throw new StoreError(400, "Alternatives cannot repeat the suggestion");
+  return { [axis]: labels } as ModelSuggestion["alternatives"];
+}
+
+function goldAxisOf(mapped: ModelSuggestion["mappedLabels"]): GoldAxis | null {
+  if (mapped.pageTypeV8?.length) return "pageTypeV8";
+  if (mapped.sectionPurposeV3?.length) return "sectionPurposeV3";
+  return null;
 }
 
 function normalizeAxisProbabilities(

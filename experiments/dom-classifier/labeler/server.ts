@@ -11,11 +11,17 @@ import {
   FUNCTIONS,
   OBSERVED_STATES,
   CONTENT_KINDS,
+  GOLD_POLICY_REVISIONS,
   PAGE_TYPES,
+  PAGE_TYPES_V8,
   PAGE_TYPE_GROUPS,
+  PAGE_TYPE_V8_QUESTIONS,
   PURPOSES,
   REGIONS,
   ROLES,
+  SECTION_PURPOSES_V3,
+  SECTION_PURPOSE_V3_QUESTIONS,
+  SECTION_V3_GRANULARITY,
   STATEFUL_COMPONENT_TYPES,
   TAXONOMY_REVISION,
   type AnnotationInput,
@@ -98,8 +104,16 @@ export async function handleRequest(
           pageTypes: PAGE_TYPES,
           pageTypeGroups: PAGE_TYPE_GROUPS,
           contentKinds: CONTENT_KINDS,
+          gold: {
+            policyRevisions: GOLD_POLICY_REVISIONS,
+            pageTypeV8: PAGE_TYPE_V8_QUESTIONS,
+            sectionPurposeV3: SECTION_PURPOSE_V3_QUESTIONS,
+            sectionGranularity: SECTION_V3_GRANULARITY,
+          },
         }),
       );
+    if (request.method === "GET" && url.pathname === "/api/gold-queue")
+      return withCsrf(request, json({ items: store.goldQueue() }));
     if (request.method === "GET" && url.pathname.startsWith("/api/pages/")) {
       const id = decodeURIComponent(url.pathname.slice("/api/pages/".length));
       const page = store.readPage(id);
@@ -260,6 +274,7 @@ function validateAnnotation(value: unknown): AnnotationInput {
     "componentSubtype",
     "observedState",
     "purposes",
+    "sectionPurposesV3",
     "comment",
     "boundary",
     "clientRequestId",
@@ -329,6 +344,9 @@ function validateAnnotation(value: unknown): AnnotationInput {
       throw new HttpError(400, "observedState is not applicable to componentType");
   }
   const purposes = array("purposes", PURPOSES);
+  const sectionPurposesV3 = array("sectionPurposesV3", SECTION_PURPOSES_V3);
+  if ((sectionPurposesV3?.length ?? 0) > 1)
+    throw new HttpError(400, "sectionPurposesV3 takes one value");
   const comment = string("comment", /^[\s\S]*$/, false, 800);
   const clientRequestId = string("clientRequestId", /^[A-Za-z0-9_-]{8,128}$/, true, 128)!;
   const captureHash = string("captureHash", /^sha256:[a-f0-9]{64}$/, false, 71);
@@ -340,7 +358,7 @@ function validateAnnotation(value: unknown): AnnotationInput {
   if (
     decision === "label" &&
     !role &&
-    !(regions?.length || functions?.length || purposes?.length) &&
+    !(regions?.length || functions?.length || purposes?.length || sectionPurposesV3?.length) &&
     !componentType
   )
     throw new HttpError(400, "label decisions need a region, function, purpose, or component type");
@@ -355,7 +373,8 @@ function validateAnnotation(value: unknown): AnnotationInput {
       componentType ||
       componentSubtype ||
       observedState?.length ||
-      purposes?.length)
+      purposes?.length ||
+      sectionPurposesV3?.length)
   )
     throw new HttpError(400, "unsure decisions cannot carry labels or context");
   return {
@@ -370,6 +389,7 @@ function validateAnnotation(value: unknown): AnnotationInput {
     componentSubtype,
     observedState: observedState as AnnotationInput["observedState"],
     purposes: purposes as AnnotationInput["purposes"],
+    sectionPurposesV3: sectionPurposesV3 as AnnotationInput["sectionPurposesV3"],
     comment,
     boundary: boundary as AnnotationInput["boundary"],
     clientRequestId,
@@ -461,7 +481,12 @@ function validateReviewUndo(value: unknown): {
     action.kind === "annotation" ? "ann_" : action.kind === "page_annotation" ? "pann_" : "mrev_";
   if (!action.id.startsWith(expectedPrefix))
     throw new HttpError(400, "Undo action kind does not match id");
-  if ((action.kind === "page_annotation") !== (input.nodeId === null))
+  // A page label never has a node and a node label always does; a model
+  // rejection can target either, since page-level suggestions are reviewable.
+  if (
+    (action.kind === "page_annotation" && input.nodeId !== null) ||
+    (action.kind === "annotation" && input.nodeId === null)
+  )
     throw new HttpError(400, "Undo action target does not match nodeId");
   return {
     pageId: input.pageId,
@@ -481,6 +506,7 @@ function validatePageAnnotation(value: unknown): PageAnnotationInput {
     "decision",
     "pageTypes",
     "contentKinds",
+    "pageTypesV8",
     "comment",
     "clientRequestId",
     "captureHash",
@@ -515,6 +541,8 @@ function validatePageAnnotation(value: unknown): PageAnnotationInput {
   const decision = string("decision", /^(label|unsure)$/, true, 10)!;
   const pageTypes = array("pageTypes", PAGE_TYPES);
   const contentKinds = array("contentKinds", CONTENT_KINDS);
+  const pageTypesV8 = array("pageTypesV8", PAGE_TYPES_V8);
+  if ((pageTypesV8?.length ?? 0) > 1) throw new HttpError(400, "pageTypesV8 takes one value");
   const comment = string("comment", /^[\s\S]*$/, false, 800);
   const clientRequestId = string("clientRequestId", /^[A-Za-z0-9_-]{8,128}$/, true, 128)!;
   const captureHash = string("captureHash", /^sha256:[a-f0-9]{64}$/, false, 71);
@@ -523,15 +551,16 @@ function validatePageAnnotation(value: unknown): PageAnnotationInput {
   const modelReview = string("modelReview", /^(accept|correct|reject)$/, false, 10);
   if ((modelSuggestionId === undefined) !== (modelReview === undefined))
     throw new HttpError(400, "modelSuggestionId and modelReview must be supplied together");
-  if (decision === "label" && !(pageTypes?.length || contentKinds?.length))
+  if (decision === "label" && !(pageTypes?.length || contentKinds?.length || pageTypesV8?.length))
     throw new HttpError(400, "Page labels need a page type or content kind");
-  if (decision === "unsure" && (pageTypes?.length || contentKinds?.length))
+  if (decision === "unsure" && (pageTypes?.length || contentKinds?.length || pageTypesV8?.length))
     throw new HttpError(400, "Unsure page decisions cannot carry labels");
   return {
     pageId,
     decision: decision as PageAnnotationInput["decision"],
     pageTypes: pageTypes as PageAnnotationInput["pageTypes"],
     contentKinds: contentKinds as PageAnnotationInput["contentKinds"],
+    pageTypesV8: pageTypesV8 as PageAnnotationInput["pageTypesV8"],
     comment,
     clientRequestId,
     captureHash,

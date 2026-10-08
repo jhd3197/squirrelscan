@@ -252,6 +252,50 @@ Run the focused checks with:
 bun test experiments/dom-classifier/labeler/server.test.ts
 ```
 
+## Gold review (page type v8, section purpose v3)
+
+Gold review asks the exact questions a trained head is scored on, one yes/no
+question per item: "Is this page an About page?" or "Is the outlined element a
+cookie consent banner?", with the policy one-liner for that class. These are
+two additive axes beside the descriptive v2 taxonomy: `pageTypesV8` (the 12
+page-type classes of `v2/labels/policy-v8.1.md`, rare classes folded into
+`other`) and `sectionPurposesV3` (`v2/labels/section-classes-v2.json` at
+`policy-section-v3.md` granularity, with the table of contents at its tightest
+node and `ad` meaning third-party only). Rows without these axes are byte-for-
+byte unchanged, and the fields are written only when present.
+
+A gold question is a sidecar row whose `mappedLabels` carries exactly one of
+`pageTypeV8` (a page, `nodeId: null`) or `sectionPurposeV3` (a node), with one
+value, plus optional `alternatives` on the same axis. `GET /api/gold-queue`
+returns the questions in sidecar order across the primary set and mounted
+cohorts, each with its latest effective status. When any is pending, the
+labeller opens the **Gold** tab:
+
+- `Enter` saves OK: the shown class as an `accept` on the gold axis.
+- `X` opens the one-click fixes (the suggestion's alternatives first, numbered
+  `1`–`9`, then every other class); a fix saves a `correct` with the chosen
+  class. `X` again saves a standalone Not OK rejection; `Esc` goes back.
+- `J` skips for this browser session, `K` goes back one question, and
+  `Cmd/Ctrl` + `Z` undoes the last answer with an append-only undo record.
+
+Answering an answered question again appends a newer answer; the latest
+effective action per suggestion id is the answer. Gold rows never appear on
+the element or page cards, and the card never names the annotator.
+
+## Historical replay captures
+
+`replay-capture.ts` renders STORED html rather than fetching the page, so a
+reviewer sees the bytes a model was given (`sourceKind: "historical_replay"`,
+`assetMode: "hybrid"`). The navigation to the original url is answered with the
+stored document; stylesheets, images, fonts and scripts load from their public
+hosts, while data requests, beacons, private-network hosts and any later
+top-level navigation are blocked. `scriptMode: "disabled"` replays under a
+`script-src 'none'` policy instead. Fixed elements are pinned where they were
+measured so the full-page screenshot and the node boxes agree. Elements a
+caller marked with `data-replay-target` are reported as located, hidden, or
+gone (a script replaced them). It is a library for a private, command-line
+builder; the review server never renders anything.
+
 ## Private corpus rendering
 
 A separate command-line-only queue may render up to 200 pre-reviewed public

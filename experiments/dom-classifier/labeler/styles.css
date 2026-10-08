@@ -1081,3 +1081,105 @@ dialog::backdrop {
   font-size: 0.82rem;
   line-height: 1.45;
 }
+.node-region.gold-target::after {
+  content: "Target " attr(data-node-tag);
+  position: absolute;
+  z-index: 3;
+  top: -23px;
+  left: -3px;
+  border-radius: 4px;
+  background: #08794f;
+  color: #fff;
+  padding: 3px 5px;
+  font:
+    800 12px/1 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+.gold-kind {
+  margin: 6px 0 0;
+  color: #64757d;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+.gold-question {
+  font-size: 16px;
+}
+.gold-definition,
+.gold-rule {
+  margin: 6px 0 0;
+  color: #35576b;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.gold-rule {
+  color: #6d5537;
+  font-size: 11px;
+}
+.gold-fix {
+  margin-top: 12px;
+}
+.gold-fix-heading {
+  margin: 0 0 7px;
+  color: #8c3434;
+  font-size: 13px;
+  font-weight: 800;
+}
+.gold-fix-more {
+  margin: 10px 0 5px;
+  color: #64757d;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+.gold-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.gold-options button {
+  border: 1px solid #b7d0df;
+  border-radius: 6px;
+  background: #fff;
+  color: #235a79;
+  padding: 7px 9px;
+  font-size: 12px;
+  font-weight: 760;
+}
+.gold-options button:hover {
+  background: #e4f1f8;
+}
+.gold-options-more button {
+  padding: 5px 7px;
+  font-size: 11px;
+  font-weight: 650;
+}
+.gold-fix-hint,
+.gold-note {
+  margin: 10px 0 0;
+  color: #6a7780;
+  font-size: 11px;
+}
+#gold-ok {
+  border: 1px solid var(--green);
+  background: var(--green);
+  color: #fff;
+}
+#gold-not-ok {
+  border: 1px solid #b66464;
+  background: #fff;
+  color: #8c3434;
+}
+#gold-skip {
+  border: 1px solid var(--line);
+  background: #fff;
+  color: #48575e;
+}
+.gold-done {
+  margin-top: 10px;
+  font-size: 12px;
+}

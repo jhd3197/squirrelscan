@@ -4,7 +4,7 @@ import type { CapturedNode, CapturedPage, Role } from "./types.ts";
 import { browserLaunchOptions, loadPlaywright } from "./browser-runtime.ts";
 import { LabelStore } from "./store.ts";
 
-const VIEWPORT = { width: 1440, height: 900, deviceScaleFactor: 1 } as const;
+export const VIEWPORT = { width: 1440, height: 900, deviceScaleFactor: 1 } as const;
 export const MAX_CAPTURE_HEIGHT = 12_000;
 export const MAX_LAZY_LOAD_STEPS = 20;
 export const MAX_CAPTURE_TIMEOUT_MS = 60_000;
@@ -24,18 +24,18 @@ export type CorpusCaptureTarget = {
   corpusRef?: string;
 };
 
-type RawNode = Omit<CapturedNode, "id" | "parentId" | "suggestion"> & { selector: string };
+export type RawNode = Omit<CapturedNode, "id" | "parentId" | "suggestion"> & { selector: string };
 type CaptureOptions = {
   maxHeight?: number;
   maxLazyLoadSteps?: number;
   timeoutMs?: number;
 };
 
-function digest(value: string | Uint8Array) {
+export function digest(value: string | Uint8Array) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function weakSuggestion(node: RawNode): CapturedNode["suggestion"] {
+export function weakSuggestion(node: RawNode): CapturedNode["suggestion"] {
   const tagRole: Record<string, Role> = {
     header: "site_header",
     footer: "footer",
@@ -70,7 +70,7 @@ function weakSuggestion(node: RawNode): CapturedNode["suggestion"] {
     : null;
 }
 
-function nodeId(selector: string) {
+export function nodeId(selector: string) {
   return `node_${digest(selector).slice(0, 24)}`;
 }
 
@@ -163,7 +163,7 @@ function normalizedPublicUrl(raw: string) {
   return url;
 }
 
-function isPrivateHostname(hostname: string) {
+export function isPrivateHostname(hostname: string) {
   const host = hostname
     .toLowerCase()
     .replace(/^\[|\]$/g, "")
