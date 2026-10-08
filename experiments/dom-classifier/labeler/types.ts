@@ -956,6 +956,8 @@ export type ModelSuggestion = {
  * is the latest effective human action bound to this suggestion.
  */
 export type GoldQueueItem = {
+  /** Short, stable id a reviewer can quote: `<cohort short>-<position>`, e.g. g1-234. */
+  itemId: string;
   suggestionId: string;
   pageId: string;
   nodeId: string | null;

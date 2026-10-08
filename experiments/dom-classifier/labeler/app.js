@@ -290,6 +290,8 @@ const state = {
     filter: "",
     // I on a section: the outline is ONE item of a section (a comment, a review, an FAQ question).
     itemMode: false,
+    // A one-off message on the card, e.g. an unknown deep link.
+    notice: "",
   },
 };
 const $ = (id) => document.getElementById(id);
@@ -2572,6 +2574,11 @@ function installListeners() {
   $("element-tab").addEventListener("click", () => setLabelMode("element"));
   $("page-tab").addEventListener("click", () => setLabelMode("page"));
   $("gold-tab").addEventListener("click", () => enterGoldMode());
+  // Pasting another #item id into the address bar jumps to it.
+  window.addEventListener("hashchange", () => {
+    const id = decodeURIComponent(location.hash.slice(1));
+    if (id && state.gold.items.length && currentGoldItem()?.itemId !== id) jumpToGoldItem(id);
+  });
   $("gold-ok").addEventListener("click", () => saveGoldAnswer("accept"));
   $("gold-not-ok").addEventListener("click", () => saveGoldAnswer("reject"));
   $("gold-suggest").addEventListener("click", () => openGoldPicker());
@@ -2751,20 +2758,44 @@ async function loadGoldQueue() {
     state.gold.items = [];
   }
   $("gold-tab").hidden = state.gold.items.length === 0;
+  // A deep link (#g1-234 or #msug_…) opens that question, answered or not.
+  const linked = location.hash.slice(1);
+  if (linked && state.gold.items.length) {
+    jumpToGoldItem(decodeURIComponent(linked));
+    return true;
+  }
   if (!state.gold.items.some((item) => item.status === "pending")) return false;
   enterGoldMode();
   return true;
 }
-function enterGoldMode() {
+/** Find a question by its short item id or its suggestion id. */
+function goldPositionOf(id) {
+  return state.gold.items.findIndex((item) => item.itemId === id || item.suggestionId === id);
+}
+function jumpToGoldItem(id) {
+  const position = goldPositionOf(id);
+  if (position < 0) {
+    showStatus(`No such item: ${id}`, "error");
+    enterGoldMode(null, `No such item: ${id}`);
+    return;
+  }
+  enterGoldMode(position);
+}
+function enterGoldMode(position = null, notice = "") {
   if (!state.gold.items.length) return;
   if (state.dirty || state.pageDirty) {
     showStatus("Finish or discard the current draft before gold review", "error");
     return;
   }
   setLabelMode("gold");
+  if (position !== null) {
+    showGoldItem(position);
+    return;
+  }
   const current = currentGoldItem();
   showGoldItem(
     current && current.status === "pending" ? state.gold.position : nextGoldPosition(-1),
+    notice,
   );
 }
 /** The next pending, unskipped question after `from`, wrapping once; -1 when none is left. */
@@ -2777,10 +2808,11 @@ function nextGoldPosition(from) {
   }
   return -1;
 }
-async function showGoldItem(position) {
+async function showGoldItem(position, notice = "") {
   state.gold.picking = false;
   state.gold.filter = "";
   state.gold.itemMode = false;
+  state.gold.notice = notice;
   if (position < 0) {
     state.gold.position = -1;
     renderGold();
@@ -2789,6 +2821,8 @@ async function showGoldItem(position) {
   }
   const item = state.gold.items[position];
   state.gold.position = position;
+  // The address bar always names the question on screen, so it can be shared or reopened.
+  if (location.hash !== `#${item.itemId}`) history.replaceState(null, "", `#${item.itemId}`);
   state.gold.focusedSuggestionId = null;
   state.gold.readyFor = null;
   renderGold();
@@ -2852,6 +2886,7 @@ function renderGold() {
   $("gold-keys").hidden = !item;
   if (!item) {
     $("gold-kind").textContent = "";
+    $("gold-item-id").textContent = "";
     $("gold-question").textContent = state.gold.skipped.size
       ? "Only skipped questions are left."
       : "Every gold question has an answer.";
@@ -2863,7 +2898,8 @@ function renderGold() {
     return;
   }
   const page = item.axis === "pageTypeV8";
-  $("gold-kind").textContent = `${page ? "Page type" : "Section"} · item ${state.gold.position + 1}`;
+  $("gold-kind").textContent = page ? "Page type" : "Section";
+  $("gold-item-id").textContent = item.itemId;
   const matches = picking ? goldMatches(item) : [];
   if (item.blind) {
     $("gold-question").textContent = page ? "What is this page?" : "What is the outlined element?";
@@ -2879,9 +2915,10 @@ function renderGold() {
   $("gold-rule").hidden = page;
   $("gold-rule").textContent = state.gold.catalogue?.sectionGranularity || "";
   $("gold-status").textContent =
-    item.status === "pending"
+    state.gold.notice ||
+    (item.status === "pending"
       ? ""
-      : `Saved: ${GOLD_STATUS_TEXT[item.status] || item.status}. A new answer replaces it.`;
+      : `Saved: ${GOLD_STATUS_TEXT[item.status] || item.status}. A new answer replaces it.`);
   const itemKey = page ? "" : "I individual item · ";
   $("gold-keys").textContent = picking
     ? `Type to filter · 1–9, 0 pick · Enter top match · ${itemKey}U unsure · ${item.blind && !state.gold.itemMode ? "" : "Esc back · "}J skip · K back · ⌘Z undo`

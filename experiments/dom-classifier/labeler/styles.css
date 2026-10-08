@@ -1192,6 +1192,20 @@ dialog::backdrop {
     Menlo,
     monospace;
 }
+.gold-item-id-row {
+  margin: 2px 0 0;
+  font-size: 11px;
+  text-align: right;
+}
+.gold-item-id {
+  user-select: all;
+  color: #235a79;
+  font:
+    700 11px ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+}
 .gold-filter.empty {
   color: #9aa7ab;
   font-weight: 500;

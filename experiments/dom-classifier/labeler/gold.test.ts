@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleRequest } from "./server.ts";
-import { LabelStore } from "./store.ts";
+import { LabelStore, shortCohortId } from "./store.ts";
 import {
   PAGE_TYPES_V8,
   PAGE_TYPE_V8_QUESTIONS,
@@ -185,6 +185,7 @@ describe("gold review axes", () => {
     const queue = await request(store, "/api/gold-queue");
     expect(queue.body.items).toEqual([
       {
+        itemId: "g1-0",
         suggestionId: first.id,
         pageId: goldPageId,
         nodeId: bannerNodeId,
@@ -197,6 +198,7 @@ describe("gold review axes", () => {
         status: "pending",
       },
       {
+        itemId: "g1-1",
         suggestionId: second.id,
         pageId: goldPageId,
         nodeId: null,
@@ -351,6 +353,24 @@ describe("gold review axes", () => {
       actionId: second.id,
     });
     expect(store.goldQueue()[0]!.status).toBe("accepted");
+  });
+
+  test("item ids are short, per cohort, and keep their place when a row is skipped", () => {
+    expect(shortCohortId("gold-v1")).toBe("g1");
+    expect(shortCohortId("gold-v1b")).toBe("g1b");
+    expect(shortCohortId("gold-cal-v1")).toBe("cal");
+    expect(shortCohortId("gold-cal-v2")).toBe("cal2");
+    expect(shortCohortId("review-v1")).toBe("review-v1");
+    const { store } = goldFixture([
+      pageQuestion(),
+      // A question whose capture is gone is skipped but still holds position 1.
+      suggestion({
+        pageId: "page_ffffffffffffffffffffffff",
+        mappedLabels: { pageTypeV8: ["about"] },
+      }),
+      sectionQuestion(),
+    ]);
+    expect(store.goldQueue().map((item) => item.itemId)).toEqual(["g1-0", "g1-2"]);
   });
 
   test("ignores malformed gold rows instead of guessing", () => {

@@ -194,6 +194,10 @@ describe.skipIf(browserSkipReason !== null)(
         expect(await page.locator(".queue-panel").isVisible()).toBe(false);
         expect(await page.locator("#gold-pane").textContent()).not.toContain("Jev");
 
+        // Every question has a short id on the card and in the address bar.
+        expect(await page.locator("#gold-item-id").textContent()).toBe("gold-ui-0");
+        expect(new URL(page.url()).hash).toBe("#gold-ui-0");
+
         // Y: yes, this class.
         let saved = posted("/api/page-annotations");
         await page.keyboard.press("y");
@@ -298,6 +302,45 @@ describe.skipIf(browserSkipReason !== null)(
         });
         expect(effective.some((row) => row.modelSuggestionId === ids.commentShown)).toBe(false);
         expect(errors).toEqual([]);
+      } finally {
+        await page.close();
+      }
+    }, 60_000);
+
+    test("a deep link opens that question, answered or not; an unknown id says so", async () => {
+      const page = await browser.newPage({ viewport: { width: 1260, height: 900 } });
+      const asked = (text: string) =>
+        page.waitForFunction(
+          (expected) => document.querySelector("#gold-question")?.textContent?.trim() === expected,
+          text,
+          { timeout: 10_000 },
+        );
+      try {
+        // Answered in the test above: it opens with its saved answer.
+        await page.goto(`${server.url}#gold-ui-0`);
+        await asked("Is this page an About page?");
+        expect(await page.locator("#gold-status").textContent()).toContain("Saved: yes");
+        // The long suggestion id works too, and moving updates the address bar.
+        await page.goto(`${server.url}#${ids.pricing}`);
+        await page.reload();
+        await asked("What is this page?");
+        expect(await page.locator("#gold-item-id").textContent()).toBe("gold-ui-2");
+        expect(new URL(page.url()).hash).toBe("#gold-ui-2");
+        // Pasting another id into the address bar jumps without a reload.
+        await page.evaluate(() => {
+          location.hash = "#gold-ui-1";
+        });
+        await asked("Is the outlined element a cookie consent banner?");
+        // An unknown id, opened fresh, says so and shows the next open question.
+        const fresh = await browser.newPage({ viewport: { width: 1260, height: 900 } });
+        try {
+          await fresh.goto(`${server.url}#nope-7`);
+          await fresh.waitForFunction(() =>
+            document.querySelector("#gold-status")?.textContent?.includes("No such item: nope-7"),
+          );
+        } finally {
+          await fresh.close();
+        }
       } finally {
         await page.close();
       }

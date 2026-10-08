@@ -447,24 +447,37 @@ export class LabelStore {
    * read-only here; the labeler never writes a suggestion.
    */
   readModelSuggestions(): ModelSuggestion[] {
-    const paths = [
-      this.modelSuggestionsPath,
-      ...this.cohorts.map((cohort) => join(cohort.dir, modelSuggestionFile)),
+    return this.readModelSuggestionsBySource().flatMap((source) => source.suggestions);
+  }
+
+  /** Each sidecar's rows with the cohort that owns the file, in mount order. */
+  private readModelSuggestionsBySource() {
+    const sources = [
+      { cohortId: PRIMARY_COHORT_ID as string, path: this.modelSuggestionsPath },
+      ...this.cohorts.map((cohort) => ({
+        cohortId: cohort.id,
+        path: join(cohort.dir, modelSuggestionFile),
+      })),
     ];
-    return paths.flatMap((path) => {
-      if (!existsSync(path)) return [];
-      return readFileSync(path, "utf8")
-        .split("\n")
-        .filter(Boolean)
-        .flatMap((line) => {
-          try {
-            const suggestion = normalizeModelSuggestion(JSON.parse(line));
-            return suggestion ? [suggestion] : [];
-          } catch {
-            return [];
-          }
-        });
-    });
+    return sources.map(({ cohortId, path }) => ({
+      cohortId,
+      suggestions: this.readSidecar(path),
+    }));
+  }
+
+  private readSidecar(path: string): ModelSuggestion[] {
+    if (!existsSync(path)) return [];
+    return readFileSync(path, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .flatMap((line) => {
+        try {
+          const suggestion = normalizeModelSuggestion(JSON.parse(line));
+          return suggestion ? [suggestion] : [];
+        } catch {
+          return [];
+        }
+      });
   }
 
   /** Captures are immutable, so a page's node ids are read once per process. */
@@ -525,30 +538,38 @@ export class LabelStore {
 
     const items: GoldQueueItem[] = [];
     const seen = new Set<string>();
-    for (const suggestion of this.readModelSuggestions()) {
-      const shown = goldAxisOf(suggestion.mappedLabels);
-      const axis = shown ?? suggestion.blindAxis ?? null;
-      if (!axis || seen.has(suggestion.id)) continue;
-      const target = this.goldTarget(suggestion.pageId);
-      if (
-        !target ||
-        target.captureHash !== suggestion.captureHash ||
-        (suggestion.nodeId !== null && !target.nodeIds.has(suggestion.nodeId))
-      )
-        continue;
-      seen.add(suggestion.id);
-      items.push({
-        suggestionId: suggestion.id,
-        pageId: suggestion.pageId,
-        nodeId: suggestion.nodeId,
-        captureHash: suggestion.captureHash,
-        cohortId: this.cohortIdForPage(suggestion.pageId),
-        axis,
-        label: shown ? suggestion.mappedLabels[shown]![0]! : null,
-        blind: !shown,
-        alternatives: shown ? [...(suggestion.alternatives?.[axis] ?? [])] : [],
-        status: decided.get(suggestion.id)?.status ?? "pending",
-      });
+    for (const { cohortId, suggestions } of this.readModelSuggestionsBySource()) {
+      // The item id is the question's place among its cohort's gold rows,
+      // counted before any is skipped, so it never moves.
+      let position = -1;
+      for (const suggestion of suggestions) {
+        const shown = goldAxisOf(suggestion.mappedLabels);
+        const axis = shown ?? suggestion.blindAxis ?? null;
+        if (!axis) continue;
+        position += 1;
+        if (seen.has(suggestion.id)) continue;
+        const target = this.goldTarget(suggestion.pageId);
+        if (
+          !target ||
+          target.captureHash !== suggestion.captureHash ||
+          (suggestion.nodeId !== null && !target.nodeIds.has(suggestion.nodeId))
+        )
+          continue;
+        seen.add(suggestion.id);
+        items.push({
+          itemId: `${shortCohortId(cohortId)}-${position}`,
+          suggestionId: suggestion.id,
+          pageId: suggestion.pageId,
+          nodeId: suggestion.nodeId,
+          captureHash: suggestion.captureHash,
+          cohortId: this.cohortIdForPage(suggestion.pageId),
+          axis,
+          label: shown ? suggestion.mappedLabels[shown]![0]! : null,
+          blind: !shown,
+          alternatives: shown ? [...(suggestion.alternatives?.[axis] ?? [])] : [],
+          status: decided.get(suggestion.id)?.status ?? "pending",
+        });
+      }
     }
     return items;
   }
@@ -1780,6 +1801,17 @@ function normalizeAlternatives(
   if (labels.some((label) => (mapped[axis] as string[]).includes(label)))
     throw new StoreError(400, "Alternatives cannot repeat the suggestion");
   return { [axis]: labels } as ModelSuggestion["alternatives"];
+}
+
+/**
+ * The short name a reviewer quotes: gold-v1 → g1, gold-v1b → g1b,
+ * gold-cal-v1 → cal (gold-cal-v2 → cal2); any other cohort keeps its id.
+ */
+export function shortCohortId(cohortId: string) {
+  const calibration = /^gold-cal-v(\d+)$/.exec(cohortId);
+  if (calibration) return calibration[1] === "1" ? "cal" : `cal${calibration[1]}`;
+  const gold = /^gold-v(\d+)([a-z]?)$/.exec(cohortId);
+  return gold ? `g${gold[1]}${gold[2]}` : cohortId;
 }
 
 /** A blind question names only its axis: no mapped label, no alternatives. */
