@@ -79,6 +79,7 @@ def pool(sample: Path, with_meta: bool, groups: Path | None = None):
 
 def run_region(args, out: Path) -> dict:
     import lightgbm as lgb
+
     from class_thresholds import non_declared_mask, sweep
     from sample import REGION_CLASSES
     from train_region import ABLATIONS, class_weights, layout, select
@@ -181,6 +182,7 @@ def run_region(args, out: Path) -> dict:
 
 def run_section(args, out: Path) -> dict:
     import lightgbm as lgb
+
     from train_section import label_transform, pick_thresholds
 
     cfg = json.loads(args.config)
@@ -198,6 +200,18 @@ def run_section(args, out: Path) -> dict:
         cfg.get("tightestClasses", "table_of_contents"),
         cfg.get("adMarkers", ""),
     )
+    # `trainLabels`: the old arm FITS on these labels (e.g. the shipped S9 mix of
+    # v2 and partial v3) while every arm is SCORED against `labels`, so a
+    # relabel can be measured against the head that shipped without it.
+    apply_old_fit = apply
+    if cfg.get("trainLabels"):
+        apply_old_fit, _ = label_transform(
+            all_classes,
+            cfg["trainLabels"],
+            cfg.get("tightestLabels", ""),
+            cfg.get("tightestClasses", "table_of_contents"),
+            cfg.get("adMarkers", ""),
+        )
     drop_rows: set = set()
     for path in cfg.get("dropRows", []):
         for line in Path(path).read_text().splitlines():
@@ -219,9 +233,9 @@ def run_section(args, out: Path) -> dict:
         "min_data_in_leaf": 10,
     }
 
-    def prepared(sample: Path, groups: Path | None):
+    def prepared(sample: Path, groups: Path | None, transform=apply):
         x, y, w, bucket, page, meta, split = pool(sample, True, groups)
-        y = remap[apply(y, meta)]
+        y = remap[transform(y, meta)]
         keep = np.asarray([(m["p"], m["n"]) not in drop_rows for m in meta])
         # Val contributes its Jev rows only, as in train_section.
         keep &= np.asarray([s == 0 or m["src"] == "jev" for m, s in zip(meta, split, strict=True)])
@@ -253,7 +267,7 @@ def run_section(args, out: Path) -> dict:
         if arm == "new":
             tx, ty, tw, tfold = ex, ey, ew, efold
         else:
-            tx, ty, tw, tb, _, _, _ = prepared(old_sample, old_groups(args))
+            tx, ty, tw, tb, _, _, _ = prepared(old_sample, old_groups(args), apply_old_fit)
             tfold = tb % args.folds
         pred = np.full(len(ey), -1, np.int8)
         conf = np.zeros(len(ey), np.float16)

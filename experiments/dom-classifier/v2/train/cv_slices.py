@@ -177,9 +177,20 @@ def strict_thresholds(
 def add_strict(head: str, arms: dict, y, classes, pages, tags, new_pages, slices: str) -> dict:
     masks = slice_masks(pages, tags, new_pages)
     constraints = {name: masks[name] for name in slices.split(",") if name in masks}
-    pred, conf, _ = arms["new"]
-    arms["new-strict"] = (pred, conf, strict_thresholds(head, classes, pred, conf, y, constraints))
-    return {"constraints": list(constraints), "thresholds": arms["new-strict"][2].tolist()}
+    out = {"constraints": list(constraints)}
+    # Every measured arm gets a strict variant, so a shipped head is compared
+    # with its own best safe thresholds, not only with the pooled ones.
+    for arm in [a for a in list(arms) if a in ("new", "s9")]:
+        pred, conf, _ = arms[arm]
+        arms[f"{arm}-strict"] = (
+            pred,
+            conf,
+            strict_thresholds(head, classes, pred, conf, y, constraints),
+        )
+        out["thresholds" if arm == "new" else f"thresholds:{arm}"] = arms[f"{arm}-strict"][
+            2
+        ].tolist()
+    return out
 
 
 def run_pagetype(args) -> dict:
@@ -241,8 +252,14 @@ def run_rows(args) -> dict:
     # its thresholds are re-picked on OLD pages only, by the head's own rule.
     # (cv_compare picks both arms' thresholds on the whole evaluation set.)
     old_rows = np.asarray([p not in new_pages for p in pages])
-    pred, conf, pooled = arms["old"]
-    arms["old"] = (pred, conf, pick_like_head(report, pred[old_rows], conf[old_rows], y[old_rows]))
+    pooled = arms["old"][2]
+    for arm in [a for a in arms if not a.startswith("new")]:
+        pred, conf, _ = arms[arm]
+        arms[arm] = (
+            pred,
+            conf,
+            pick_like_head(report, pred[old_rows], conf[old_rows], y[old_rows]),
+        )
     tags = load_tags(args)
     strict = add_strict(
         report["head"], arms, y, classes, pages, tags, new_pages, args.strict_slices
@@ -254,6 +271,7 @@ def run_rows(args) -> dict:
         "oldThresholdsOn": "old pages only",
         "strict": strict,
         "thresholds": {
+            **{arm: arms[arm][2].tolist() for arm in arms if arm not in ("old", "new")},
             "old": arms["old"][2].tolist(),
             "oldPooled": pooled.tolist(),
             "new": arms["new"][2].tolist(),
@@ -293,14 +311,18 @@ def fmt(cell: dict | None) -> str:
     return f"{p}/{cell['coverage']:.2f}"
 
 
+ARM_ORDER = ("s9", "s9-strict", "old", "new", "new-strict")
+
+
 def markdown(report: dict, slices: list[str], min_support: int) -> str:
-    """One table per slice: per class P@t/coverage for the old arm, the new arm
-    at its pooled thresholds and (when present) at the strict per-slice
-    thresholds, with coverage deltas against old. Precision under 0.95 is
+    """One table per slice: per class P@t/coverage for every arm present, in
+    ARM_ORDER (s9 = the shipped section config refit on its own labels, when
+    measured), with coverage deltas against `old`. Precision under 0.95 is
     marked `!`. Classes under --min-support rows in the slice are skipped."""
-    strict = "new-strict" in next(iter(report["slices"].values()))
-    out = [f"## {report['head']} (old vs old+new, OOF, each arm at its own thresholds)", ""]
-    if strict:
+    first = next(iter(report["slices"].values()))
+    arms = [a for a in ARM_ORDER if a in first]
+    out = [f"## {report['head']} (OOF, each arm at its own thresholds)", ""]
+    if "new-strict" in arms:
         out.append(
             f"new-strict: one threshold per class that holds P>=0.95 on each of "
             f"{', '.join(report['strict']['constraints'])} (slices with >=20 fires)"
@@ -317,31 +339,29 @@ def markdown(report: dict, slices: list[str], min_support: int) -> str:
         block = report["slices"].get(name)
         if not block:
             continue
-        arms = ["old", "new"] + (["new-strict"] if strict else [])
         overall = {arm: block[arm]["_overall"] for arm in arms}
         out.append(
-            f"### {name}: rows {overall['new']['rows']}; firing "
+            f"### {name}: rows {overall['old']['rows']}; firing "
             + " / ".join(f"{arm} {overall[arm]['firing']}" for arm in arms)
             + "; accuracy when firing "
             + " / ".join(f"{overall[arm]['accuracyWhenFiring']}" for arm in arms)
         )
         out.append("")
-        head = "| class | support | old P@t/cov | new P@t/cov | Δcov |"
-        rule = "|---|---|---|---|---|"
-        if strict:
-            head += " new-strict P@t/cov | Δcov |"
-            rule += "---|---|"
-        out += [head, rule]
+        head = "| class | support |"
+        for arm in arms:
+            head += f" {arm} P@t/cov |" + ("" if arm == "old" else " Δcov |")
+        out += [head, "|" + "---|" * (2 + len(arms) * 2 - 1)]
         for cls in report["classes"]:
             old = block["old"].get(cls)
             if not old or old["support"] < min_support or cls == "none":
                 continue
-            row = f"| {cls} | {old['support']} | {cell(old)} | {cell(block['new'][cls])} | "
-            delta = block.get("delta", {}).get(cls, {}).get("coverage")
-            row += f"{'' if delta is None else f'{delta:+.2f}'} |"
-            if strict:
-                d2 = block.get("delta:new-strict", {}).get(cls, {}).get("coverage")
-                row += f" {cell(block['new-strict'][cls])} | {'' if d2 is None else f'{d2:+.2f}'} |"
+            row = f"| {cls} | {old['support']} |"
+            for arm in arms:
+                row += f" {cell(block[arm][cls])} |"
+                if arm != "old":
+                    key = "delta" if arm == "new" else f"delta:{arm}"
+                    d = block.get(key, {}).get(cls, {}).get("coverage")
+                    row += f" {'' if d is None else f'{d:+.2f}'} |"
             out.append(row)
         out.append("")
     return "\n".join(out)
@@ -362,13 +382,15 @@ def usable(block: dict, arm: str, classes: list[str], min_support: int) -> tuple
 
 
 def summary(reports: list[dict], slices: list[str], min_support: int) -> str:
+    present = {a for r in reports for a in next(iter(r["slices"].values()))}
+    arms = [a for a in ARM_ORDER if a in present]
     out = [
         "Macro coverage at each arm's thresholds (classes with >= "
         f"{min_support} rows in the slice); in brackets: classes firing >= 20 times "
         "at precision < 0.95 on that slice.",
         "",
-        "| head | slice | old | new (pooled thr) | new-strict |",
-        "|---|---|---|---|---|",
+        "| head | slice | " + " | ".join(arms) + " |",
+        "|---|---|" + "---|" * len(arms),
     ]
     for report in reports:
         for name in slices:
@@ -376,7 +398,10 @@ def summary(reports: list[dict], slices: list[str], min_support: int) -> str:
             if not block:
                 continue
             cells = []
-            for arm in ("old", "new", "new-strict"):
+            for arm in arms:
+                if arm not in block:
+                    cells.append("–")
+                    continue
                 cov, below = usable(block, arm, report["classes"], min_support)
                 cells.append(f"{cov:.3f} [{below}]")
             out.append(f"| {report['head']} | {name} | " + " | ".join(cells) + " |")
