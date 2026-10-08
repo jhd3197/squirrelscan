@@ -37,6 +37,8 @@ from urllib.parse import urlparse
 
 import numpy as np
 
+from policy_rules import page_rules_v82
+
 PLATFORM_BUCKETS = ("shopify", "woocommerce", "wordpress", "wix", "squarespace", "webflow", "nextjs")
 PAGE_FOLD = {"event", "search_results", "local_business", "job_posting", "faq", "recipe"}
 
@@ -96,6 +98,22 @@ def flag(y, pred, conf, t):
     return (pred >= 0) & (pred != y) & (conf.astype(np.float64) >= tk)
 
 
+def confident_joint_full(y: np.ndarray, probs: np.ndarray):
+    """Exact confident joint from full OOF probabilities (Northcutt et al.).
+
+    t_j = mean p_j(x) over rows labelled j; a row's confident class is the most
+    probable class among those whose probability reaches their threshold; a row
+    is off-diagonal when that class exists and differs from its label. Returns
+    (flag, confident class or -1, thresholds)."""
+    k = probs.shape[1]
+    t = np.asarray([probs[y == j, j].mean() if (y == j).any() else np.inf for j in range(k)])
+    masked = np.where(probs >= t, probs, -1.0)
+    best = masked.argmax(1)
+    has = masked.max(1) >= 0
+    best = np.where(has, best, -1)
+    return has & (best != y), best, t
+
+
 def matrix(rows, classes):
     counts = Counter((r["given"], r["suggested"]) for r in rows)
     return {f"{a}->{b}": n for (a, b), n in counts.most_common()}
@@ -141,16 +159,28 @@ def load_pages(cc: Path):
     return meta
 
 
-def pagetype(cc: Path, pages: dict, out: Path):
-    report = json.loads((cc / "cv" / "pt-new" / "pagetype-jev-report.json").read_text())
-    classes = report["classes"]
+def pagetype(cc: Path, pages: dict, out: Path, pt_dir: Path, exact: bool):
+    """Page-type candidates. With `exact`, <pt_dir>/selection-probs.npy (rows = selection-predictions.jsonl,
+    columns = class-thresholds.json classes) gives the exact confident joint; otherwise the argmax bounds."""
+    classes = json.loads((pt_dir / "class-thresholds.json").read_text())["classes"]
     cid = {c: i for i, c in enumerate(classes)}
-    rows = [r for r in jsonl(cc / "cv" / "pt-new" / "selection-predictions.jsonl") if r["pageId"] in pages]
+    all_rows = list(jsonl(pt_dir / "selection-predictions.jsonl"))
+    keep = np.asarray([r["pageId"] in pages for r in all_rows])
+    rows = [r for r, k in zip(all_rows, keep, strict=True) if k]
     y = np.asarray([cid[r["label"]] for r in rows])
-    pred = np.asarray([cid[r["pred"]] for r in rows])
-    conf = np.asarray([r["conf"] for r in rows], np.float64)
-    t = thresholds(y, pred, conf, len(classes))
-    flags = {name: flag(y, pred, conf, t[:, i]) for i, name in enumerate(("low", "mid", "high"))}
+    if exact:
+        probs = np.load(pt_dir / "selection-probs.npy").astype(np.float64)[keep]
+        flagged, pred, t_exact = confident_joint_full(y, probs)
+        conf = np.where(pred >= 0, probs[np.arange(len(y)), np.clip(pred, 0, None)], 0.0)
+        self_conf = probs[np.arange(len(y)), y]
+        t = np.repeat(t_exact[:, None], 3, axis=1)
+        flags = {"low": flagged, "mid": flagged, "high": flagged}
+    else:
+        pred = np.asarray([cid[r["pred"]] for r in rows])
+        conf = np.asarray([r["conf"] for r in rows], np.float64)
+        self_conf = None
+        t = thresholds(y, pred, conf, len(classes))
+        flags = {name: flag(y, pred, conf, t[:, i]) for i, name in enumerate(("low", "mid", "high"))}
     # Jev/Clef disagreements on the pool (Clef voted only on low-confidence Jev pages).
     jev = {}
     for split in ("train", "val"):
@@ -162,9 +192,9 @@ def pagetype(cc: Path, pages: dict, out: Path):
         p = r["pageId"]
         if p not in pages or p not in jev:
             continue
-        url = pages[p]["url"]
-        a = page_rules(jev[p]["pageType"], url)
-        b = page_rules(r["choice"], url)
+        url, platform = pages[p]["url"], pages[p]["platform"]
+        a = page_rules_v82(jev[p]["pageType"], url, platform)
+        b = page_rules_v82(r["choice"], url, platform)
         if a != b:
             disagreements[p] = {"jev": a, "jevConf": jev[p]["confidence"], "clef": b, "clefConf": r["confidence"]}
     candidates = {}
@@ -178,6 +208,7 @@ def pagetype(cc: Path, pages: dict, out: Path):
             "conf": round(float(conf[i]), 4),
             "threshold": round(float(t[k, 1]), 4),
             "margin": round(float(conf[i] - t[k, 1]), 4),
+            **({"selfConf": round(float(self_conf[i]), 4)} if self_conf is not None else {}),
             "fitExcluded": r.get("fitExcluded", False),
             "sources": ["oof"],
         }
@@ -220,6 +251,8 @@ def pagetype(cc: Path, pages: dict, out: Path):
     oof_rows = [r for r in out_rows if "oof" in r["sources"]]
     summary = {
         "classes": classes,
+        "method": "exact" if exact else "argmax-bounds",
+        "source": str(pt_dir),
         "poolRows": len(rows),
         "thresholds": {c: [round(float(v), 4) for v in t[i]] for i, c in enumerate(classes)},
         "oofCandidates": {name: int(f.sum()) for name, f in flags.items()},
@@ -241,13 +274,13 @@ def pagetype(cc: Path, pages: dict, out: Path):
     return summary
 
 
-def section_meta(cc: Path, rows_npz):
+def section_meta(cc: Path, rows_npz, drop_rows: Path | None):
     """Rebuild cv_compare's kept meta rows (same filter) to recover src per row."""
     sample = cc / "section-sample-v4"
     meta = [json.loads(line) for line in (sample / "meta-train.jsonl").read_text().splitlines()]
     n_train = len(meta)
     meta += [json.loads(line) for line in (sample / "meta-val.jsonl").read_text().splitlines()]
-    drop = {(r["pageId"], r["nodeId"]) for r in jsonl(cc / "section-v4" / "drop-rows.jsonl")}
+    drop = {(r["pageId"], r["nodeId"]) for r in jsonl(drop_rows)} if drop_rows else set()
     kept = [m for i, m in enumerate(meta) if (m["p"], m["n"]) not in drop and (i < n_train or m["src"] == "jev")]
     node = rows_npz["node"]
     if len(kept) != len(node) or any(m["n"] != int(n) for m, n in zip(kept, node, strict=True)):
@@ -258,13 +291,15 @@ def section_meta(cc: Path, rows_npz):
     return kept
 
 
-def section(cc: Path, pages: dict, out: Path):
-    report = json.loads((cc / "cv" / "section" / "cv-report.json").read_text())
+def section(cc: Path, pages: dict, out: Path, sec_dir: Path, exact: bool, drop_rows: Path | None):
+    """Section candidates. With `exact`, <sec_dir>/probs-new.npy (rows = rows.npz restricted to `evaluate`,
+    the Jev rows) gives the exact confident joint on Jev rows; other rows are not flagged then."""
+    report = json.loads((sec_dir / "cv-report.json").read_text())
     classes = report["classes"]
     # NpzFile decompresses on every key access: materialise each array once.
-    rows_npz = dict(np.load(cc / "cv" / "section" / "rows.npz"))
-    oof = dict(np.load(cc / "cv" / "section" / "oof-new.npz"))
-    kept = section_meta(cc, rows_npz)
+    rows_npz = dict(np.load(sec_dir / "rows.npz"))
+    oof = dict(np.load(sec_dir / "oof-new.npz"))
+    kept = section_meta(cc, rows_npz, drop_rows)
     page_ids = json.loads((cc / "section-sample-v4" / "pages.json").read_text())
     by_index = np.asarray([page_ids[i] for i in rows_npz["page"]])
     if any(m["p"] != p for m, p in zip(kept, by_index, strict=True)):
@@ -274,8 +309,25 @@ def section(cc: Path, pages: dict, out: Path):
     conf = oof["conf"].astype(np.float64)
     in_pool = np.asarray([p in pages for p in by_index])
     src = np.asarray([m["src"] for m in kept])
-    t = thresholds(y[in_pool], pred[in_pool], conf[in_pool], len(classes))
-    flags = {name: flag(y, pred, conf, t[:, i]) & in_pool for i, name in enumerate(("low", "mid", "high"))}
+    if exact:
+        evaluate = rows_npz["evaluate"].astype(bool)
+        probs = np.load(sec_dir / "probs-new.npy").astype(np.float64)
+        if len(probs) != int(evaluate.sum()):
+            raise SystemExit(f"probs rows {len(probs)} != evaluate rows {int(evaluate.sum())}")
+        idx = np.flatnonzero(evaluate & in_pool)
+        sub = probs[np.searchsorted(np.flatnonzero(evaluate), idx)]
+        flagged_sub, best, t_exact = confident_joint_full(y[idx], sub)
+        pred = np.full(len(y), -1, np.int64)
+        conf = np.zeros(len(y))
+        pred[idx] = best
+        conf[idx] = np.where(best >= 0, sub[np.arange(len(idx)), np.clip(best, 0, None)], 0.0)
+        flagged = np.zeros(len(y), bool)
+        flagged[idx] = flagged_sub
+        t = np.repeat(t_exact[:, None], 3, axis=1)
+        flags = {"low": flagged, "mid": flagged, "high": flagged}
+    else:
+        t = thresholds(y[in_pool], pred[in_pool], conf[in_pool], len(classes))
+        flags = {name: flag(y, pred, conf, t[:, i]) & in_pool for i, name in enumerate(("low", "mid", "high"))}
     out_rows = []
     for i in np.flatnonzero(flags["mid"]):
         p = by_index[i]
@@ -322,6 +374,8 @@ def section(cc: Path, pages: dict, out: Path):
     jev_meta = [m for m in all_meta if m["src"] == "jev"]
     return {
         "classes": classes,
+        "method": "exact" if exact else "argmax-bounds",
+        "source": str(sec_dir),
         "poolRows": int(in_pool.sum()),
         "rowsBySrc": dict(Counter(src[in_pool]).most_common()),
         "thresholds": {c: [round(float(v), 4) for v in t[i]] for i, c in enumerate(classes)},
@@ -384,11 +438,17 @@ def main() -> None:
     parser.add_argument("--cc", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--skip-region", action="store_true")
+    parser.add_argument("--pt-dir", type=Path, help="page-type CV dir (default <cc>/cv/pt-new)")
+    parser.add_argument("--section-dir", type=Path, help="section CV dir (default <cc>/cv/section)")
+    parser.add_argument("--section-drop-rows", type=Path, help="the CV config's dropRows file, if it had one")
+    parser.add_argument("--exact", action="store_true", help="use the dirs' full OOF probabilities")
     args = parser.parse_args()
+    args.pt_dir = args.pt_dir or args.cc / "cv" / "pt-new"
+    args.section_dir = args.section_dir or args.cc / "cv" / "section"
     args.out.mkdir(parents=True, exist_ok=True)
     pages = load_pages(args.cc)
-    summary = {"pages": len(pages), "pagetype": pagetype(args.cc, pages, args.out)}
-    summary["section"] = section(args.cc, pages, args.out)
+    summary = {"pages": len(pages), "pagetype": pagetype(args.cc, pages, args.out, args.pt_dir, args.exact)}
+    summary["section"] = section(args.cc, pages, args.out, args.section_dir, args.exact, args.section_drop_rows)
     if not args.skip_region:
         summary["region"] = region(args.cc, pages)
     (args.out / "summary.json").write_text(json.dumps(summary, indent=2))
