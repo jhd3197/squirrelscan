@@ -30,6 +30,8 @@ type Job = {
   pageId: string;
   url: string;
   scripts: "on" | "policy";
+  /** Why scripts are on, recorded on the row (e.g. `hidden_target` for a scripts-on re-render). */
+  scriptReason?: string;
   markers: string[];
   fingerprints: Record<string, { tag: string; text: string }>;
 };
@@ -65,7 +67,7 @@ async function worker() {
           },
           { scripts },
         );
-      let scriptReason = job.scripts === "on" ? "platform" : "default_off";
+      let scriptReason = job.scripts === "on" ? (job.scriptReason ?? "platform") : "default_off";
       let result = await replay(job.scripts === "on");
       if (job.scripts !== "on" && blank(result.quality)) {
         result = await replay(true);

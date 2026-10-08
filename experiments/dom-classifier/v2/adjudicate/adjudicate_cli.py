@@ -108,13 +108,19 @@ class Guard:
 def run_item(item: dict, args, packets: dict, system: dict, ad_marked: set, guard: Guard, cwd: Path) -> dict | None:
     if guard.stopped:
         return None
-    params = build_params(item, packets, args.render / "views", "sonnet-5-5-low", system)
+    params = build_params(item, packets, args.render / "views", "sonnet-5-5-low", system, args.modality)
     classes = PAGE_CLASSES_V81 if item["axis"] == "page" else SECTION_CLASSES_V3
     cmd = command(args.model, args.effort, params["system"][0]["text"], params["output_config"]["format"]["schema"])
     line = json.dumps({"type": "user", "message": {"role": "user", "content": params["messages"][0]["content"]}})
     env = {**os.environ, "CLAUDE_CONFIG_DIR": str(CONFIG_DIR)}
     started = time.time()
-    base = {"itemId": item["itemId"], "axis": item["axis"], "arm": args.arm, "promptRevision": PROMPT_REVISION}
+    base = {
+        "itemId": item["itemId"],
+        "axis": item["axis"],
+        "arm": args.arm,
+        "modality": args.modality,
+        "promptRevision": PROMPT_REVISION,
+    }
     try:
         proc = subprocess.run(cmd, input=line + "\n", capture_output=True, text=True, env=env, cwd=cwd, timeout=600)
     except subprocess.TimeoutExpired:
@@ -191,6 +197,9 @@ def main() -> None:
     parser.add_argument("--ad-markers", type=Path)
     parser.add_argument("--model", required=True, help="claude --model alias: sonnet, opus, fable, haiku")
     parser.add_argument("--effort", default="low")
+    parser.add_argument(
+        "--modality", choices=["image", "text"], default="image", help="text: no screenshot (hidden targets)"
+    )
     parser.add_argument("--only-pilot", action="store_true")
     parser.add_argument("--subset", type=Path)
     parser.add_argument("--axis", choices=["page", "section"])
@@ -204,7 +213,7 @@ def main() -> None:
     args = parser.parse_args()
     if args.concurrency > 3:
         raise SystemExit("at most 3 concurrent claude processes on this machine")
-    args.arm = f"cli-{args.model}-{args.effort}"
+    args.arm = f"cli-{args.model}-{args.effort}" + ("-text" if args.modality == "text" else "")
     items = jsonl(args.items)
     if args.only_pilot:
         items = [i for i in items if i.get("pilot")]
