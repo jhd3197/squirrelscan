@@ -198,7 +198,10 @@ def main() -> None:
     parser.add_argument("--model", required=True, help="claude --model alias: sonnet, opus, fable, haiku")
     parser.add_argument("--effort", default="low")
     parser.add_argument(
-        "--modality", choices=["image", "text"], default="image", help="text: no screenshot (hidden targets)"
+        "--modality",
+        choices=["image", "text", "revealed"],
+        default="image",
+        help="text: no screenshot; revealed: forced-reveal element screenshot (hidden section targets)",
     )
     parser.add_argument("--only-pilot", action="store_true")
     parser.add_argument("--subset", type=Path)
@@ -213,7 +216,7 @@ def main() -> None:
     args = parser.parse_args()
     if args.concurrency > 3:
         raise SystemExit("at most 3 concurrent claude processes on this machine")
-    args.arm = f"cli-{args.model}-{args.effort}" + ("-text" if args.modality == "text" else "")
+    args.arm = f"cli-{args.model}-{args.effort}" + ("" if args.modality == "image" else f"-{args.modality}")
     items = jsonl(args.items)
     if args.only_pilot:
         items = [i for i in items if i.get("pilot")]

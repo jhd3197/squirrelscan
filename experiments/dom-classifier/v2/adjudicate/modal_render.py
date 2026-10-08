@@ -54,6 +54,10 @@ image = (
     )
     .add_local_file(HERE / "render-worker.ts", f"{APP_ROOT}/experiments/dom-classifier/v2/adjudicate/render-worker.ts")
     .add_local_file(HERE / "replay-html.ts", f"{APP_ROOT}/experiments/dom-classifier/v2/adjudicate/replay-html.ts")
+    .add_local_file(
+        HERE / "reveal-capture.ts", f"{APP_ROOT}/experiments/dom-classifier/v2/adjudicate/reveal-capture.ts"
+    )
+    .add_local_file(HERE / "reveal-worker.ts", f"{APP_ROOT}/experiments/dom-classifier/v2/adjudicate/reveal-worker.ts")
 )
 app = modal.App("dom-classifier-adjudicate-render", image=image)
 
@@ -225,3 +229,106 @@ def main(run_dir: str, limit: int = 0, chunk: int = 12) -> None:
             handle.flush()
             print(json.dumps({**totals, "elapsed": round(time.time() - started)}), flush=True)
     print(json.dumps({"stage": "complete", **totals, "elapsed": round(time.time() - started)}))
+
+
+REVEAL_PAD = 24
+REVEAL_MAX_WIDTH = 1152
+REVEAL_MAX_HEIGHT = 1600
+
+
+def compose_reveal(png: bytes, rect: dict) -> tuple[bytes, float]:
+    """The element screenshot as the adjudicator's view (target outlined), and its pixel std (blank check)."""
+    from PIL import Image, ImageDraw, ImageStat
+
+    Image.MAX_IMAGE_PIXELS = None
+    shot = Image.open(io.BytesIO(png)).convert("RGB")
+    std = sum(ImageStat.Stat(shot.convert("L")).stddev)
+    # The clip started REVEAL_PAD before the target unless the target touched the page edge.
+    x0 = rect["x"] - max(0.0, rect["x"] - REVEAL_PAD)
+    y0 = rect["y"] - max(0.0, rect["y"] - REVEAL_PAD)
+    draw = ImageDraw.Draw(shot)
+    box = (x0 - 3, y0 - 3, min(shot.width - 1, x0 + rect["width"] + 3), min(shot.height - 1, y0 + rect["height"] + 3))
+    draw.rectangle(box, outline=OUTLINE, width=3)
+    scale = min(1.0, REVEAL_MAX_WIDTH / shot.width)
+    if scale < 1.0:
+        shot = shot.resize((int(shot.width * scale), max(1, int(shot.height * scale))), Image.LANCZOS)
+    shot = shot.crop((0, 0, shot.width, min(shot.height, REVEAL_MAX_HEIGHT)))
+    return _jpeg(shot), std
+
+
+@app.function(cpu=4, memory=8192, timeout=1800, max_containers=40)
+def reveal_chunk(jobs: list[dict], html: dict[str, bytes], allow_data: bool) -> list[dict]:
+    import shutil
+    import subprocess
+
+    work = Path("/tmp/reveal")
+    shutil.rmtree(work, ignore_errors=True)
+    (work / "html").mkdir(parents=True)
+    (work / "out").mkdir()
+    for page_id, data in html.items():
+        (work / "html" / f"{page_id}.html").write_bytes(gzip.decompress(data))
+    (work / "jobs.json").write_text(json.dumps(jobs))
+    cmd = ["bun", "run", f"{APP_ROOT}/experiments/dom-classifier/v2/adjudicate/reveal-worker.ts",
+           "--jobs", str(work / "jobs.json"), "--html", str(work / "html"), "--out", str(work / "out"),
+           "--concurrency", "3"] + (["--allow-data"] if allow_data else [])  # fmt: skip
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1700)
+    results = work / "out" / "results.jsonl"
+    rows = [json.loads(line) for line in results.read_text().splitlines()] if results.exists() else []
+    seen = {(r["pageId"], r["marker"]) for r in rows}
+    for job in jobs:
+        for marker in job["markers"]:
+            if (job["pageId"], marker) not in seen:
+                rows.append(
+                    {
+                        "pageId": job["pageId"],
+                        "marker": marker,
+                        "error": f"worker exited {proc.returncode}: {proc.stderr[-300:]}",
+                    }
+                )
+    for row in rows:
+        png_path = work / "out" / f"{row['pageId']}-n{row['marker']}.png"
+        if row.get("png") and png_path.exists():
+            row["view"], row["std"] = compose_reveal(png_path.read_bytes(), row["rect"])
+    return rows
+
+
+@app.local_entrypoint()
+def reveal(run_dir: str, items: str, limit: int = 0, chunk: int = 10, allow_data: bool = False) -> None:
+    """Forced-reveal views for an items file's hidden section targets, into <run>/views/<pageId>/."""
+    root = Path(run_dir)
+    tag = "revealed-data" if allow_data else "revealed"
+    wanted: dict[str, list[str]] = {}
+    for line in Path(items).read_text().splitlines():
+        if line.strip():
+            item = json.loads(line)
+            if item["axis"] == "section":
+                wanted.setdefault(item["pageId"], []).append(str(item["nodeId"]))
+    out = root / f"reveals-{tag}.jsonl"
+    done = set()
+    if out.exists():
+        done = {(r["pageId"], r["marker"]) for r in map(json.loads, out.read_text().splitlines()) if r}
+    jobs = []
+    for line in (root / "jobs.jsonl").read_text().splitlines():
+        job = json.loads(line)
+        markers = [m for m in wanted.get(job["pageId"], []) if (job["pageId"], m) not in done]
+        if markers:
+            jobs.append({"pageId": job["pageId"], "url": job["url"], "scripts": job["scripts"], "markers": markers})
+    if limit:
+        jobs = jobs[:limit]
+    parts = [jobs[i : i + chunk] for i in range(0, len(jobs), chunk)]
+    print(json.dumps({"pages": len(jobs), "targets": sum(len(j["markers"]) for j in jobs), "chunks": len(parts)}))
+    args = [(part, {j["pageId"]: (root / "jobs" / f"{j['pageId']}.html.gz").read_bytes() for j in part}, allow_data)
+            for part in parts]  # fmt: skip
+    totals = {"revealed": 0, "notRevealed": 0, "errors": 0}
+    with out.open("a") as handle:
+        for rows in reveal_chunk.starmap(args, order_outputs=False):
+            for row in rows:
+                view = row.pop("view", None)
+                if view:
+                    page_dir = root / "views" / row["pageId"]
+                    page_dir.mkdir(parents=True, exist_ok=True)
+                    (page_dir / f"n{row['marker']}-{tag}.jpg").write_bytes(view)
+                totals["errors" if row.get("error") else "revealed" if view else "notRevealed"] += 1
+                handle.write(json.dumps(row) + "\n")
+            print(json.dumps(totals), flush=True)
+    print(json.dumps({"stage": "complete", **totals}))
