@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
+import { BlockList, isIP } from "node:net";
 import type { CapturedNode, CapturedPage, Role } from "./types.ts";
 import { browserLaunchOptions, loadPlaywright } from "./browser-runtime.ts";
 import { LabelStore } from "./store.ts";
@@ -163,46 +164,108 @@ function normalizedPublicUrl(raw: string) {
   return url;
 }
 
+/**
+ * IANA special-purpose IPv4 ranges: none of them is a public web server. The
+ * IPv6 side is deny-by-default in `isPublicAddress`, so it needs no list.
+ */
+const SPECIAL_IPV4 = new BlockList();
+for (const [network, prefix] of [
+  ["0.0.0.0", 8],
+  ["10.0.0.0", 8],
+  ["100.64.0.0", 10],
+  ["127.0.0.0", 8],
+  ["169.254.0.0", 16],
+  ["172.16.0.0", 12],
+  ["192.0.0.0", 24],
+  ["192.0.2.0", 24],
+  ["192.31.196.0", 24],
+  ["192.52.193.0", 24],
+  ["192.88.99.0", 24],
+  ["192.168.0.0", 16],
+  ["192.175.48.0", 24],
+  ["198.18.0.0", 15],
+  ["198.51.100.0", 24],
+  ["203.0.113.0", 24],
+  ["224.0.0.0", 4],
+  ["240.0.0.0", 4],
+] as const)
+  SPECIAL_IPV4.addSubnet(network, prefix, "ipv4");
+
+/** The eight 16-bit groups of a valid IPv6 literal (any spelling), or null. */
+function ipv6Groups(address: string): number[] | null {
+  const halves = address.toLowerCase().split("::");
+  if (halves.length > 2) return null;
+  const parse = (part: string) => {
+    if (!part) return [];
+    const pieces = part.split(":");
+    const groups: number[] = [];
+    for (const [index, piece] of pieces.entries()) {
+      if (index === pieces.length - 1 && piece.includes(".")) {
+        if (isIP(piece) !== 4) return null;
+        const [a, b, c, d] = piece.split(".").map(Number) as [number, number, number, number];
+        groups.push((a << 8) | b, (c << 8) | d);
+      } else if (/^[0-9a-f]{1,4}$/.test(piece)) groups.push(Number.parseInt(piece, 16));
+      else return null;
+    }
+    return groups;
+  };
+  const head = parse(halves[0]!);
+  const tail = halves.length === 2 ? parse(halves[1]!) : [];
+  if (!head || !tail) return null;
+  if (halves.length === 1) return head.length === 8 ? head : null;
+  const missing = 8 - head.length - tail.length;
+  return missing >= 1 ? [...head, ...Array<number>(missing).fill(0), ...tail] : null;
+}
+
+/**
+ * Deny by default: an address is public only when it is global unicast and
+ * outside every special-purpose range. IPv6 forms that carry an IPv4 address
+ * (compatible `::a.b.c.d`, mapped `::ffff:a.b.c.d`, translated
+ * `::ffff:0:a.b.c.d`, NAT64 `64:ff9b::a.b.c.d`) are judged by that IPv4
+ * address, whatever the spelling. Outside 2000::/3 nothing is public (`::`,
+ * loopback, link-local, site-local, unique-local, multicast, the local-use
+ * NAT64 prefix), and 2001::/23 (Teredo and other protocol assignments),
+ * documentation and 6to4 are refused because they can embed a private IPv4.
+ */
+export function isPublicAddress(address: string): boolean {
+  const family = isIP(address);
+  if (family === 4) return !SPECIAL_IPV4.check(address, "ipv4");
+  if (family !== 6) return false;
+  const groups = ipv6Groups(address);
+  if (!groups) return false;
+  const zero = (from: number, to: number) => groups.slice(from, to).every((group) => group === 0);
+  const [first, second] = groups as [number, number];
+  if (
+    zero(0, 6) ||
+    (zero(0, 5) && groups[5] === 0xffff) ||
+    (zero(0, 4) && groups[4] === 0xffff && groups[5] === 0) ||
+    (first === 0x64 && second === 0xff9b && zero(2, 6))
+  ) {
+    const high = groups[6]!;
+    const low = groups[7]!;
+    return isPublicAddress(`${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`);
+  }
+  if ((first & 0xe000) !== 0x2000) return false;
+  if (first === 0x2001 && (second < 0x0200 || second === 0x0db8)) return false;
+  if (first === 0x2002) return false;
+  if (first === 0x3fff && second < 0x1000) return false;
+  return true;
+}
+
+/**
+ * True for a local name or any address outside public unicast space. IP
+ * literals go through `isPublicAddress`, the one classifier the replay egress
+ * guard also uses, so every spelling of an address gets the same answer.
+ */
 export function isPrivateHostname(hostname: string) {
   const host = hostname
     .toLowerCase()
     .replace(/^\[|\]$/g, "")
     .replace(/\.$/, "");
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return true;
-  const mappedIpv4 = ipv4MappedAddress(host);
-  if (mappedIpv4) return isPrivateHostname(mappedIpv4);
-  if (host === "::1" || host.startsWith("fe80:") || host.startsWith("fc") || host.startsWith("fd"))
-    return true;
-  const octets = host.split(".");
-  if (octets.length !== 4 || octets.some((value) => !/^\d{1,3}$/.test(value))) return false;
-  const numbers = octets.map(Number);
-  if (numbers.some((value) => value > 255)) return true;
-  const [first, second] = numbers;
-  return (
-    first === 0 ||
-    first === 10 ||
-    first === 127 ||
-    first >= 224 ||
-    (first === 100 && second >= 64 && second <= 127) ||
-    (first === 169 && second === 254) ||
-    (first === 172 && second >= 16 && second <= 31) ||
-    (first === 192 && second === 168) ||
-    (first === 198 && (second === 18 || second === 19))
-  );
-}
-
-/** Canonical URL hosts render mapped IPv4 as hex (for example ::ffff:7f00:1). */
-function ipv4MappedAddress(host: string) {
-  if (!host.startsWith("::ffff:")) return null;
-  const suffix = host.slice("::ffff:".length);
-  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(suffix)) return suffix;
-  const groups = suffix.split(":");
-  if (!groups.length || groups.length > 2 || groups.some((group) => !/^[a-f0-9]{1,4}$/.test(group)))
-    return null;
-  const hex = groups.map((group) => group.padStart(4, "0")).join("");
-  if (hex.length !== 8) return null;
-  const value = Number.parseInt(hex, 16);
-  return [value >>> 24, (value >>> 16) & 255, (value >>> 8) & 255, value & 255].join(".");
+  if (isIP(host)) return !isPublicAddress(host);
+  // Dotted numbers that are not a valid IPv4 literal are never a public host.
+  return /^\d+(?:\.\d+){3}$/.test(host);
 }
 
 async function assertPublicDns(url: URL) {

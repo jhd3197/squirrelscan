@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { connect } from "node:net";
-import { isPublicAddress, startEgressGuard, type EgressGuard } from "./egress-guard.ts";
+import { isPublicAddress } from "./capture.ts";
+import { startEgressGuard, type EgressGuard } from "./egress-guard.ts";
 
 const guards: EgressGuard[] = [];
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
@@ -105,7 +106,12 @@ describe("replay egress guard", () => {
       "::ffff:0:7f00:1",
       "64:ff9b:1::1",
       "fec0::1",
+      "fe90::1",
+      "febf::1",
+      "64:ff9b::7f00:1",
+      "64:ff9b::a00:1",
       "2001::1",
+      "2001:db8::1",
       "2002:7f00:1::1",
       "192.0.2.1",
       "198.51.100.1",
@@ -113,8 +119,38 @@ describe("replay egress guard", () => {
       "not-an-ip",
     ])
       expect(isPublicAddress(address)).toBe(false);
-    for (const address of ["93.184.215.14", "2606:4700::1111", "::ffff:8.8.8.8"])
+    for (const address of [
+      "93.184.215.14",
+      "2606:4700::1111",
+      "2001:4860:4860::8888",
+      "::ffff:8.8.8.8",
+      "64:ff9b::808:808",
+    ])
       expect(isPublicAddress(address)).toBe(true);
+  });
+
+  test("refuses a name whose A/AAAA record is any non-public form", async () => {
+    const local = localService();
+    const records: Record<string, string> = {
+      "unspecified.example.test": "::",
+      "expanded.example.test": "0:0:0:0:0:0:0:1",
+      "mapped.example.test": "::ffff:7f00:1",
+      "compatible.example.test": "::127.0.0.1",
+      "nat64.example.test": "64:ff9b::7f00:1",
+      "linklocal.example.test": "fe90::1",
+      "sitelocal.example.test": "fec0::1",
+      "multicast.example.test": "ff02::1",
+      "sixtofour.example.test": "2002:7f00:1::1",
+      "documentation.example.test": "192.0.2.1",
+    };
+    const guard = await startEgressGuard(async (host) => [records[host]!]);
+    guards.push(guard);
+    for (const host of Object.keys(records))
+      expect(await ask(guard, `CONNECT ${host}:${local.port} HTTP/1.1\r\n\r\n`)).toBe(
+        "HTTP/1.1 403 Forbidden",
+      );
+    expect(guard.refused.sort()).toEqual(Object.keys(records).sort());
+    expect(local.seen.hits).toBe(0);
   });
 
   test("refuses the unspecified address and a trailing-dot local name", async () => {
@@ -123,6 +159,7 @@ describe("replay egress guard", () => {
     guards.push(guard);
     for (const target of [
       `[::]:${local.port}`,
+      `[0:0:0:0:0:0:0:1]:${local.port}`,
       `0.0.0.0:${local.port}`,
       `localhost.:${local.port}`,
     ])

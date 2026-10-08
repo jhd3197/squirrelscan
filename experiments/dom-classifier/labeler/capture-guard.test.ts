@@ -12,6 +12,27 @@ describe("public corpus URL guard", () => {
     );
   });
 
+  test("rejects every non-public IPv6 and special-purpose IPv4 literal", () => {
+    for (const host of [
+      "[::]",
+      "[0:0:0:0:0:0:0:1]",
+      "[::127.0.0.1]",
+      "[::ffff:0:7f00:1]",
+      "[64:ff9b::7f00:1]",
+      "[fe90::1]",
+      "[fec0::1]",
+      "[2002:7f00:1::1]",
+      "192.0.2.1",
+      "203.0.113.9",
+    ])
+      expect(() => normalizeCorpusCaptureTarget({ url: `https://${host}/` })).toThrow(
+        "Private network URL",
+      );
+    expect(normalizeCorpusCaptureTarget({ url: "https://[2606:4700::1111]/" }).url).toBe(
+      "https://[2606:4700::1111]/",
+    );
+  });
+
   test("reparents clipped descendants to the nearest retained ancestor", () => {
     const node = (
       id: string,

@@ -1,12 +1,13 @@
 import { lookup } from "node:dns/promises";
 import type { Browser, Frame, LaunchOptions, Route } from "playwright";
 import { browserLaunchOptions } from "./browser-runtime.ts";
-import { isPublicAddress, startEgressGuard, type EgressGuard } from "./egress-guard.ts";
+import { startEgressGuard, type EgressGuard } from "./egress-guard.ts";
 import {
   capturePixels,
   clipNodes,
   digest,
   isPrivateHostname,
+  isPublicAddress,
   MAX_CAPTURE_HEIGHT,
   MAX_LAZY_LOAD_STEPS,
   nodeId,

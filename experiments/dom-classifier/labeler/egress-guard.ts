@@ -1,5 +1,6 @@
 import { lookup } from "node:dns/promises";
-import { BlockList, connect, createServer, isIP, type Socket } from "node:net";
+import { connect, createServer, isIP, type Socket } from "node:net";
+import { isPublicAddress } from "./capture.ts";
 
 type Resolve = (hostname: string) => Promise<string[]>;
 const resolveAll: Resolve = async (hostname) =>
@@ -15,56 +16,6 @@ const MAX_CONNECTIONS = 256;
 const CACHE_TTL_MS = 10 * 60_000;
 const MAX_CACHED_HOSTS = 2_000;
 const MAX_REFUSALS_LOGGED = 1_000;
-
-/**
- * Every address range a replayed page must not reach: unspecified, loopback,
- * private, shared, link-local, special-use, benchmarking, multicast and
- * reserved, for both families. `BlockList` normalises expanded and
- * IPv4-mapped IPv6 spellings, so `::`, `0:0:0:0:0:0:0:1` and `::ffff:7f00:1`
- * are caught as well.
- */
-const NON_PUBLIC = new BlockList();
-for (const [network, prefix] of [
-  ["0.0.0.0", 8],
-  ["10.0.0.0", 8],
-  ["100.64.0.0", 10],
-  ["127.0.0.0", 8],
-  ["169.254.0.0", 16],
-  ["172.16.0.0", 12],
-  ["192.0.0.0", 24],
-  ["192.0.2.0", 24],
-  ["192.168.0.0", 16],
-  ["198.18.0.0", 15],
-  ["198.51.100.0", 24],
-  ["203.0.113.0", 24],
-  ["224.0.0.0", 3],
-] as const)
-  NON_PUBLIC.addSubnet(network, prefix, "ipv4");
-for (const [network, prefix] of [
-  // IPv4-compatible (deprecated), including :: and ::1.
-  ["::", 96],
-  // IPv4-translated (SIIT); mapped ::ffff:0:0/96 is checked as IPv4 by BlockList.
-  ["::ffff:0:0:0", 96],
-  ["64:ff9b::", 96],
-  ["64:ff9b:1::", 48],
-  ["100::", 64],
-  // Teredo and 6to4 can embed a private IPv4 address.
-  ["2001::", 32],
-  ["2001:db8::", 32],
-  ["2002::", 16],
-  ["fc00::", 7],
-  ["fe80::", 10],
-  ["fec0::", 10],
-  ["ff00::", 8],
-] as const)
-  NON_PUBLIC.addSubnet(network, prefix, "ipv6");
-
-/** True only for a literal IP address outside every non-public range. */
-export function isPublicAddress(address: string) {
-  const family = isIP(address);
-  if (!family) return false;
-  return !NON_PUBLIC.check(address, family === 4 ? "ipv4" : "ipv6");
-}
 
 /**
  * A loopback-only CONNECT proxy that every replay context sends its traffic
