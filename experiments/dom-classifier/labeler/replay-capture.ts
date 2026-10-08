@@ -97,6 +97,32 @@ export function replayEgressGuard() {
 }
 
 /**
+ * Under `script-src 'none'` inline handlers never run, and `<noscript>` stays
+ * unrendered (scripting itself is still on), so a stylesheet that a handler
+ * turns on never applies and the page replays unstyled: the loadCSS pattern
+ * `rel="preload" as="style" onload="this.rel='stylesheet'"` and the
+ * `media="print"` / `media="none"` + `onload` media switch, both common on
+ * Shopify and WordPress. Scripts-off replays promote them to plain
+ * stylesheets. (Same rule as v2/adjudicate/replay-html.ts.)
+ */
+export function promoteDeferredStyles(html: string) {
+  let promoted = 0;
+  const out = html.replace(/<link\b[^>]*>/gi, (tag) => {
+    const handler = /\sonload\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/i.exec(tag);
+    if (!handler) return tag;
+    let next = tag;
+    if (/\sas\s*=\s*["']?style\b/i.test(tag))
+      next = next.replace(/\srel\s*=\s*(["']?)preload\1/i, ' rel="stylesheet"');
+    if (/media/i.test(handler[1]!))
+      next = next.replace(/\smedia\s*=\s*(["']?)(print|none)\1/i, ' media="all"');
+    if (next === tag) return tag;
+    promoted++;
+    return next.replace(handler[0], "");
+  });
+  return { html: out, promoted };
+}
+
+/**
  * An early, cheap refusal of hosts that resolve private, so a blocked asset
  * fails at the route instead of opening a proxy tunnel. It is not the guard
  * against DNS rebinding: this lookup and the connection are separate. The
@@ -206,7 +232,7 @@ export async function captureReplayTarget(
             // Scripts off is a policy on the document, not on the context:
             // the settle and node walk below still need to evaluate.
             headers: scripts ? {} : { "content-security-policy": "script-src 'none'" },
-            body: target.html,
+            body: scripts ? target.html : promoteDeferredStyles(target.html).html,
           });
         }
         return route.fulfill({ status: 204 });

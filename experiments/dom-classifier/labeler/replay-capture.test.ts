@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Browser } from "playwright";
 import { browserRuntimeUnavailableReason, loadPlaywright } from "./browser-runtime.ts";
-import { captureReplayTarget, REPLAY_MARKER, replayLaunchOptions } from "./replay-capture.ts";
+import {
+  captureReplayTarget,
+  promoteDeferredStyles,
+  REPLAY_MARKER,
+  replayLaunchOptions,
+} from "./replay-capture.ts";
 import { LabelStore } from "./store.ts";
 
 const browserSkipReason = browserRuntimeUnavailableReason();
@@ -149,6 +154,24 @@ describe.skipIf(browserSkipReason !== null)(
       ).rejects.toThrow("deadline");
       expect(Date.now() - started).toBeLessThan(15_000);
     }, 30_000);
+
+    test("scripts-off replays apply stylesheets a handler would have switched on", () => {
+      const stored = `<head>
+        <link rel="preload" as="style" href="/a.css" onload="this.onload=null;this.rel='stylesheet'">
+        <link rel="stylesheet" href="/b.css" media="print" onload="this.media='all'">
+        <link rel="stylesheet" href="/c.css" media="none" onload="if(media!='all')media='all'">
+        <link rel="stylesheet" href="/d.css" media="print">
+        <link rel="preload" as="font" href="/e.woff2" onload="void 0">
+      </head>`;
+      const { html, promoted } = promoteDeferredStyles(stored);
+      expect(promoted).toBe(3);
+      expect(html).toContain('<link rel="stylesheet" as="style" href="/a.css">');
+      expect(html).toContain('<link rel="stylesheet" href="/b.css" media="all">');
+      expect(html).toContain('<link rel="stylesheet" href="/c.css" media="all">');
+      // A real print stylesheet and a non-style preload are left alone.
+      expect(html).toContain('<link rel="stylesheet" href="/d.css" media="print">');
+      expect(html).toContain('<link rel="preload" as="font" href="/e.woff2" onload="void 0">');
+    });
 
     test("refuses a private replay URL before rendering", async () => {
       const store = new LabelStore(dataDir);
