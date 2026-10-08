@@ -1,7 +1,7 @@
 import { lookup } from "node:dns/promises";
 import type { Browser, Frame, LaunchOptions, Route } from "playwright";
 import { browserLaunchOptions } from "./browser-runtime.ts";
-import { startEgressGuard, type EgressGuard } from "./egress-guard.ts";
+import { isPublicAddress, startEgressGuard, type EgressGuard } from "./egress-guard.ts";
 import {
   capturePixels,
   clipNodes,
@@ -111,7 +111,7 @@ function isPublicHost(hostname: string) {
     const timeout = new Promise<boolean>((resolve) => setTimeout(resolve, DNS_TIMEOUT_MS, false));
     const resolved = lookup(hostname, { all: true, verbatim: true }).then(
       (addresses) =>
-        addresses.length > 0 && !addresses.some((entry) => isPrivateHostname(entry.address)),
+        addresses.length > 0 && addresses.every((entry) => isPublicAddress(entry.address)),
       () => false,
     );
     publicHosts.set(hostname, Promise.race([resolved, timeout]));

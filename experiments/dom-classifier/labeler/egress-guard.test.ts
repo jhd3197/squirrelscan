@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { connect } from "node:net";
-import { startEgressGuard, type EgressGuard } from "./egress-guard.ts";
+import { isPublicAddress, startEgressGuard, type EgressGuard } from "./egress-guard.ts";
 
 const guards: EgressGuard[] = [];
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
@@ -80,6 +80,44 @@ describe("replay egress guard", () => {
     ])
       expect(await ask(guard, `CONNECT ${target} HTTP/1.1\r\n\r\n`)).toBe("HTTP/1.1 403 Forbidden");
     expect(lookups).toBe(0);
+    expect(local.seen.hits).toBe(0);
+  });
+
+  test("classifies every non-public spelling, including unspecified and mapped forms", () => {
+    for (const address of [
+      "127.0.0.1",
+      "0.0.0.0",
+      "10.1.2.3",
+      "100.64.0.1",
+      "169.254.169.254",
+      "172.20.0.1",
+      "192.168.0.10",
+      "224.0.0.1",
+      "::",
+      "::1",
+      "0:0:0:0:0:0:0:1",
+      "::ffff:127.0.0.1",
+      "::ffff:7f00:1",
+      "fd00::1",
+      "fe80::1",
+      "ff02::1",
+      "not-an-ip",
+    ])
+      expect(isPublicAddress(address)).toBe(false);
+    for (const address of ["93.184.215.14", "2606:4700::1111", "::ffff:8.8.8.8"])
+      expect(isPublicAddress(address)).toBe(true);
+  });
+
+  test("refuses the unspecified address and a trailing-dot local name", async () => {
+    const local = localService();
+    const guard = await startEgressGuard(async () => ["93.184.215.14"]);
+    guards.push(guard);
+    for (const target of [
+      `[::]:${local.port}`,
+      `0.0.0.0:${local.port}`,
+      `localhost.:${local.port}`,
+    ])
+      expect(await ask(guard, `CONNECT ${target} HTTP/1.1\r\n\r\n`)).toBe("HTTP/1.1 403 Forbidden");
     expect(local.seen.hits).toBe(0);
   });
 

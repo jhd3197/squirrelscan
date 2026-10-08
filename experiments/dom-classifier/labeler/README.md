@@ -309,7 +309,10 @@ A replayed page is untrusted code on a machine where local services listen, so:
   `replayLaunchOptions()`.
 
 Chromium's Private/Local Network Access features were measured ineffective in
-the bundled headless shell (140), so they are not relied on.
+the bundled headless shell (140), so they are not relied on. Residual: with
+scripts on, a WebSocket opened from a worker is not closed by the page's
+WebSocket route, but it still leaves through the guard, so it reaches public
+hosts only.
 
 ## Private corpus rendering
 
