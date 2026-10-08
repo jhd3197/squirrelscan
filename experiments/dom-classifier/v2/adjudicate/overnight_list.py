@@ -92,7 +92,7 @@ def main() -> None:
     # Policy v8.2 candidates get their own share of the cap: their labels are stale by definition,
     # and on OOF confidence alone they would rank below the CL list.
     v82 = {r["pageId"]: r for r in jsonl(args.cl / "pagetype-v82-candidates.jsonl")}
-    for page_id, r in v82.items():
+    for page_id in v82:
         if page_id in best:
             best[page_id]["sources"].append("policy_v82")
     page_cells: dict[tuple, list[dict]] = defaultdict(list)
@@ -100,7 +100,7 @@ def main() -> None:
         page_cells[(row["given"], pages[page_id]["platform"])].append({"pageId": page_id, **row})
     page_rows = allocate(page_cells, args.pages - args.v82_pages, args.floor)
     v82_cells: dict[tuple, list[dict]] = defaultdict(list)
-    for page_id, r in v82.items():
+    for page_id in v82:
         if page_id in best or page_id in taken_pages or page_id in gold_pages or page_id not in pages:
             continue
         score = min(1.0, 0.5 + 0.15 * len(r["signals"])) + 0.01 * r["jevProductMass"]
