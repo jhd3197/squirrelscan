@@ -38,16 +38,20 @@ image = (
     .apt_install("libgomp1")
     .add_local_dir(Path(__file__).parent, "/root/train", ignore=["__pycache__", "*.pyc"])
 )
+# Page-type policy v8.2's rules live with the adjudicator (one function both
+# sides import); train_pagetype_v8 --policy-version v8.2 reads it from here.
+POLICY_RULES = Path(__file__).parent.parent / "adjudicate" / "policy_rules.py"
+if POLICY_RULES.exists():
+    image = image.add_local_file(POLICY_RULES, "/root/adjudicate/policy_rules.py")
 app = modal.App("dom-classifier-phase3", image=image)
 
 
-@app.function(cpu=CPUS, memory=65536, timeout=4 * 3600, volumes={"/data": volume})
-def run(argv: str, dataset: str) -> dict:
+def _run(argv: str, dataset: str, cpus: int) -> dict:
     import os
     import subprocess
 
     env = {**os.environ, "DOM_CLASSIFIER_DATASET_VERSION": dataset,
-           "DOM_CLASSIFIER_JOBS": str(CPUS)}
+           "DOM_CLASSIFIER_JOBS": str(cpus)}
     started = time.time()
     result = subprocess.run(["python", *shlex.split(argv)], cwd="/root/train", env=env,
                             capture_output=True, text=True)
@@ -57,9 +61,24 @@ def run(argv: str, dataset: str) -> dict:
             "stdout": result.stdout[-20000:], "stderr": result.stderr[-8000:]}
 
 
+@app.function(cpu=CPUS, memory=65536, timeout=4 * 3600, volumes={"/data": volume})
+def run(argv: str, dataset: str) -> dict:
+    return _run(argv, dataset, CPUS)
+
+
+#: Staging copies and exports are single-threaded Python: a 32-core worker is
+#: waste, and on 2026-10-09 it waited up to 20 minutes for capacity.
+LIGHT_CPUS = 4
+
+
+@app.function(cpu=LIGHT_CPUS, memory=16384, timeout=2 * 3600, volumes={"/data": volume})
+def run_light(argv: str, dataset: str) -> dict:
+    return _run(argv, dataset, LIGHT_CPUS)
+
+
 @app.local_entrypoint()
-def main(argv: str, dataset: str = "silver-v3") -> None:
-    out = run.remote(argv, dataset)
+def main(argv: str, dataset: str = "silver-v3", light: bool = False) -> None:
+    out = (run_light if light else run).remote(argv, dataset)
     print(out["stdout"])
     if out["stderr"]:
         print("--- stderr ---")

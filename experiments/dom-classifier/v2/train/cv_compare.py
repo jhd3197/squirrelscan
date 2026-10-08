@@ -121,6 +121,7 @@ def run_region(args, out: Path) -> dict:
         else:
             ox, oy, ow, ob, _, _, _ = pool(Path(args.old_sample), False, old_groups(args))
             tx, ty, tw, tfold = select(ox, blocks, names)[0], oy, ow, ob % args.folds
+        full = np.zeros((len(ey), len(REGION_CLASSES)), np.float16) if args.dump_probs else None
         for f in range(args.folds):
             started = time.time()
             fit = tfold != f
@@ -133,6 +134,8 @@ def run_region(args, out: Path) -> dict:
             probs = booster.predict(ex[test])
             oof[arm][0][test] = probs.argmax(1)
             oof[arm][1][test] = probs.max(1)
+            if full is not None:
+                full[test] = probs
             timings.append(
                 {
                     "arm": arm,
@@ -143,6 +146,8 @@ def run_region(args, out: Path) -> dict:
             )
             print(json.dumps(timings[-1]), flush=True)
             del booster, probs
+        if full is not None:
+            dump_probs(out, arm, full, evaluate)
         if arm == "old":
             del tx, ty, tw, tfold
     np.savez_compressed(
@@ -271,6 +276,7 @@ def run_section(args, out: Path) -> dict:
             tfold = tb % args.folds
         pred = np.full(len(ey), -1, np.int8)
         conf = np.zeros(len(ey), np.float16)
+        full = np.zeros((len(ey), len(classes)), np.float16) if args.dump_probs else None
         for f in range(args.folds):
             started = time.time()
             fit = tfold != f
@@ -283,6 +289,8 @@ def run_section(args, out: Path) -> dict:
             probs = booster.predict(ex[test])
             pred[test] = probs.argmax(1)
             conf[test] = probs.max(1)
+            if full is not None:
+                full[test] = probs
             timings.append(
                 {
                     "arm": arm,
@@ -293,6 +301,8 @@ def run_section(args, out: Path) -> dict:
             )
             print(json.dumps(timings[-1]), flush=True)
         oof[arm] = (pred, conf)
+        if full is not None:
+            dump_probs(out, arm, full, judged)
     np.savez_compressed(
         out / "rows.npz",
         y=ey.astype(np.int8),
@@ -325,6 +335,13 @@ def run_section(args, out: Path) -> dict:
     return report
 
 
+def dump_probs(out: Path, arm: str, probs: np.ndarray, scored: np.ndarray) -> None:
+    """Full OOF class probabilities (float16) for the SCORED rows only, in
+    rows.npz order restricted to its `evaluate` mask, for label-cleaning work
+    that needs more than the argmax."""
+    np.save(out / f"probs-{arm}.npy", probs[scored])
+
+
 def old_groups(args) -> Path | None:
     return Path(args.old_groups) if args.old_groups else None
 
@@ -347,6 +364,11 @@ def main() -> None:
     parser.add_argument("--arms", default="old,new")
     parser.add_argument("--target-precision", type=float, default=0.95)
     parser.add_argument("--min-fires", type=int, default=15)
+    parser.add_argument(
+        "--dump-probs",
+        action="store_true",
+        help="also write probs-<arm>.npy: float16 OOF probabilities of the scored rows",
+    )
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
     out = Path(args.out)

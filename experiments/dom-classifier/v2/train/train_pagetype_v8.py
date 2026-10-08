@@ -170,6 +170,14 @@ def main() -> None:
                              "on every split alike (model-independent): the site root without "
                              "a query is `homepage`; a page under a /blog/ path segment that Jev "
                              "called docs/article/other is `blog_post` (rule 1: presentation wins)")
+    parser.add_argument("--policy-version", choices=("v8", "v8.2"), default="v8",
+                        help="which mechanical rules --policy-rules applies: v8 (site root, "
+                             "/blog/) or v8.2 (adds locale roots -> homepage and Wix /post/ "
+                             "-> blog_post), via adjudicate/policy_rules.page_rules_v82 so the "
+                             "trainer and the adjudicator apply byte-identical rules")
+    parser.add_argument("--platform-tags", default="",
+                        help="jsonl {p, platform} (corpus/cc_corpus.py tag-pages); v8.2 rule 1 "
+                             "(Wix /post/) needs it")
     parser.add_argument("--cv-folds", type=int, default=0,
                         help="pick thresholds on domain-grouped out-of-fold predictions over "
                              "train+val and ship a model refit on train+val; 0 = val split")
@@ -274,6 +282,20 @@ def main() -> None:
             if bucket < args.dropout_extra * 1000:
                 feat["x"] = feat["x"].copy()
                 feat["x"][base_width:] = np.nan
+    page_rules_v82 = None
+    platforms: dict[str, str] = {}
+    if args.policy_rules and args.policy_version == "v8.2":
+        if not args.platform_tags:
+            raise SystemExit("--policy-version v8.2 needs --platform-tags (rule 1 reads it)")
+        # Imported here, not at the top: v8 runs must not depend on the
+        # adjudicator's module. Locally it sits in ../adjudicate; on Modal the
+        # image adds it beside train/ (modal_phase3.py).
+        import sys
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "adjudicate"))
+        from policy_rules import page_rules_v82
+
+        platforms = {r["p"]: r.get("platform") for r in jsonl(Path(args.platform_tags))}
     urls: dict[str, str] = {}
     if args.policy_rules or args.score_holdout:
         with gzip.open(dataset / "page-index.jsonl.gz", "rt") as handle:
@@ -297,7 +319,13 @@ def main() -> None:
             continue
         if page_id in dropped_pages:
             continue
-        if args.policy_rules and source in ("jev-v8", "jev-v7") and page_id in urls:
+        if page_rules_v82 and source in ("jev-v8", "jev-v7") and page_id in urls:
+            # v8.2 returns the folded class; count only what a RULE changed.
+            fixed = page_rules_v82(label, urls[page_id], platforms.get(page_id))
+            if fixed != fold(label):
+                corrected[split][f"{label}->{fixed}"] += 1
+            label = fixed
+        elif args.policy_rules and source in ("jev-v8", "jev-v7") and page_id in urls:
             parts = urlsplit(urls[page_id])
             segments = [s for s in parts.path.lower().split("/") if s]
             fixed = label
@@ -456,6 +484,7 @@ def main() -> None:
         "counts": {s: dict(c) for s, c in counts.items()},
         "sources": {s: dict(c) for s, c in sources.items()},
         "policyRuleCorrections": {s: dict(c) for s, c in corrected.items()},
+        "policyVersion": args.policy_version if args.policy_rules else None,
         "jevOverrides": overridden,
         "droppedAmbiguous": len(ambiguous),
         "freeAgreement": agreement, "freeClassesUsed": sorted(free_ok),
