@@ -32,18 +32,29 @@ for (const [network, prefix] of [
   ["169.254.0.0", 16],
   ["172.16.0.0", 12],
   ["192.0.0.0", 24],
+  ["192.0.2.0", 24],
   ["192.168.0.0", 16],
   ["198.18.0.0", 15],
+  ["198.51.100.0", 24],
+  ["203.0.113.0", 24],
   ["224.0.0.0", 3],
 ] as const)
   NON_PUBLIC.addSubnet(network, prefix, "ipv4");
 for (const [network, prefix] of [
-  ["::", 128],
-  ["::1", 128],
+  // IPv4-compatible (deprecated), including :: and ::1.
+  ["::", 96],
+  // IPv4-translated (SIIT); mapped ::ffff:0:0/96 is checked as IPv4 by BlockList.
+  ["::ffff:0:0:0", 96],
   ["64:ff9b::", 96],
+  ["64:ff9b:1::", 48],
   ["100::", 64],
+  // Teredo and 6to4 can embed a private IPv4 address.
+  ["2001::", 32],
+  ["2001:db8::", 32],
+  ["2002::", 16],
   ["fc00::", 7],
   ["fe80::", 10],
+  ["fec0::", 10],
   ["ff00::", 8],
 ] as const)
   NON_PUBLIC.addSubnet(network, prefix, "ipv6");

@@ -101,6 +101,15 @@ describe("replay egress guard", () => {
       "fd00::1",
       "fe80::1",
       "ff02::1",
+      "::127.0.0.1",
+      "::ffff:0:7f00:1",
+      "64:ff9b:1::1",
+      "fec0::1",
+      "2001::1",
+      "2002:7f00:1::1",
+      "192.0.2.1",
+      "198.51.100.1",
+      "203.0.113.1",
       "not-an-ip",
     ])
       expect(isPublicAddress(address)).toBe(false);
