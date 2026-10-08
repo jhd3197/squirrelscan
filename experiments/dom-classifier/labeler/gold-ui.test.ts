@@ -29,7 +29,10 @@ describe.skipIf(browserSkipReason !== null)(
       pricing: "msug_00000000-0000-4000-8000-0000000000a3",
       pricingBanner: "msug_00000000-0000-4000-8000-0000000000a4",
       pricingFooter: "msug_00000000-0000-4000-8000-0000000000a5",
+      commentBlind: "msug_00000000-0000-4000-8000-0000000000a6",
+      commentShown: "msug_00000000-0000-4000-8000-0000000000a7",
     };
+    const commentNodeId = "node_aaaaaaaaaaaaaaaaaaaaaa03";
     const png = Buffer.from(
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/sgAAAABJRU5ErkJggg==",
       "base64",
@@ -74,6 +77,17 @@ describe.skipIf(browserSkipReason !== null)(
           text: "Footer links",
           selector: "html > body:nth-of-type(1) > footer:nth-of-type(1)",
           rect: { x: 0, y: 500, width: 1440, height: 120 },
+          depth: 2,
+          suggestion: null,
+        },
+        {
+          id: commentNodeId,
+          parentId: null,
+          tag: "li",
+          role: null,
+          text: "Great post, thanks",
+          selector: "html > body:nth-of-type(1) > li:nth-of-type(1)",
+          rect: { x: 0, y: 300, width: 900, height: 80 },
           depth: 2,
           suggestion: null,
         },
@@ -126,6 +140,13 @@ describe.skipIf(browserSkipReason !== null)(
           row(ids.pricingFooter, pricingPageId, footerNodeId, {
             mappedLabels: {},
             blindAxis: "sectionPurposeV3",
+          }),
+          row(ids.commentBlind, pricingPageId, commentNodeId, {
+            mappedLabels: {},
+            blindAxis: "sectionPurposeV3",
+          }),
+          row(ids.commentShown, pricingPageId, commentNodeId, {
+            mappedLabels: { sectionPurposeV3: ["comments"] },
           }),
         ]
           .map((item) => JSON.stringify(item))
@@ -216,13 +237,34 @@ describe.skipIf(browserSkipReason !== null)(
         saved = posted("/api/annotations");
         await page.keyboard.press("u");
         await saved;
+
+        // Blind section: I asks which section the outlined ITEM belongs to.
+        await page.waitForFunction(() =>
+          document.querySelector("#gold-progress")?.textContent?.startsWith("5 /"),
+        );
+        await asked("What is the outlined element?");
+        await page.keyboard.press("i");
+        expect(await page.locator("#gold-fix-heading").textContent()).toBe(
+          "An individual item of which section?",
+        );
+        await page.keyboard.type("com");
+        saved = posted("/api/annotations");
+        await page.keyboard.press("Enter");
+        await saved;
+
+        // Shown section: I records "an item of" the shown class directly.
+        await asked("Is the outlined element a comments section?");
+        expect(await page.locator("#gold-keys").textContent()).toContain("I an item of it");
+        saved = posted("/api/annotations");
+        await page.keyboard.press("i");
+        await saved;
         await asked("Every gold question has an answer.");
 
-        // Cmd-Z undoes the unsure, then J skips the reopened question.
+        // Cmd-Z undoes the last answer, then J skips the reopened question.
         const undone = posted("/api/review-actions/undo");
         await page.keyboard.press("Meta+z");
         await undone;
-        await asked("What is the outlined element?");
+        await asked("Is the outlined element a comments section?");
         await page.keyboard.press("j");
         await asked("Only skipped questions are left.");
 
@@ -231,17 +273,30 @@ describe.skipIf(browserSkipReason !== null)(
           [false, "corrected"],
           [true, "corrected"],
           [false, "rejected"],
-          [true, "pending"],
+          [true, "unsure"],
+          [true, "corrected"],
+          [false, "pending"],
         ]);
         expect(store.pageAnnotationsForPage(pricingPageId).at(-1)).toMatchObject({
           pageTypesV8: ["pricing"],
           modelSuggestionId: ids.pricing,
           modelReview: "correct",
         });
-        expect(store.readAnnotations().at(-1)).toMatchObject({
+        const effective = store.effectiveAnnotations();
+        expect(effective.find((row) => row.modelSuggestionId === ids.pricingFooter)).toMatchObject({
           decision: "unsure",
-          modelSuggestionId: ids.pricingFooter,
         });
+        expect(effective.find((row) => row.modelSuggestionId === ids.commentBlind)).toMatchObject({
+          sectionPurposesV3: ["none"],
+          sectionItemOfV3: "comments",
+          modelReview: "correct",
+        });
+        // The undone shown-item answer stays in the journal, undone.
+        expect(store.readAnnotations().at(-1)).toMatchObject({
+          sectionItemOfV3: "comments",
+          modelSuggestionId: ids.commentShown,
+        });
+        expect(effective.some((row) => row.modelSuggestionId === ids.commentShown)).toBe(false);
         expect(errors).toEqual([]);
       } finally {
         await page.close();

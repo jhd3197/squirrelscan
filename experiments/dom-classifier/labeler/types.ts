@@ -742,6 +742,12 @@ export type AnnotationInput = {
   purposes?: readonly Purpose[];
   /** Gold axis: section purpose at policy-section-v3 granularity. Exactly one value. */
   sectionPurposesV3?: readonly SectionPurposeV3[];
+  /**
+   * The outline is ONE item of this section (one comment, review, FAQ question,
+   * product card or breadcrumb link). Only with `sectionPurposesV3: ["none"]`,
+   * so v3 scoring reads it as none; it seeds a later item layer.
+   */
+  sectionItemOfV3?: SectionPurposeV3;
   comment?: string;
   boundary: Boundary;
   clientRequestId: string;
@@ -765,6 +771,7 @@ export type Annotation = Omit<
   | "observedState"
   | "purposes"
   | "sectionPurposesV3"
+  | "sectionItemOfV3"
   | "comment"
   | "captureHash"
   | "supersedes"
@@ -781,6 +788,8 @@ export type Annotation = Omit<
   purposes: Purpose[];
   /** Present only on gold-axis answers; rows without it are unchanged. */
   sectionPurposesV3?: SectionPurposeV3[];
+  /** Present only on an "individual item" answer; see AnnotationInput. */
+  sectionItemOfV3?: SectionPurposeV3;
   /** 0 means a v1/v2 compatibility projection, not a new human v3 claim. */
   componentSchemaVersion: 0 | 3;
   componentProjection: ComponentProjection | null;

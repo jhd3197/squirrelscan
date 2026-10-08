@@ -288,6 +288,8 @@ const state = {
     // Class picker: always open on a blind question, opened by S on a shown one.
     picking: false,
     filter: "",
+    // I on a section: the outline is ONE item of a section (a comment, a review, an FAQ question).
+    itemMode: false,
   },
 };
 const $ = (id) => document.getElementById(id);
@@ -2778,6 +2780,7 @@ function nextGoldPosition(from) {
 async function showGoldItem(position) {
   state.gold.picking = false;
   state.gold.filter = "";
+  state.gold.itemMode = false;
   if (position < 0) {
     state.gold.position = -1;
     renderGold();
@@ -2822,7 +2825,10 @@ function goldMatches(item) {
   const first = item.blind
     ? []
     : item.alternatives.filter((label) => label !== item.label && all.includes(label));
-  const ordered = [...first, ...all.filter((label) => label !== item.label && !first.includes(label))];
+  // An item belongs to a real section, which may be the shown one; never "none".
+  const ordered = state.gold.itemMode
+    ? all.filter((label) => label !== "none")
+    : [...first, ...all.filter((label) => label !== item.label && !first.includes(label))];
   const filter = state.gold.filter;
   if (!filter) return ordered;
   return ordered.filter((label) =>
@@ -2876,15 +2882,18 @@ function renderGold() {
     item.status === "pending"
       ? ""
       : `Saved: ${GOLD_STATUS_TEXT[item.status] || item.status}. A new answer replaces it.`;
+  const itemKey = page ? "" : "I individual item · ";
   $("gold-keys").textContent = picking
-    ? `Type to filter · 1–9, 0 pick · Enter top match · U unsure · ${item.blind ? "" : "Esc back · "}J skip · K back · ⌘Z undo`
-    : "Y yes · N no · S suggest the right class · J skip · K back · ⌘Z undo";
+    ? `Type to filter · 1–9, 0 pick · Enter top match · ${itemKey}U unsure · ${item.blind && !state.gold.itemMode ? "" : "Esc back · "}J skip · K back · ⌘Z undo`
+    : `Y yes · N no · S suggest the right class · ${page ? "" : "I an item of it · "}J skip · K back · ⌘Z undo`;
   if (picking) renderGoldPicker(item, matches);
 }
 function renderGoldPicker(item, matches) {
-  $("gold-fix-heading").textContent = item.blind
-    ? "Pick the class"
-    : `Not ${goldClassName(item.axis, item.label)}? Pick the right class`;
+  $("gold-fix-heading").textContent = state.gold.itemMode
+    ? "An individual item of which section?"
+    : item.blind
+      ? "Pick the class"
+      : `Not ${goldClassName(item.axis, item.label)}? Pick the right class`;
   $("gold-filter").textContent = state.gold.filter || "type to filter…";
   $("gold-filter").classList.toggle("empty", !state.gold.filter);
   const button = (label, index) =>
@@ -2893,7 +2902,7 @@ function renderGoldPicker(item, matches) {
       {
         type: "button",
         title: goldQuestionFor(item.axis, label)?.definition || "",
-        onClick: () => saveGoldAnswer("correct", label),
+        onClick: () => pickGoldClass(label),
       },
       [
         ...(index < 10 ? [el("kbd", { text: String((index + 1) % 10) }), " "] : []),
@@ -3040,14 +3049,17 @@ async function saveGoldAnswer(review, fixLabel = null) {
         decision: "label",
         captureHash: item.captureHash,
         modelSuggestionId: item.suggestionId,
-        modelReview: review,
+        // An item answer is a correction: under v3 the outlined element is none.
+        modelReview: review === "item" ? "correct" : review,
       };
       if (item.nodeId) {
         const response = await post("/api/annotations", {
           ...binding,
           pageId: item.pageId,
           nodeId: item.nodeId,
-          sectionPurposesV3: [label],
+          ...(review === "item"
+            ? { sectionPurposesV3: ["none"], sectionItemOfV3: label }
+            : { sectionPurposesV3: [label] }),
           boundary: "correct",
         });
         action = { kind: "annotation", id: response.annotation.id };
@@ -3065,7 +3077,7 @@ async function saveGoldAnswer(review, fixLabel = null) {
         ? "unsure"
         : review === "accept"
           ? "accepted"
-          : review === "correct"
+          : review === "correct" || review === "item"
             ? "corrected"
             : "rejected";
     state.gold.undo.push({ position, item, previousStatus, action });
@@ -3075,6 +3087,8 @@ async function saveGoldAnswer(review, fixLabel = null) {
         ? "Saved yes"
         : review === "correct"
           ? "Saved class"
+          : review === "item"
+            ? `Saved: an item of ${goldClassName(item.axis, fixLabel)}`
           : review === "unsure"
             ? "Saved unsure"
             : "Saved no",
@@ -3136,6 +3150,27 @@ function browsePage(index) {
   }
   loadPage(index);
 }
+/** A class picked in the picker: the answer itself, or the section the outlined item belongs to. */
+function pickGoldClass(label) {
+  saveGoldAnswer(state.gold.itemMode ? "item" : "correct", label);
+}
+/**
+ * I on a section: the outline is one item of a section. A shown class is that
+ * section unless it is none; otherwise the picker asks which section.
+ */
+function goldItemOf() {
+  const item = currentGoldItem();
+  if (!item || item.axis !== "sectionPurposeV3" || !goldReady(item)) return;
+  if (!item.blind && !state.gold.picking && item.label && item.label !== "none") {
+    saveGoldAnswer("item", item.label);
+    return;
+  }
+  // In an open picker, I toggles item mode; otherwise it opens the picker in item mode.
+  state.gold.itemMode = state.gold.picking || item.blind ? !state.gold.itemMode : true;
+  state.gold.picking = true;
+  state.gold.filter = "";
+  renderGold();
+}
 function openGoldPicker() {
   const item = currentGoldItem();
   if (!item || item.blind || !goldReady(item)) return;
@@ -3175,18 +3210,19 @@ function handleGoldKey(event) {
     if (/^[0-9]$/.test(key)) {
       event.preventDefault();
       const label = matches[(Number(key) + 9) % 10];
-      if (label) saveGoldAnswer("correct", label);
+      if (label) pickGoldClass(label);
       return;
     }
     if (key === "enter") {
       if (event.target?.closest?.("button, a, [role='button']")) return;
       event.preventDefault();
-      if (state.gold.filter && matches[0]) saveGoldAnswer("correct", matches[0]);
+      if (state.gold.filter && matches[0]) pickGoldClass(matches[0]);
       return;
     }
     if (key === "escape") {
       event.preventDefault();
       if (state.gold.filter) state.gold.filter = "";
+      else if (state.gold.itemMode) state.gold.itemMode = false;
       else if (!item.blind) state.gold.picking = false;
       renderGold();
       return;
@@ -3199,8 +3235,10 @@ function handleGoldKey(event) {
     }
     if (/^[a-z]$/.test(key)) {
       event.preventDefault();
-      // No class has a word starting with u, j or k, so on an empty filter they are commands.
-      if (!state.gold.filter && key === "u") saveGoldAnswer("unsure");
+      // No class has a word starting with u, j or k, so on an empty filter they are
+      // commands; i is too on a section (type "bus" to reach Business info).
+      if (!state.gold.filter && key === "i" && item.axis === "sectionPurposeV3") goldItemOf();
+      else if (!state.gold.filter && key === "u") saveGoldAnswer("unsure");
       else if (!state.gold.filter && key === "j") skipGoldItem();
       else if (!state.gold.filter && key === "k") previousGoldItem();
       else {
@@ -3220,6 +3258,9 @@ function handleGoldKey(event) {
   } else if (key === "s") {
     event.preventDefault();
     openGoldPicker();
+  } else if (key === "i" && item.axis === "sectionPurposeV3") {
+    event.preventDefault();
+    goldItemOf();
   } else if (key === "j") {
     event.preventDefault();
     skipGoldItem();

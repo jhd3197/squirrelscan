@@ -275,6 +275,7 @@ function validateAnnotation(value: unknown): AnnotationInput {
     "observedState",
     "purposes",
     "sectionPurposesV3",
+    "sectionItemOfV3",
     "comment",
     "boundary",
     "clientRequestId",
@@ -390,6 +391,8 @@ function validateAnnotation(value: unknown): AnnotationInput {
     observedState: observedState as AnnotationInput["observedState"],
     purposes: purposes as AnnotationInput["purposes"],
     sectionPurposesV3: sectionPurposesV3 as AnnotationInput["sectionPurposesV3"],
+    // Validated against sectionPurposesV3 by the store.
+    sectionItemOfV3: input.sectionItemOfV3 as AnnotationInput["sectionItemOfV3"],
     comment,
     boundary: boundary as AnnotationInput["boundary"],
     clientRequestId,

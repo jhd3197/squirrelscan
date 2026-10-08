@@ -437,6 +437,50 @@ describe("gold review axes", () => {
     expect(store.goldQueue().map((item) => item.status)).toEqual(["corrected", "unsure"]);
   });
 
+  test("an individual-item answer is none on v3 plus the section it belongs to", async () => {
+    const question = sectionQuestion();
+    const { store } = goldFixture([question]);
+    const base = {
+      pageId: goldPageId,
+      nodeId: bannerNodeId,
+      decision: "label",
+      boundary: "correct",
+      captureHash,
+      modelSuggestionId: question.id,
+      modelReview: "correct",
+    };
+    const saved = await request(store, "/api/annotations", {
+      ...base,
+      sectionPurposesV3: ["none"],
+      sectionItemOfV3: "comments",
+      clientRequestId: "item_of_1",
+    });
+    expect(saved.status).toBe(201);
+    expect(saved.body.annotation).toMatchObject({
+      sectionPurposesV3: ["none"],
+      sectionItemOfV3: "comments",
+    });
+    // An item must sit on a none answer and name a real section.
+    for (const [sectionPurposesV3, sectionItemOfV3, id] of [
+      [["comments"], "comments", "item_of_bad_1"],
+      [["none"], "none", "item_of_bad_2"],
+      [["none"], "not_a_class", "item_of_bad_3"],
+    ] as const)
+      expect(
+        (
+          await request(store, "/api/annotations", {
+            ...base,
+            sectionPurposesV3,
+            sectionItemOfV3,
+            clientRequestId: id,
+          })
+        ).status,
+      ).toBe(400);
+    expect(store.goldQueue()[0]!.status).toBe("corrected");
+    // Older rows carry no item field at all.
+    expect(store.readAnnotations().filter((row) => "sectionItemOfV3" in row)).toHaveLength(1);
+  });
+
   test("gold answers count in the review stats like any model review", () => {
     const question = pageQuestion();
     const { store } = goldFixture([question]);

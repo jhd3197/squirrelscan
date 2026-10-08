@@ -798,6 +798,7 @@ export class LabelStore {
     const labels = labelsForInput(input);
     const component = componentForInput(input);
     const sectionPurposesV3 = goldAxis(input.sectionPurposesV3, SECTION_PURPOSES_V3, "sectionPurposesV3");
+    const sectionItemOfV3 = itemOf(input.sectionItemOfV3, sectionPurposesV3);
     if (
       input.decision === "label" &&
       labels.regions.length + labels.functions.length + component.purposes.length === 0 &&
@@ -869,6 +870,7 @@ export class LabelStore {
             component,
             modelReview,
             sectionPurposesV3,
+            sectionItemOfV3,
           )
         )
           throw new StoreError(409, "clientRequestId was already used for a different annotation");
@@ -909,6 +911,7 @@ export class LabelStore {
         purposes: component.purposes,
         // Written only when present, so rows without the gold axis are unchanged.
         ...(sectionPurposesV3.length ? { sectionPurposesV3 } : {}),
+        ...(sectionItemOfV3 ? { sectionItemOfV3 } : {}),
         componentSchemaVersion: component.hasV3Data ? 3 : 0,
         componentProjection: null,
         purposeProjection: null,
@@ -1193,11 +1196,13 @@ function sameAnnotationRequest(
   component: ReturnType<typeof componentForInput>,
   modelReview: { id: string; review: ModelReview } | null,
   sectionPurposesV3: SectionPurposeV3[],
+  sectionItemOfV3: SectionPurposeV3 | null,
 ) {
   return (
     annotation.pageId === input.pageId &&
     annotation.nodeId === input.nodeId &&
     sameLabels(annotation.sectionPurposesV3 ?? [], sectionPurposesV3) &&
+    (annotation.sectionItemOfV3 ?? null) === sectionItemOfV3 &&
     annotation.decision === input.decision &&
     annotation.role === persistedRole &&
     annotation.context === (input.context ?? null) &&
@@ -1406,6 +1411,23 @@ function checkedAxis<T extends string>(value: unknown, allowed: readonly T[], na
   return labels;
 }
 
+/**
+ * "An individual item of <class>": a section class other than none, and only
+ * on an answer whose v3 purpose is none, so v3 scoring is unchanged by it.
+ */
+function itemOf(value: unknown, sectionPurposesV3: SectionPurposeV3[]): SectionPurposeV3 | null {
+  if (value === undefined || value === null) return null;
+  if (
+    typeof value !== "string" ||
+    !SECTION_PURPOSES_V3.includes(value as SectionPurposeV3) ||
+    value === "none"
+  )
+    throw new StoreError(400, "Invalid sectionItemOfV3");
+  if (sectionPurposesV3.length !== 1 || sectionPurposesV3[0] !== "none")
+    throw new StoreError(400, "sectionItemOfV3 needs sectionPurposesV3 none");
+  return value as SectionPurposeV3;
+}
+
 /** A gold answer is one class: absent means no gold claim, never a negative. */
 function goldAxis<T extends string>(value: unknown, allowed: readonly T[], name: string): T[] {
   if (value === undefined) return [];
@@ -1488,6 +1510,7 @@ function normalizeStoredAnnotation(value: unknown): Annotation | null {
       SECTION_PURPOSES_V3,
       "sectionPurposesV3",
     );
+    const sectionItemOfV3 = itemOf(annotation.sectionItemOfV3, sectionPurposesV3);
     return {
       ...annotation,
       role,
@@ -1495,6 +1518,7 @@ function normalizeStoredAnnotation(value: unknown): Annotation | null {
       regions: labels.regions,
       functions: labels.functions,
       ...(sectionPurposesV3.length ? { sectionPurposesV3 } : {}),
+      ...(sectionItemOfV3 ? { sectionItemOfV3 } : {}),
       labelSchemaVersion: hasV2Axes ? 2 : 1,
       componentType: component.componentType,
       componentSubtype: component.componentSubtype,
