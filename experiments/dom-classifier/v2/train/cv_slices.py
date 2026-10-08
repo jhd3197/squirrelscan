@@ -114,10 +114,13 @@ def compare(y, arms: dict, classes, pages, tags, new_pages, skip=()) -> dict:
         for c in classes:
             if c in skip:
                 continue
-            row = {arm: report[name][arm][c] for arm in arms}
-            old, new = row.get("old"), row.get("new")
-            if old and new and old["coverage"] is not None and new["coverage"] is not None:
-                report[name].setdefault("delta", {})[c] = {
+            old = report[name]["old"][c]
+            for arm in arms:
+                new = report[name][arm][c]
+                if arm == "old" or old["coverage"] is None or new["coverage"] is None:
+                    continue
+                key = "delta" if arm == "new" else f"delta:{arm}"
+                report[name].setdefault(key, {})[c] = {
                     "coverage": round(new["coverage"] - old["coverage"], 4),
                     "precision": (
                         round(new["precision"] - old["precision"], 4)
@@ -126,6 +129,57 @@ def compare(y, arms: dict, classes, pages, tags, new_pages, skip=()) -> dict:
                     ),
                 }
     return report
+
+
+#: Threshold rule per head: (floor, min fires overall). Target is 0.95.
+HEAD_RULES = {"region": (0.5, 50), "section": (0.3, 15), "pagetype": (0.3, 20)}
+
+
+def strict_thresholds(
+    head: str,
+    classes: list[str],
+    pred: np.ndarray,
+    conf: np.ndarray,
+    y: np.ndarray,
+    constraints: dict[str, np.ndarray],
+    target: float = 0.95,
+    min_slice_fires: int = 20,
+) -> np.ndarray:
+    """Lowest threshold per class at which precision >= target holds on EVERY
+    constraint slice that has >= min_slice_fires fires (a slice with fewer is
+    not evidence either way), with the head's own floor and minimum fires. The
+    variant for shipping old+new without letting the easy new-platform pages
+    carry a class's precision on the old distribution."""
+    floor, min_fires = HEAD_RULES[head]
+    out = []
+    for i, name in enumerate(classes):
+        chosen = 1.01
+        if head == "section" and name == "none":
+            out.append(0.0)
+            continue
+        for t in np.arange(floor, 1.0, 0.01):
+            fires = (pred == i) & (conf >= t)
+            if int(fires.sum()) < min_fires:
+                break
+            ok = True
+            for mask in constraints.values():
+                hit = fires & mask
+                if int(hit.sum()) >= min_slice_fires and float((y[hit] == i).mean()) < target:
+                    ok = False
+                    break
+            if ok and float((y[fires] == i).mean()) >= target:
+                chosen = round(float(t), 2)
+                break
+        out.append(chosen)
+    return np.asarray(out)
+
+
+def add_strict(head: str, arms: dict, y, classes, pages, tags, new_pages, slices: str) -> dict:
+    masks = slice_masks(pages, tags, new_pages)
+    constraints = {name: masks[name] for name in slices.split(",") if name in masks}
+    pred, conf, _ = arms["new"]
+    arms["new-strict"] = (pred, conf, strict_thresholds(head, classes, pred, conf, y, constraints))
+    return {"constraints": list(constraints), "thresholds": arms["new-strict"][2].tolist()}
 
 
 def run_pagetype(args) -> dict:
@@ -152,11 +206,15 @@ def run_pagetype(args) -> dict:
         )
         for arm in arms
     }
+    tags, new_pages = load_tags(args), load_new(args)
+    strict = add_strict("pagetype", packed, y, classes, pages, tags, new_pages, args.strict_slices)
     return {
         "head": "pagetype",
         "classes": classes,
         "pages": len(pages),
-        "slices": compare(y, packed, classes, pages, load_tags(args), load_new(args)),
+        "thresholds": {arm: packed[arm][2].tolist() for arm in packed},
+        "strict": strict,
+        "slices": compare(y, packed, classes, pages, tags, new_pages),
     }
 
 
@@ -185,17 +243,22 @@ def run_rows(args) -> dict:
     old_rows = np.asarray([p not in new_pages for p in pages])
     pred, conf, pooled = arms["old"]
     arms["old"] = (pred, conf, pick_like_head(report, pred[old_rows], conf[old_rows], y[old_rows]))
+    tags = load_tags(args)
+    strict = add_strict(
+        report["head"], arms, y, classes, pages, tags, new_pages, args.strict_slices
+    )
     return {
         "head": report["head"],
         "classes": classes,
         "rows": int(keep.sum()),
         "oldThresholdsOn": "old pages only",
+        "strict": strict,
         "thresholds": {
             "old": arms["old"][2].tolist(),
             "oldPooled": pooled.tolist(),
             "new": arms["new"][2].tolist(),
         },
-        "slices": compare(y, arms, classes, pages, load_tags(args), new_pages, skip),
+        "slices": compare(y, arms, classes, pages, tags, new_pages, skip),
     }
 
 
@@ -231,31 +294,55 @@ def fmt(cell: dict | None) -> str:
 
 
 def markdown(report: dict, slices: list[str], min_support: int) -> str:
-    """One table per slice: per class P@t/coverage, old -> new, and the
-    coverage delta; classes under --min-support rows in the slice are skipped."""
+    """One table per slice: per class P@t/coverage for the old arm, the new arm
+    at its pooled thresholds and (when present) at the strict per-slice
+    thresholds, with coverage deltas against old. Precision under 0.95 is
+    marked `!`. Classes under --min-support rows in the slice are skipped."""
+    strict = "new-strict" in next(iter(report["slices"].values()))
     out = [f"## {report['head']} (old vs old+new, OOF, each arm at its own thresholds)", ""]
+    if strict:
+        out.append(
+            f"new-strict: one threshold per class that holds P>=0.95 on each of "
+            f"{', '.join(report['strict']['constraints'])} (slices with >=20 fires)"
+        )
+        out.append("")
+
+    def cell(c: dict | None) -> str:
+        text = fmt(c)
+        if c and c.get("precision") is not None and c["precision"] < 0.95:
+            text += " !"
+        return text
+
     for name in slices:
         block = report["slices"].get(name)
         if not block:
             continue
-        overall = {arm: block[arm]["_overall"] for arm in ("old", "new")}
+        arms = ["old", "new"] + (["new-strict"] if strict else [])
+        overall = {arm: block[arm]["_overall"] for arm in arms}
         out.append(
-            f"### {name}: rows {overall['new']['rows']}, firing old {overall['old']['firing']} "
-            f"/ new {overall['new']['firing']}, accuracy when firing "
-            f"{overall['old']['accuracyWhenFiring']} -> {overall['new']['accuracyWhenFiring']}"
+            f"### {name}: rows {overall['new']['rows']}; firing "
+            + " / ".join(f"{arm} {overall[arm]['firing']}" for arm in arms)
+            + "; accuracy when firing "
+            + " / ".join(f"{overall[arm]['accuracyWhenFiring']}" for arm in arms)
         )
         out.append("")
-        out.append("| class | support | old P@t/cov | new P@t/cov | Δcov |")
-        out.append("|---|---|---|---|---|")
+        head = "| class | support | old P@t/cov | new P@t/cov | Δcov |"
+        rule = "|---|---|---|---|---|"
+        if strict:
+            head += " new-strict P@t/cov | Δcov |"
+            rule += "---|---|"
+        out += [head, rule]
         for cls in report["classes"]:
-            old, new = block["old"].get(cls), block["new"].get(cls)
+            old = block["old"].get(cls)
             if not old or old["support"] < min_support or cls == "none":
                 continue
+            row = f"| {cls} | {old['support']} | {cell(old)} | {cell(block['new'][cls])} | "
             delta = block.get("delta", {}).get(cls, {}).get("coverage")
-            out.append(
-                f"| {cls} | {old['support']} | {fmt(old)} | {fmt(new)} | "
-                f"{'' if delta is None else f'{delta:+.2f}'} |"
-            )
+            row += f"{'' if delta is None else f'{delta:+.2f}'} |"
+            if strict:
+                d2 = block.get("delta:new-strict", {}).get(cls, {}).get("coverage")
+                row += f" {cell(block['new-strict'][cls])} | {'' if d2 is None else f'{d2:+.2f}'} |"
+            out.append(row)
         out.append("")
     return "\n".join(out)
 
@@ -282,6 +369,11 @@ def main() -> None:
         if name == "table":
             continue
         p.add_argument("--tags", required=True)
+        p.add_argument(
+            "--strict-slices",
+            default="corpus:old,corpus:new",
+            help="slices on which the new-strict variant must hold the target",
+        )
         p.add_argument("--new-pages", required=True)
         p.add_argument("--out", required=True)
     args = parser.parse_args()
