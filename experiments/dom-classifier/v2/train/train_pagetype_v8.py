@@ -184,6 +184,14 @@ def main() -> None:
     parser.add_argument("--lcb", action="store_true",
                         help="with --cv-folds: a threshold must give mean-1sd of the per-fold "
                              "precision >= target, not just pooled precision (fold-variance margin)")
+    parser.add_argument("--fit-exclude", default="",
+                        help="file of page ids (one per line) that no model in this run is FIT "
+                             "on (grid, CV folds, refit) and that thresholds are not picked on, "
+                             "but that are still predicted out-of-fold and dumped: the "
+                             "old-corpus arm of an old vs old+new comparison")
+    parser.add_argument("--drop-pages", action="append", default=[],
+                        help="file of page ids whose label is too uncertain to use (e.g. a "
+                             "Jev/Clef disagreement): left out of every split; repeatable")
     parser.add_argument("--dump-selection", action="store_true",
                         help="write the selection split's per-page predictions (OOF with "
                              "--cv-folds) for error audits; never holdout")
@@ -215,6 +223,16 @@ def main() -> None:
             first = jev8.get(row["pageId"])
             if first is not None and first["pageType"] != row.get("pageType"):
                 ambiguous.add(row["pageId"])
+
+    def id_lines(path: str) -> set[str]:
+        return {line.strip() for line in Path(path).read_text().splitlines() if line.strip()}
+
+    fit_exclude = id_lines(args.fit_exclude) if args.fit_exclude else set()
+    dropped_pages: set[str] = set()
+    for path in args.drop_pages:
+        dropped_pages |= id_lines(path)
+    if fit_exclude and args.template_stack:
+        raise SystemExit("--fit-exclude does not support --template-stack")
     overridden = 0
     for path in args.jev_override:
         for row in jsonl(Path(path)):
@@ -277,6 +295,8 @@ def main() -> None:
             label, weight, source = schema[page_id], agreement[schema[page_id]], "schema"
         if label is None or (split != "holdout" and page_id in ambiguous):
             continue
+        if page_id in dropped_pages:
+            continue
         if args.policy_rules and source in ("jev-v8", "jev-v7") and page_id in urls:
             parts = urlsplit(urls[page_id])
             segments = [s for s in parts.path.lower().split("/") if s]
@@ -304,6 +324,9 @@ def main() -> None:
     xt, yt, wt, ids_t = matrix("train")
     xv, yv, wv, ids_v = matrix("val")
     xh, yh, _, ids_h = matrix("holdout")
+    # Rows a model may be fit on (all of them unless --fit-exclude).
+    ft = np.asarray([p not in fit_exclude for p in ids_t])
+    fv = np.asarray([p not in fit_exclude for p in ids_v])
     print(json.dumps({"classes": classes, "counts": {s: dict(c) for s, c in counts.items()},
                       "sources": {s: dict(c) for s, c in sources.items()},
                       "freeAgreement": agreement, "freeClassesUsed": sorted(free_ok)}), flush=True)
@@ -315,18 +338,19 @@ def main() -> None:
     grid = []
     for leaves, lr in ((31, 0.05), (63, 0.05), (127, 0.05)):
         params = {**base, "num_leaves": leaves, "learning_rate": lr, "min_data_in_leaf": 20}
-        booster = lgb.train(params, lgb.Dataset(xt, label=yt, weight=wt), num_boost_round=args.rounds,
-                            valid_sets=[lgb.Dataset(xv, label=yv, weight=wv)],
+        booster = lgb.train(params, lgb.Dataset(xt[ft], label=yt[ft], weight=wt[ft]),
+                            num_boost_round=args.rounds,
+                            valid_sets=[lgb.Dataset(xv[fv], label=yv[fv], weight=wv[fv])],
                             callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(0)])
         vp = booster.predict(xv, num_iteration=booster.best_iteration)
-        val_f1 = per_class(yv, vp.argmax(1), np.ones(len(yv), bool), classes)["macroF1"]
+        val_f1 = per_class(yv[fv], vp[fv].argmax(1), np.ones(int(fv.sum()), bool), classes)["macroF1"]
         grid.append({"leaves": leaves, "lr": lr, "iters": booster.best_iteration, "valMacroF1": val_f1})
         print(json.dumps(grid[-1]), flush=True)
         if best is None or val_f1 > best[0]:
             best = (val_f1, booster, vp)
     _, booster, vp = best
     iterations = int(booster.best_iteration)
-    selection = {"yEval": yv, "probs": vp, "name": "val", "ids": ids_v}
+    selection = {"yEval": yv, "probs": vp, "name": "val", "ids": ids_v, "fit": fv}
     if args.cv_folds > 0:
         # Thresholds from domain-grouped out-of-fold predictions over train+val:
         # every pool page is scored by a model that never saw its domain, and
@@ -339,13 +363,15 @@ def main() -> None:
         groups = [features[p]["d"] for p in [*ids_t, *ids_v]]
         fold_of = np.asarray([int(hashlib.sha256(g.encode()).hexdigest()[:8], 16) % args.cv_folds
                               for g in groups])
+        fp = np.concatenate([ft, fv])
         oof = np.zeros((xp.shape[0], len(classes)))
         for f in range(args.cv_folds):
             test = fold_of == f
-            fb = lgb.train(params, lgb.Dataset(xp[~test], label=yp[~test], weight=wp[~test]),
+            fit = ~test & fp
+            fb = lgb.train(params, lgb.Dataset(xp[fit], label=yp[fit], weight=wp[fit]),
                            num_boost_round=iterations)
             oof[test] = fb.predict(xp[test])
-        booster = lgb.train(params, lgb.Dataset(xp, label=yp, weight=wp),
+        booster = lgb.train(params, lgb.Dataset(xp[fp], label=yp[fp], weight=wp[fp]),
                             num_boost_round=iterations)
         booster.best_iteration = iterations
         if args.template_stack:
@@ -385,14 +411,18 @@ def main() -> None:
                                 num_boost_round=iterations)
             booster.best_iteration = iterations
         selection = {"yEval": yp, "probs": oof, "name": f"oof-{args.cv_folds}fold",
-                     "ids": [*ids_t, *ids_v], "folds": fold_of}
+                     "ids": [*ids_t, *ids_v], "folds": fold_of, "fit": fp}
+    # Thresholds are picked on the rows the arm may fit on: an excluded page is
+    # one the arm's corpus never had, so it cannot calibrate on it either.
+    sel_fit = selection["fit"]
     if args.lcb and "folds" in selection:
-        thresholds = pick_thresholds_lcb(selection["probs"], selection["yEval"], selection["folds"],
-                                         classes, args.target_precision, args.min_fires)
+        thresholds = pick_thresholds_lcb(selection["probs"][sel_fit], selection["yEval"][sel_fit],
+                                         selection["folds"][sel_fit], classes,
+                                         args.target_precision, args.min_fires)
         selection["name"] += "-lcb"
     else:
-        thresholds = pick_thresholds(selection["probs"], selection["yEval"], classes,
-                                     args.target_precision, args.min_fires)
+        thresholds = pick_thresholds(selection["probs"][sel_fit], selection["yEval"][sel_fit],
+                                     classes, args.target_precision, args.min_fires)
     thr = np.asarray(thresholds)
 
     def score_probs(probs, y):
@@ -433,7 +463,9 @@ def main() -> None:
         "thresholds": dict(zip(classes, thresholds, strict=True)),
         "targetPrecision": args.target_precision,
         "thresholdsFrom": selection["name"],
-        "selection": score_probs(selection["probs"], selection["yEval"]),
+        "selection": score_probs(selection["probs"][sel_fit], selection["yEval"][sel_fit]),
+        "fitExcluded": int((~sel_fit).sum()),
+        "droppedPages": len(dropped_pages),
         "holdoutScored": bool(args.score_holdout),
     }
     if args.score_holdout:
@@ -519,12 +551,13 @@ def main() -> None:
         report["vsV7"] = both
     if args.dump_selection:
         with (out / "selection-predictions.jsonl").open("w") as handle:
-            for page_id, y, probs in zip(selection["ids"], selection["yEval"], selection["probs"],
-                                         strict=True):
+            for page_id, y, probs, fit in zip(selection["ids"], selection["yEval"],
+                                              selection["probs"], selection["fit"], strict=True):
                 top = int(probs.argmax())
                 handle.write(json.dumps({"pageId": page_id, "label": classes[int(y)],
                                          "pred": classes[top], "conf": round(float(probs[top]), 4),
-                                         "fires": bool(probs[top] >= thr[top])}) + "\n")
+                                         "fires": bool(probs[top] >= thr[top]),
+                                         "fitExcluded": not bool(fit)}) + "\n")
     booster.save_model(str(out / "pagetype-model.txt"), num_iteration=booster.best_iteration)
     (out / "class-thresholds.json").write_text(json.dumps({"classes": classes,
                                                             "thresholds": thresholds}) + "\n")

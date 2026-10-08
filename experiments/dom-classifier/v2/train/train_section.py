@@ -74,6 +74,50 @@ def score(probs, y, thresholds, classes):
             "n": int(len(y))}
 
 
+def label_transform(all_classes: list[str], labels: str, tightest_labels: str,
+                    tightest_classes: str, ad_markers: str):
+    """The label rules every split gets, as one function (cv_compare.py reuses
+    it): a later Jev relabel replaces the sample's Jev label; the
+    `tightest_classes` keep their tightest-node (v2) answer; and the promo/ad
+    rule makes an ad/promo_banner label `ad` on a node with third-party ad markup
+    and `promo_banner` on one without."""
+    def read(path: str):
+        for line in Path(path).read_text().splitlines():
+            if line.strip():
+                yield json.loads(line)
+
+    relabel = {(r["pageId"], r["nodeId"]): all_classes.index(r["section"])
+               for r in (read(labels) if labels else []) if r.get("section") in all_classes}
+    tightest = {(r["pageId"], r["nodeId"]): all_classes.index(r["section"])
+                for r in (read(tightest_labels) if tightest_labels else [])
+                if r.get("section") in all_classes}
+    tight_ids = {all_classes.index(c) for c in tightest_classes.split(",") if c in all_classes}
+    markers = {(r["pageId"], r["nodeId"]) for r in (read(ad_markers) if ad_markers else [])}
+    ad_i, promo_i = all_classes.index("ad"), all_classes.index("promo_banner")
+    rule_counts: Counter = Counter()
+
+    def apply(y, meta):
+        y = y.copy()
+        for i, m in enumerate(meta):
+            key = (m["p"], m["n"])
+            if m["src"] == "jev" and key in relabel:
+                y[i] = relabel[key]
+            if tight_ids and m["src"] == "jev" and key in tightest:
+                old = tightest[key]
+                # A node either class calls a tightest-granularity class takes
+                # the tightest-node answer.
+                if old in tight_ids or y[i] in tight_ids:
+                    y[i] = old
+            if ad_markers and y[i] in (ad_i, promo_i):
+                new = ad_i if key in markers else promo_i
+                if new != y[i]:
+                    rule_counts[f"{all_classes[y[i]]}->{all_classes[new]}"] += 1
+                    y[i] = new
+        return y
+
+    return apply, rule_counts
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sample", required=True)
@@ -118,50 +162,8 @@ def main() -> None:
     remap = np.asarray([classes.index(c) if c in classes else classes.index("none")
                         for c in all_classes])
     xt, yt, wt, mt = load(sample, "train")
-    relabel: dict = {}
-    if args.labels:
-        for line in Path(args.labels).read_text().splitlines():
-            if line.strip():
-                row = json.loads(line)
-                if row.get("section") in all_classes:
-                    relabel[(row["pageId"], row["nodeId"])] = all_classes.index(row["section"])
-
-    tightest: dict = {}
-    tight_ids = {all_classes.index(c) for c in args.tightest_classes.split(",") if c in all_classes}
-    if args.tightest_labels:
-        for line in Path(args.tightest_labels).read_text().splitlines():
-            if line.strip():
-                row = json.loads(line)
-                if row.get("section") in all_classes:
-                    tightest[(row["pageId"], row["nodeId"])] = all_classes.index(row["section"])
-    markers: set = set()
-    if args.ad_markers:
-        for line in Path(args.ad_markers).read_text().splitlines():
-            if line.strip():
-                row = json.loads(line)
-                markers.add((row["pageId"], row["nodeId"]))
-    ad_i, promo_i = all_classes.index("ad"), all_classes.index("promo_banner")
-    rule_counts: Counter = Counter()
-
-    def apply(y, meta):
-        y = y.copy()
-        for i, m in enumerate(meta):
-            key = (m["p"], m["n"])
-            if m["src"] == "jev" and key in relabel:
-                y[i] = relabel[key]
-            if tight_ids and m["src"] == "jev" and key in tightest:
-                old = tightest[key]
-                # A node either class calls a tightest-granularity class takes
-                # the tightest-node answer.
-                if old in tight_ids or y[i] in tight_ids:
-                    y[i] = old
-            if args.ad_markers and y[i] in (ad_i, promo_i):
-                new = ad_i if key in markers else promo_i
-                if new != y[i]:
-                    rule_counts[f"{all_classes[y[i]]}->{all_classes[new]}"] += 1
-                    y[i] = new
-        return y
-
+    apply, rule_counts = label_transform(all_classes, args.labels, args.tightest_labels,
+                                         args.tightest_classes, args.ad_markers)
     yt = remap[apply(yt, mt)]
     wt = wt.copy()
     negative = np.asarray([m["src"] == "negative" for m in mt])
