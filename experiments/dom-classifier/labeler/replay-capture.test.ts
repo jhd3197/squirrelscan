@@ -3,12 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Browser } from "playwright";
-import {
-  browserLaunchOptions,
-  browserRuntimeUnavailableReason,
-  loadPlaywright,
-} from "./browser-runtime.ts";
-import { captureReplayTarget, REPLAY_MARKER } from "./replay-capture.ts";
+import { browserRuntimeUnavailableReason, loadPlaywright } from "./browser-runtime.ts";
+import { captureReplayTarget, REPLAY_MARKER, replayLaunchOptions } from "./replay-capture.ts";
 import { LabelStore } from "./store.ts";
 
 const browserSkipReason = browserRuntimeUnavailableReason();
@@ -20,7 +16,7 @@ describe.skipIf(browserSkipReason !== null)(
     beforeAll(async () => {
       dataDir = mkdtempSync(join(tmpdir(), "labeler-replay-"));
       const { chromium } = await loadPlaywright();
-      browser = await chromium.launch(browserLaunchOptions());
+      browser = await chromium.launch(replayLaunchOptions());
     });
     afterAll(async () => {
       await browser?.close();
@@ -53,7 +49,7 @@ describe.skipIf(browserSkipReason !== null)(
           corpusRef: "slice:abc123",
           markers: ["1", "2", "3", "4"],
         },
-        { timeoutMs: 20_000 },
+        { scripts: true, timeoutMs: 20_000 },
       );
       const page = result.page;
       expect(page).toMatchObject({
@@ -78,16 +74,63 @@ describe.skipIf(browserSkipReason !== null)(
       expect(result.quality.visibleTextChars).toBeGreaterThan(20);
     }, 40_000);
 
-    test("can replay with scripts off", async () => {
+    test("replays with scripts off unless asked", async () => {
       const store = new LabelStore(dataDir);
       const result = await captureReplayTarget(
         store,
         browser,
         { html: stored, url: "https://replay.example.test/articles/two", markers: ["1"] },
-        { scripts: false, timeoutMs: 20_000 },
+        { timeoutMs: 20_000 },
       );
       expect(result.page.scriptMode).toBe("disabled");
       expect(result.located["1"]!.visible).toBe(true);
+    }, 40_000);
+
+    test("a replayed page's scripts cannot reach a local service", async () => {
+      // A stand-in for an unauthenticated local service: counts every HTTP hit
+      // and every WebSocket upgrade it receives.
+      const seen = { http: 0, sockets: 0 };
+      const local = Bun.serve({
+        port: 0,
+        hostname: "127.0.0.1",
+        fetch(request, server) {
+          if (request.headers.get("upgrade") === "websocket" && server.upgrade(request)) {
+            seen.sockets++;
+            return undefined;
+          }
+          seen.http++;
+          return new Response("ok", { headers: { "access-control-allow-origin": "*" } });
+        },
+        websocket: { message() {} },
+      });
+      try {
+        const origin = `127.0.0.1:${local.port}`;
+        const probe = `<!doctype html><html><head><title>Probe</title></head><body>
+          <h1>Probe page</h1><p>${"Stored text. ".repeat(40)}</p>
+          <img src="http://${origin}/img.png">
+          <iframe src="http://${origin}/frame"></iframe>
+          <link rel="stylesheet" href="http://${origin}/style.css">
+          <script>
+            const socket = new WebSocket("ws://${origin}/socket");
+            socket.onopen = () => socket.send("hello");
+            fetch("http://${origin}/fetch", { mode: "no-cors" }).catch(() => {});
+            navigator.sendBeacon("http://${origin}/beacon", "x");
+            window.open("http://${origin}/popup");
+            new Worker(URL.createObjectURL(new Blob(['fetch("http://${origin}/worker").catch(() => {})'])));
+          </script>
+        </body></html>`;
+        const store = new LabelStore(dataDir);
+        await captureReplayTarget(
+          store,
+          browser,
+          { html: probe, url: "https://replay.example.test/probe" },
+          { scripts: true, timeoutMs: 20_000 },
+        );
+        await Bun.sleep(500);
+        expect(seen).toEqual({ http: 0, sockets: 0 });
+      } finally {
+        local.stop(true);
+      }
     }, 40_000);
 
     test("refuses a private replay URL before rendering", async () => {

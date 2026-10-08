@@ -287,14 +287,29 @@ the element or page cards, and the card never names the annotator.
 `replay-capture.ts` renders STORED html rather than fetching the page, so a
 reviewer sees the bytes a model was given (`sourceKind: "historical_replay"`,
 `assetMode: "hybrid"`). The navigation to the original url is answered with the
-stored document; stylesheets, images, fonts and scripts load from their public
-hosts, while data requests, beacons, private-network hosts and any later
-top-level navigation are blocked. `scriptMode: "disabled"` replays under a
-`script-src 'none'` policy instead. Fixed elements are pinned where they were
-measured so the full-page screenshot and the node boxes agree. Elements a
+stored document; stylesheets, images and fonts load from their public hosts,
+while data requests, beacons, WebSockets, popups, private-network hosts and any
+later top-level navigation are blocked. Fixed elements are pinned where they
+were measured so the full-page screenshot and the node boxes agree. Elements a
 caller marked with `data-replay-target` are reported as located, hidden, or
 gone (a script replaced them). It is a library for a private, command-line
 builder; the review server never renders anything.
+
+A replayed page is untrusted code on a machine where local services listen, so:
+
+- **Scripts are off by default** (`scriptMode: "disabled"`, enforced with a
+  `script-src 'none'` policy on the stored document). A caller turns them on per
+  page, for platforms that render client-side and for SPA shells.
+- **All traffic leaves through the egress guard** (`egress-guard.ts`), a
+  loopback CONNECT proxy that resolves each host once, refuses it when any
+  address is private, and connects to exactly the address it checked, which
+  closes DNS rebinding. Playwright sends loopback through the proxy too. Plain
+  http subresources are refused.
+- **WebRTC may not open non-proxied UDP.** Launch the browser with
+  `replayLaunchOptions()`.
+
+Chromium's Private/Local Network Access features were measured ineffective in
+the bundled headless shell (140), so they are not relied on.
 
 ## Private corpus rendering
 

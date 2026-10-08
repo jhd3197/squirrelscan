@@ -1,5 +1,7 @@
 import { lookup } from "node:dns/promises";
-import type { Browser, Route } from "playwright";
+import type { Browser, Frame, LaunchOptions, Route } from "playwright";
+import { browserLaunchOptions } from "./browser-runtime.ts";
+import { startEgressGuard, type EgressGuard } from "./egress-guard.ts";
 import {
   capturePixels,
   clipNodes,
@@ -19,8 +21,31 @@ import type { CapturedNode, CapturedPage } from "./types.ts";
 /** The attribute a caller puts on stored elements it needs located in the render. */
 export const REPLAY_MARKER = "data-replay-target";
 const MAX_REPLAY_MS = 45_000;
-/** Requests that would refetch content or report the visit; stored bytes are the content. */
-const BLOCKED_RESOURCE_TYPES = new Set(["xhr", "fetch", "websocket", "eventsource", "ping"]);
+/**
+ * Requests that would refetch content or report the visit; stored bytes are the
+ * content. WebSockets never reach `route` at all, so they are closed by a
+ * separate WebSocket route.
+ */
+const BLOCKED_RESOURCE_TYPES = new Set(["xhr", "fetch", "eventsource", "ping"]);
+
+/**
+ * Replayed pages run third-party scripts on a developer machine where local
+ * services listen. All their traffic goes through the egress guard (see
+ * `egress-guard.ts`), and WebRTC may not open non-proxied UDP, so it can
+ * neither leak local addresses nor reach the LAN around the guard.
+ *
+ * Chromium's Private/Local Network Access features were tried as a second
+ * guard and measured ineffective in the bundled headless shell (140): a public
+ * page still reached 127.0.0.1 with them on. They are deliberately not set.
+ */
+export const REPLAY_BROWSER_ARGS = [
+  "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+] as const;
+
+/** Launch options for the browser a caller passes to `captureReplayTarget`. */
+export function replayLaunchOptions(): LaunchOptions {
+  return { ...browserLaunchOptions(), args: [...REPLAY_BROWSER_ARGS] };
+}
 
 /**
  * A historical replay renders STORED html instead of fetching the page, so a
@@ -54,12 +79,28 @@ export type ReplayResult = {
   quality: { visibleNodes: number; visibleTextChars: number; documentHeight: number };
 };
 
-type ReplayOptions = { scripts?: boolean; timeoutMs?: number; maxHeight?: number };
+/** Scripts are off unless the caller turns them on for a page that needs them. */
+type ReplayOptions = {
+  scripts?: boolean;
+  timeoutMs?: number;
+  maxHeight?: number;
+  /** Defaults to one guard shared by every replay in this process. */
+  egress?: EgressGuard;
+};
+
+let sharedGuard: Promise<EgressGuard> | null = null;
+/** The process-wide egress guard, started on first use. */
+export function replayEgressGuard() {
+  sharedGuard ??= startEgressGuard();
+  return sharedGuard;
+}
 
 /**
- * A public-looking asset host can resolve to a private address, so every host
- * a replay requests is resolved once and blocked unless all its addresses are
- * public. Unresolvable hosts are blocked too.
+ * An early, cheap refusal of hosts that resolve private, so a blocked asset
+ * fails at the route instead of opening a proxy tunnel. It is not the guard
+ * against DNS rebinding: this lookup and the connection are separate. The
+ * egress guard resolves, checks and connects to one address, and that is what
+ * enforces the rule.
  */
 const publicHosts = new Map<string, Promise<boolean>>();
 const DNS_TIMEOUT_MS = 3_000;
@@ -98,7 +139,7 @@ export async function captureReplayTarget(
   options: ReplayOptions = {},
 ): Promise<ReplayResult> {
   const documentUrl = replayUrl(target.url);
-  const scripts = options.scripts ?? true;
+  const scripts = options.scripts ?? false;
   const maxHeight = Math.min(
     Math.max(1, options.maxHeight ?? MAX_CAPTURE_HEIGHT),
     MAX_CAPTURE_HEIGHT,
@@ -110,19 +151,41 @@ export async function captureReplayTarget(
     if (milliseconds <= 0) throw new Error("Replay exceeded its deadline");
     return milliseconds;
   };
+  const egress = options.egress ?? (await replayEgressGuard());
   const context = await browser.newContext({
     viewport: { width: VIEWPORT.width, height: VIEWPORT.height },
     deviceScaleFactor: VIEWPORT.deviceScaleFactor,
     serviceWorkers: "block",
+    // Every request the page makes leaves through the guard, loopback included.
+    proxy: { server: egress.server },
     userAgent: "SquirrelScan DOM labeling replay/1.0",
   });
   try {
+    // WebSockets bypass `route`, so every socket is answered here and closed
+    // before it reaches a server.
+    await context.routeWebSocket(/.*/, (socket) => socket.close());
     const page = await context.newPage();
+    // A popup is a second document this replay did not ask for.
+    context.on("page", (opened) => {
+      if (opened !== page) void opened.close().catch(() => undefined);
+    });
     let served = false;
-    await page.route("**/*", async (route: Route) => {
+    // Context-level, so requests from popups and workers pass the same checks.
+    await context.route("**/*", async (route: Route) => {
       const request = route.request();
       const url = new URL(request.url());
-      if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+      // Only a navigation is asked for its frame (worker requests have none). A
+      // popup's first navigation has no frame yet, and a popup is not ours.
+      let frame: Frame | null = null;
+      if (request.isNavigationRequest()) {
+        try {
+          frame = request.frame();
+        } catch {
+          return route.abort("blockedbyclient");
+        }
+        if (frame.page() !== page) return route.abort("blockedbyclient");
+      }
+      if (frame === page.mainFrame()) {
         // The first navigation is the stored document; anything after it
         // (a script or meta redirect) would leave the stored bytes, and a 204
         // keeps the current document where an abort would show an error page.
