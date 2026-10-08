@@ -174,7 +174,9 @@ async function bench(limit: number): Promise<void> {
   const classifyMs: number[] = [];
   let elements = 0;
   let pages = 0;
-  for await (const { entry, html } of holdoutPages(limit)) {
+  // --split val benches pages no scoring run may read without a holdout
+  // touch; timing reads no label either way.
+  for await (const { entry, html } of holdoutPages(limit, false, [benchSplit])) {
     let start = Bun.nanoseconds();
     const { document } = parseHTML(html);
     const parsed = (Bun.nanoseconds() - start) / 1e6;
@@ -192,6 +194,7 @@ async function bench(limit: number): Promise<void> {
     return Number(sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))]!.toFixed(3));
   };
   const summary = {
+    split: benchSplit,
     pages,
     avgNodesPerPage: Math.round(elements / Math.max(pages, 1)),
     coldArtifactLoadMs: Number(coldMs.toFixed(1)),
@@ -339,6 +342,8 @@ async function inspect(limit: number): Promise<void> {
 const mode = process.argv[2] ?? "";
 const limitFlag = process.argv.indexOf("--limit");
 const limit = limitFlag !== -1 ? Number(process.argv[limitFlag + 1]) : Number.POSITIVE_INFINITY;
+const splitFlag = process.argv.indexOf("--split");
+const benchSplit = splitFlag !== -1 ? process.argv[splitFlag + 1]! : "holdout";
 const artifactFlag = process.argv.indexOf("--artifact");
 const artifactPath =
   artifactFlag !== -1

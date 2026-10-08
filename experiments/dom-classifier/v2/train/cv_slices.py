@@ -178,12 +178,41 @@ def run_rows(args) -> dict:
             np.asarray(info["thresholds"]),
         )
     skip = ("none",) if report["head"] == "section" else ()
+    new_pages = load_new(args)
+    # The old arm stands for the shipped pipeline, which never saw a new page:
+    # its thresholds are re-picked on OLD pages only, by the head's own rule.
+    # (cv_compare picks both arms' thresholds on the whole evaluation set.)
+    old_rows = np.asarray([p not in new_pages for p in pages])
+    pred, conf, pooled = arms["old"]
+    arms["old"] = (pred, conf, pick_like_head(report, pred[old_rows], conf[old_rows], y[old_rows]))
     return {
         "head": report["head"],
         "classes": classes,
         "rows": int(keep.sum()),
-        "slices": compare(y, arms, classes, pages, load_tags(args), load_new(args), skip),
+        "oldThresholdsOn": "old pages only",
+        "thresholds": {
+            "old": arms["old"][2].tolist(),
+            "oldPooled": pooled.tolist(),
+            "new": arms["new"][2].tolist(),
+        },
+        "slices": compare(y, arms, classes, pages, load_tags(args), new_pages, skip),
     }
+
+
+def pick_like_head(report: dict, pred: np.ndarray, conf: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Thresholds by the rule the head's trainer uses, from (argmax, max prob)."""
+    classes = report["classes"]
+    probs = np.zeros((len(pred), len(classes)), np.float32)
+    probs[np.arange(len(pred)), pred] = conf
+    if report["head"] == "region":
+        from class_thresholds import sweep
+
+        return np.asarray([sweep(probs, y, i)["threshold"] for i in range(len(classes))])
+    from train_section import pick_thresholds
+
+    out = pick_thresholds(probs, y, len(classes), 0.95, 15)
+    out[classes.index("none")] = 0.0
+    return np.asarray(out)
 
 
 def load_tags(args) -> dict:
@@ -194,20 +223,72 @@ def load_new(args) -> set[str]:
     return {line.strip() for line in Path(args.new_pages).read_text().splitlines() if line.strip()}
 
 
+def fmt(cell: dict | None) -> str:
+    if not cell or cell.get("support", 0) == 0:
+        return "–"
+    p = "–" if cell["precision"] is None else f"{cell['precision']:.3f}"
+    return f"{p}/{cell['coverage']:.2f}"
+
+
+def markdown(report: dict, slices: list[str], min_support: int) -> str:
+    """One table per slice: per class P@t/coverage, old -> new, and the
+    coverage delta; classes under --min-support rows in the slice are skipped."""
+    out = [f"## {report['head']} (old vs old+new, OOF, each arm at its own thresholds)", ""]
+    for name in slices:
+        block = report["slices"].get(name)
+        if not block:
+            continue
+        overall = {arm: block[arm]["_overall"] for arm in ("old", "new")}
+        out.append(
+            f"### {name}: rows {overall['new']['rows']}, firing old {overall['old']['firing']} "
+            f"/ new {overall['new']['firing']}, accuracy when firing "
+            f"{overall['old']['accuracyWhenFiring']} -> {overall['new']['accuracyWhenFiring']}"
+        )
+        out.append("")
+        out.append("| class | support | old P@t/cov | new P@t/cov | Δcov |")
+        out.append("|---|---|---|---|---|")
+        for cls in report["classes"]:
+            old, new = block["old"].get(cls), block["new"].get(cls)
+            if not old or old["support"] < min_support or cls == "none":
+                continue
+            delta = block.get("delta", {}).get(cls, {}).get("coverage")
+            out.append(
+                f"| {cls} | {old['support']} | {fmt(old)} | {fmt(new)} | "
+                f"{'' if delta is None else f'{delta:+.2f}'} |"
+            )
+        out.append("")
+    return "\n".join(out)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("table")
+    p.add_argument("--report", required=True)
+    p.add_argument(
+        "--slices",
+        default="all,corpus:old,corpus:new,platform:shopify,"
+        "platform:woocommerce,platform:wordpress,platform:wix,platform:squarespace,"
+        "platform:webflow,platform:nextjs,platform:custom,lang:en,lang:non-en",
+    )
+    p.add_argument("--min-support", type=int, default=30)
     p = sub.add_parser("pagetype")
     p.add_argument("--old", required=True)
     p.add_argument("--new", required=True)
     p = sub.add_parser("rows")
     p.add_argument("--cv", required=True)
     p.add_argument("--page-list", required=True, help="pages.json: page index -> page id")
-    for p in sub.choices.values():
+    for name, p in sub.choices.items():
+        if name == "table":
+            continue
         p.add_argument("--tags", required=True)
         p.add_argument("--new-pages", required=True)
         p.add_argument("--out", required=True)
     args = parser.parse_args()
+    if args.cmd == "table":
+        report = json.loads(Path(args.report).read_text())
+        print(markdown(report, args.slices.split(","), args.min_support))
+        return
     report = run_pagetype(args) if args.cmd == "pagetype" else run_rows(args)
     Path(args.out).write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps({"head": report["head"], "slices": list(report["slices"])}))

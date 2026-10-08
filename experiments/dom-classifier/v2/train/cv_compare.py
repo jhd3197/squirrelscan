@@ -45,7 +45,9 @@ def load(sample: Path, split: str, with_meta: bool, groups: Path):
     y = np.load(sample / f"y-{split}.npy").astype(np.int64)
     w = np.load(sample / f"w-{split}.npy").astype(np.float64)
     bucket = np.load(groups / f"bucket-{split}.npy").astype(np.int64)
-    page = np.load(groups / f"page-{split}.npy").astype(np.int64)
+    # The training-only (old) sample needs no page index: it is never scored.
+    page_path = groups / f"page-{split}.npy"
+    page = np.load(page_path).astype(np.int64) if page_path.exists() else np.zeros(len(y), np.int64)
     meta = None
     if with_meta:
         meta = [
