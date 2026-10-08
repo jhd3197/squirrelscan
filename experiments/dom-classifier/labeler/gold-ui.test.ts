@@ -198,12 +198,16 @@ describe.skipIf(browserSkipReason !== null)(
         expect(await page.locator("#gold-item-id").textContent()).toBe("gold-ui-0");
         expect(new URL(page.url()).hash).toBe("#gold-ui-0");
 
+        // Page cards have three buttons; section cards add Item.
+        expect(await page.locator("#gold-item").isHidden()).toBe(true);
+
         // Y: yes, this class.
         let saved = posted("/api/page-annotations");
         await page.keyboard.press("y");
         await saved;
         await asked("Is the outlined element a cookie consent banner?");
         await page.locator(`.node-region.gold-target[data-node-id="${bannerNodeId}"]`).waitFor();
+        expect(await page.locator("#gold-item").isVisible()).toBe(true);
 
         // S: suggest the right class; type to filter, Enter takes the top match.
         await page.keyboard.press("s");
@@ -247,7 +251,8 @@ describe.skipIf(browserSkipReason !== null)(
           document.querySelector("#gold-progress")?.textContent?.startsWith("5 /"),
         );
         await asked("What is the outlined element?");
-        await page.keyboard.press("i");
+        // The picker's visible toggle does what I does.
+        await page.locator(".gold-item-toggle").click();
         expect(await page.locator("#gold-fix-heading").textContent()).toBe(
           "An individual item of which section?",
         );

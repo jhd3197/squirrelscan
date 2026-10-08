@@ -1174,7 +1174,14 @@ dialog::backdrop {
   background: #fff;
   color: #8c3434;
 }
-#gold-suggest {
+/* Three or four buttons (Item only on sections), always one row. */
+#gold-actions {
+  grid-template-columns: none;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+}
+#gold-suggest,
+#gold-item {
   border: 1px solid var(--line);
   background: #fff;
   color: #48575e;
@@ -1209,6 +1216,9 @@ dialog::backdrop {
 .gold-filter.empty {
   color: #9aa7ab;
   font-weight: 500;
+}
+.gold-item-toggle {
+  border-style: dashed !important;
 }
 .gold-unsure {
   font-style: italic;

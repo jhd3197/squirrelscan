@@ -2582,6 +2582,7 @@ function installListeners() {
   $("gold-ok").addEventListener("click", () => saveGoldAnswer("accept"));
   $("gold-not-ok").addEventListener("click", () => saveGoldAnswer("reject"));
   $("gold-suggest").addEventListener("click", () => openGoldPicker());
+  $("gold-item").addEventListener("click", () => goldItemOf());
   $("gold-review-skipped").addEventListener("click", () => {
     state.gold.skipped.clear();
     showGoldItem(nextGoldPosition(-1));
@@ -2882,6 +2883,7 @@ function renderGold() {
   $("gold-done").hidden = Boolean(item);
   const picking = goldPickerOpen(item);
   $("gold-actions").hidden = !item || picking;
+  $("gold-item").hidden = !item || item.axis !== "sectionPurposeV3";
   $("gold-fix").hidden = !item || !picking;
   $("gold-keys").hidden = !item;
   if (!item) {
@@ -2946,8 +2948,19 @@ function renderGoldPicker(item, matches) {
         goldClassName(item.axis, label),
       ],
     );
+  // Sections: a visible switch between "the section is…" and "an item of…".
+  const itemToggle =
+    item.axis === "sectionPurposeV3"
+      ? [
+          el("button", { type: "button", className: "gold-item-toggle", onClick: () => goldItemOf() }, [
+            el("kbd", { text: "I" }),
+            state.gold.itemMode ? " Back to the section itself" : " Item of…",
+          ]),
+        ]
+      : [];
   $("gold-alternatives").replaceChildren(
     ...matches.map(button),
+    ...itemToggle,
     el("button", { type: "button", className: "gold-unsure", onClick: () => saveGoldAnswer("unsure") }, [
       el("kbd", { text: "U" }),
       " Unsure / can't tell",
