@@ -347,9 +347,54 @@ def markdown(report: dict, slices: list[str], min_support: int) -> str:
     return "\n".join(out)
 
 
+def usable(block: dict, arm: str, classes: list[str], min_support: int) -> tuple[float, int]:
+    """Macro coverage at the arm's thresholds over the classes with >=
+    min_support rows in the slice, and how many of those classes fire >= 20
+    times at a precision UNDER 0.95 on this slice (the shipping risk)."""
+    covs, below = [], 0
+    for cls in classes:
+        cell = block[arm].get(cls)
+        if cls == "none" or not cell or cell["support"] < min_support:
+            continue
+        covs.append(cell["coverage"] or 0.0)
+        below += cell["fires"] >= 20 and cell["precision"] is not None and cell["precision"] < 0.95
+    return (round(float(np.mean(covs)), 3) if covs else 0.0), below
+
+
+def summary(reports: list[dict], slices: list[str], min_support: int) -> str:
+    out = [
+        "Macro coverage at each arm's thresholds (classes with >= "
+        f"{min_support} rows in the slice); in brackets: classes firing >= 20 times "
+        "at precision < 0.95 on that slice.",
+        "",
+        "| head | slice | old | new (pooled thr) | new-strict |",
+        "|---|---|---|---|---|",
+    ]
+    for report in reports:
+        for name in slices:
+            block = report["slices"].get(name)
+            if not block:
+                continue
+            cells = []
+            for arm in ("old", "new", "new-strict"):
+                cov, below = usable(block, arm, report["classes"], min_support)
+                cells.append(f"{cov:.3f} [{below}]")
+            out.append(f"| {report['head']} | {name} | " + " | ".join(cells) + " |")
+    return "\n".join(out)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("summary")
+    p.add_argument("--reports", nargs="+", required=True)
+    p.add_argument(
+        "--slices",
+        default="all,corpus:old,corpus:new,platform:shopify,"
+        "platform:woocommerce,platform:wordpress,platform:wix,platform:squarespace,"
+        "platform:webflow,platform:nextjs,platform:custom,lang:en,lang:non-en",
+    )
+    p.add_argument("--min-support", type=int, default=30)
     p = sub.add_parser("table")
     p.add_argument("--report", required=True)
     p.add_argument(
@@ -366,7 +411,7 @@ def main() -> None:
     p.add_argument("--cv", required=True)
     p.add_argument("--page-list", required=True, help="pages.json: page index -> page id")
     for name, p in sub.choices.items():
-        if name == "table":
+        if name in ("table", "summary"):
             continue
         p.add_argument("--tags", required=True)
         p.add_argument(
@@ -377,6 +422,10 @@ def main() -> None:
         p.add_argument("--new-pages", required=True)
         p.add_argument("--out", required=True)
     args = parser.parse_args()
+    if args.cmd == "summary":
+        reports = [json.loads(Path(r).read_text()) for r in args.reports]
+        print(summary(reports, args.slices.split(","), args.min_support))
+        return
     if args.cmd == "table":
         report = json.loads(Path(args.report).read_text())
         print(markdown(report, args.slices.split(","), args.min_support))

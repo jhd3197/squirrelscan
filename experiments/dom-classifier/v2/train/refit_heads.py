@@ -72,6 +72,11 @@ def refit_region(args) -> None:
     report = json.loads((cv / "cv-report.json").read_text())
     rows, oof = np.load(cv / "rows.npz"), np.load(cv / f"oof-{args.arm}.npz")
     keep = rows["evaluate"]
+    table = coverage_table(
+        oof["pred"][keep].astype(np.int64),
+        oof["conf"][keep].astype(np.float32),
+        rows["y"][keep].astype(np.int64),
+    )
     out = Path(args.out) / "region"
     out.mkdir(parents=True, exist_ok=True)
     booster.save_model(str(out / "region-model.txt"))
@@ -86,12 +91,10 @@ def refit_region(args) -> None:
                     "config": config,
                     "iterations": args.iterations,
                     # export_model reads the global fallback threshold off this
-                    # table; here it is the OOF table, not a single val split.
-                    "coverageAtThresholdVal": coverage_table(
-                        oof["pred"][keep].astype(np.int64),
-                        oof["conf"][keep].astype(np.float32),
-                        rows["y"][keep].astype(np.int64),
-                    ),
+                    # table (and evaluates its `.get` default eagerly, so both
+                    # keys must exist); here it is the OOF table, not one val split.
+                    "coverageAtThresholdVal": table,
+                    "coverageAtThreshold": table,
                 },
             },
             indent=2,
