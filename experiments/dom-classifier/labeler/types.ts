@@ -417,7 +417,7 @@ export const PAGE_TYPE_V8_QUESTIONS: readonly GoldQuestion[] = [
     name: "Homepage",
     question: "Is this page the site's homepage?",
     definition:
-      "The site's root page: the top-level entry point that introduces the whole site rather than one subject.",
+      "The site's root page, or a language/region root such as /de/ or /en-us/: the entry point that introduces the whole site rather than one subject.",
   },
   {
     label: "about",
@@ -478,23 +478,23 @@ export const PAGE_TYPE_V8_QUESTIONS: readonly GoldQuestion[] = [
   {
     label: "product_detail",
     name: "Product detail",
-    question: "Is this page about ONE purchasable product?",
+    question: "Is this page about ONE product, plan or service?",
     definition:
-      "One product, item or plan with its own price, variants, availability or buy control, even with related products below it.",
+      "One product, plan or service is the page's subject (shop product, software product or feature page, single service page). No price or buy button needed.",
   },
   {
     label: "product_listing",
     name: "Product listing",
-    question: "Is this page a listing of MANY purchasable products?",
+    question: "Is this page a listing of MANY products, plans or services?",
     definition:
-      "Two or more purchasable items presented as equals, each linking to its own page: shop category, collection, product search grid.",
+      "Two or more products, plans or services presented as equals, each linking to its own page: shop category, collection, product search grid, services overview.",
   },
   {
     label: "other",
     name: "Other",
     question: "Is this page Other (none of the 11 specific page types)?",
     definition:
-      "Account, login, cart, checkout, error, landing and service pages; also a single event, job, recipe, FAQ page, local-business page or search results.",
+      "Account, login, cart, checkout, error pages, and landing pages NOT about one product or service; also a single event, job, recipe, FAQ page, local-business page or search results.",
   },
 ];
 export const SECTION_PURPOSE_V3_QUESTIONS: readonly GoldQuestion[] = [
