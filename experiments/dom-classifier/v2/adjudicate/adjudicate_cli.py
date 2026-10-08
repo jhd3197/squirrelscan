@@ -195,6 +195,9 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--concurrency", type=int, default=2)
     parser.add_argument("--stop-utilization", type=float, default=0.9)
+    parser.add_argument(
+        "--start-below", type=float, default=1.0, help="run one item first; go on only if the window is under this"
+    )
     parser.add_argument("--scratch", type=Path, required=True, help="empty working directory for every process")
     args = parser.parse_args()
     if args.concurrency > 3:
@@ -223,27 +226,30 @@ def main() -> None:
     system = systems()
     guard = Guard(args.stop_utilization)
     started = time.time()
-    counts = {"ok": 0, "error": 0}
-    with path.open("a") as handle, ThreadPoolExecutor(args.concurrency) as pool:
-        futures = [pool.submit(run_item, i, args, packets, system, ad_marked, guard, args.scratch) for i in items]
-        for future in futures:
-            row = future.result()
-            if row is None:
-                continue
-            handle.write(json.dumps(row) + "\n")
-            handle.flush()
-            counts["error" if row.get("error") else "ok"] += 1
-            print(
-                json.dumps(
-                    {
-                        **{k: row.get(k) for k in ("itemId", "model", "label", "confidence", "error", "wallMs")},
-                        "util": row.get("utilization"),
-                        **counts,
-                        "elapsed": round(time.time() - started),
-                    }
-                ),
-                flush=True,
-            )
+    counts = {"ok": 0, "errors": 0}
+
+    def record(row: dict | None, handle) -> None:
+        if row is None:
+            return
+        handle.write(json.dumps(row) + "\n")
+        handle.flush()
+        counts["errors" if row.get("error") else "ok"] += 1
+        fields = ("itemId", "model", "label", "confidence", "error", "wallMs")
+        progress = {**{k: row.get(k) for k in fields}, "util": row.get("utilization"), **counts}
+        print(json.dumps({**progress, "elapsed": round(time.time() - started)}), flush=True)
+
+    with path.open("a") as handle:
+        # The first item alone is the window probe: nothing else starts above --start-below.
+        if items:
+            record(run_item(items[0], args, packets, system, ad_marked, guard, args.scratch), handle)
+            if guard.utilization is not None and guard.utilization >= args.start_below:
+                guard.stopped = guard.stopped or f"window_above_start:{guard.utilization}"
+        with ThreadPoolExecutor(args.concurrency) as pool:
+            futures = [
+                pool.submit(run_item, i, args, packets, system, ad_marked, guard, args.scratch) for i in items[1:]
+            ]
+            for future in futures:
+                record(future.result(), handle)
     print(
         json.dumps(
             {
