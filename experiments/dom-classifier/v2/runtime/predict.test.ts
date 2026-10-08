@@ -9,13 +9,14 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, statSync } from "node:fs";
 
 import { ArtifactError, loadModel, scoreRow, softmax } from "./model-format.ts";
-import { classifyPage, tryLoadModel } from "./predict.ts";
+import { classifyPage, tryLoadModel, withExtraBlock } from "./predict.ts";
 import { isRootPath } from "./rules-fallback.ts";
 
 const DATA_ROOT = process.env.DOM_CLASSIFIER_DATA_ROOT ?? "";
 const ARTIFACT = `${DATA_ROOT}/models/artifact/classifier-v2.json`;
 const PARITY = `${DATA_ROOT}/models/artifact/parity-region.json`;
 const PARITY_SECTION = `${DATA_ROOT}/models/artifact/parity-section.json`;
+const PARITY_PAGETYPE = `${DATA_ROOT}/models/artifact/parity-pagetype.json`;
 const HAS_ARTIFACT = DATA_ROOT !== "" && existsSync(ARTIFACT);
 const HAS_PARITY = DATA_ROOT !== "" && existsSync(PARITY);
 
@@ -101,6 +102,117 @@ describe("artifact validation", () => {
   test("loadModel throws ArtifactError, tryLoadModel never throws", () => {
     expect(() => loadModel({ format: "nope" })).toThrow(ArtifactError);
     expect(() => tryLoadModel({ format: "nope" })).not.toThrow();
+  });
+});
+
+/**
+ * One single-split tree, packed by hand in the export_model.py layout:
+ * feature 0 <= 0.5 goes to leaf 10, otherwise leaf 20. `flags` = null writes a
+ * version-1 block; a number writes version 2 with that per-node flag byte.
+ */
+function oneSplitHead(flags: number | null, dropFlags = false): Record<string, unknown> {
+  const bytes: number[] = [];
+  const u32 = (v: number) => bytes.push(v & 255, (v >>> 8) & 255, (v >>> 16) & 255, v >>> 24);
+  const f32 = (v: number) => bytes.push(...new Uint8Array(new Float32Array([v]).buffer));
+  const i32 = (v: number) => u32(v >>> 0);
+  bytes.push(0x53, 0x51, 0x44, 0x43); // "SQDC"
+  u32(flags === null ? 1 : 2);
+  u32(1); // numTrees
+  u32(1); // numClass
+  u32(1); // perTreeInternal
+  u32(2); // perTreeLeaves
+  bytes.push(0, 0, 0, 0); // feature uint16[1] = 0, padded to 4
+  f32(0.5);
+  i32(-1); // left -> leaf 0
+  i32(-2); // right -> leaf 1
+  f32(10);
+  f32(20);
+  if (flags !== null && !dropFlags) bytes.push(flags);
+  const trees = btoa(String.fromCharCode(...bytes));
+  return {
+    classes: ["only"],
+    featureColumns: null,
+    confidenceThreshold: 0.5,
+    classThresholds: null,
+    numClass: 1,
+    numTrees: 1,
+    trees,
+  };
+}
+
+function oneSplitModel(flags: number | null, dropFlags = false) {
+  const head = oneSplitHead(flags, dropFlags);
+  return loadModel({
+    format: "squirrel-dom-classifier",
+    artifactVersion: 1,
+    featurizerVersion: "test",
+    nodeFeatureCount: 1,
+    pageFeatureCount: 1,
+    tokenBuckets: 0,
+    region: head,
+    pageType: head,
+  });
+}
+
+function leafFor(flags: number | null, value: number): number {
+  const out = new Float32Array(1);
+  scoreRow(oneSplitModel(flags).pageType, new Float32Array([value]), out);
+  return out[0]!;
+}
+
+describe("missing-value splits (tree-block version 2, #2307)", () => {
+  test("version 1 walks exactly as before, NaN included", () => {
+    expect(leafFor(null, 0.2)).toBe(10);
+    expect(leafFor(null, 0.9)).toBe(20);
+    expect(leafFor(null, Number.NaN)).toBe(20);
+  });
+
+  test("a NaN-missing node sends NaN its default way, and compares everything else", () => {
+    const nanLeft = 2 | 4;
+    const nanRight = 2;
+    expect(leafFor(nanLeft, Number.NaN)).toBe(10);
+    expect(leafFor(nanRight, Number.NaN)).toBe(20);
+    expect(leafFor(nanLeft, 0.9)).toBe(20);
+    expect(leafFor(nanRight, 0.2)).toBe(10);
+  });
+
+  test("on a node without missing handling a NaN reads as 0, as in LightGBM", () => {
+    expect(leafFor(0, Number.NaN)).toBe(10);
+  });
+
+  test("a zero-missing node sends 0 (and NaN, read as 0) its default way", () => {
+    const zeroRight = 1;
+    expect(leafFor(zeroRight, 0)).toBe(20);
+    expect(leafFor(zeroRight, Number.NaN)).toBe(20);
+    expect(leafFor(zeroRight, 0.2)).toBe(10);
+    expect(leafFor(zeroRight | 4, 0)).toBe(10);
+  });
+
+  test("a version-2 block without its flags is truncated, and version 3 is refused", () => {
+    expect(() => oneSplitModel(2, true)).toThrow(ArtifactError);
+    const head = oneSplitHead(null);
+    const bytes = Uint8Array.from(atob(head.trees as string), (c) => c.charCodeAt(0));
+    bytes[4] = 3;
+    head.trees = btoa(String.fromCharCode(...bytes));
+    expect(() =>
+      loadModel({
+        format: "squirrel-dom-classifier",
+        artifactVersion: 1,
+        region: head,
+        pageType: head,
+      }),
+    ).toThrow(ArtifactError);
+  });
+
+  test("the cross-page block is the caller's values when complete, else missing", () => {
+    const base = new Float32Array([1, 2]);
+    expect(withExtraBlock(base, 0, null)).toBe(base);
+    expect(Array.from(withExtraBlock(base, 2, [3, 4]))).toEqual([1, 2, 3, 4]);
+    const absent = withExtraBlock(base, 2, null);
+    expect(absent.length).toBe(4);
+    expect(Number.isNaN(absent[2]!) && Number.isNaN(absent[3]!)).toBe(true);
+    const short = withExtraBlock(base, 2, [3]);
+    expect(Number.isNaN(short[2]!)).toBe(true);
   });
 });
 
@@ -291,6 +403,65 @@ describe.if(HAS_ARTIFACT && existsSync(PARITY_SECTION))("section head parity (#2
     }
   });
 });
+
+describe.if(HAS_ARTIFACT && existsSync(PARITY_PAGETYPE))(
+  "page-type head parity, with and without the link graph (#2307)",
+  () => {
+    const fixture = () =>
+      JSON.parse(readFileSync(PARITY_PAGETYPE, "utf8")) as {
+        rows: number;
+        width: number;
+        baseWidth: number;
+        x: Array<{ i: number[]; v: number[] }>;
+        probsGraph: number[][];
+        probsNoGraph: number[][];
+      };
+
+    for (const variant of ["graph", "noGraph"] as const) {
+      test(`${variant}: identical argmax to the Python reference, probabilities within 1e-5`, () => {
+        const model = loadModel(artifactJson());
+        const data = fixture();
+        const head = model.pageType;
+        expect(head.extraFeatureCount).toBe(data.width - data.baseWidth);
+        const values = new Float32Array(data.width);
+        const scores = new Float32Array(head.numClass);
+        const expectedAll = variant === "graph" ? data.probsGraph : data.probsNoGraph;
+        let maxDiff = 0;
+        let argmaxMatches = 0;
+        for (let row = 0; row < data.rows; row++) {
+          values.fill(0);
+          const sparse = data.x[row]!;
+          for (let k = 0; k < sparse.i.length; k++) values[sparse.i[k]!] = sparse.v[k]!;
+          if (variant === "noGraph") values.fill(Number.NaN, data.baseWidth);
+          scoreRow(head, values, scores);
+          const { index } = softmax(scores);
+          const expected = expectedAll[row]!;
+          let expectedArgmax = 0;
+          for (let c = 1; c < expected.length; c++)
+            if (expected[c]! > expected[expectedArgmax]!) expectedArgmax = c;
+          if (index === expectedArgmax) argmaxMatches++;
+          for (let c = 0; c < expected.length; c++)
+            maxDiff = Math.max(maxDiff, Math.abs(scores[c]! - expected[c]!));
+        }
+        expect(argmaxMatches).toBe(data.rows);
+        expect(maxDiff).toBeLessThan(1e-5);
+      });
+    }
+
+    test("classifyPage works with no link graph and with a complete one", () => {
+      const { model } = tryLoadModel(artifactJson());
+      const none = classifyPage(PAGE, URL, { model });
+      const graph = classifyPage(PAGE, URL, {
+        model,
+        siteFeatures: Array.from({ length: model!.pageType.extraFeatureCount }, () => 0),
+      });
+      for (const out of [none, graph]) {
+        expect(out.degraded).toBe("");
+        expect(typeof out.pageType.label).toBe("string");
+      }
+    });
+  },
+);
 
 describe("page-type rules", () => {
   const withJson = (json: string): string =>

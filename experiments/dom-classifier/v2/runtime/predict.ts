@@ -69,6 +69,14 @@ export interface ClassifyOptions {
   budgetMs?: number;
   /** Override the artifact's own threshold, for evaluation. */
   threshold?: number;
+  /**
+   * The page's cross-page block (inbound same-site anchors, template cluster)
+   * in the order of the page-type head's `extraFeatureNames`, when the caller
+   * has the site's link graph. Absent, null, or the wrong length means "no
+   * graph": the block is passed as missing (NaN), which is how the head was
+   * trained to work on a single-URL audit.
+   */
+  siteFeatures?: ArrayLike<number> | null;
 }
 
 const DEFAULT_BUDGET_MS = 25;
@@ -130,12 +138,16 @@ export function classifyDocument(
   if (isRootPath(url) && ruleType === "homepage") {
     pageType = { label: "homepage", confidence: 1, source: "rules" };
   } else if (usable) {
-    const values = toVector(
-      featurized.page.features,
-      featurized.page.tokens,
-      usable.pageFeatureCount,
-      null,
-      null,
+    const values = withExtraBlock(
+      toVector(
+        featurized.page.features,
+        featurized.page.tokens,
+        usable.pageFeatureCount,
+        null,
+        null,
+      ),
+      usable.pageType.extraFeatureCount,
+      options.siteFeatures ?? null,
     );
     const scores = new Float32Array(usable.pageType.numClass);
     scoreRow(usable.pageType, values, scores);
@@ -284,6 +296,24 @@ function toVector(
   }
   for (let i = 0; i < numericCount; i++) out[i] = features[i] ?? 0;
   for (const bucket of tokens) out[numericCount + bucket] = 1;
+  return out;
+}
+
+/**
+ * The page vector, extended by a head's extra block: the caller's values when
+ * they are complete, NaN (missing) otherwise. A head without an extra block
+ * gets the vector back untouched.
+ */
+export function withExtraBlock(
+  base: Float32Array,
+  extraCount: number,
+  extra: ArrayLike<number> | null,
+): Float32Array {
+  if (extraCount === 0) return base;
+  const out = new Float32Array(base.length + extraCount);
+  out.set(base);
+  const complete = extra !== null && extra.length === extraCount;
+  for (let i = 0; i < extraCount; i++) out[base.length + i] = complete ? extra[i]! : Number.NaN;
   return out;
 }
 

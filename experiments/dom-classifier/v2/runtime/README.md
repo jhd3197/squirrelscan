@@ -158,6 +158,28 @@ option (`maskAll`) does not move it, because the feature schema is unchanged.
 `tryLoadModel` never throws; `loadModel` throws `ArtifactError`. Callers that
 want the fallback use the first.
 
+### Missing values and the cross-page block (#2307)
+
+A tree block is version 1 (plain `<=` splits) or version 2, which adds one flag
+byte per split carrying LightGBM's missing-value handling: the missing type
+(None, Zero or NaN) and `default_left`. The exporter writes version 2 only when
+a head has such a split, so every earlier artifact is byte-identical and still
+loads. A runtime that predates version 2 refuses those blocks with an
+`ArtifactError` and falls back, instead of misreading them.
+
+The walk for version 2 is LightGBM's own decision: on a split that does not
+treat NaN as missing a NaN reads as 0; on a NaN split a NaN goes the default
+way; on a Zero split a zero (and so a NaN) goes the default way; anything else
+compares `<=`.
+
+A page-type head trained with cross-page features (inbound same-site anchors,
+template cluster) names them in `pageType.extraFeatureNames`. They follow
+`[numeric, tokens]` in its vector. Pass them as `siteFeatures` when the caller
+holds the site's link graph. Absent, null or the wrong length means "no
+graph", and the block goes in as NaN. That is the input the head was trained
+to handle: 30% of its training pages had the block dropped to NaN. The exporter
+checks parity against LightGBM both ways, with the block and with it NaN.
+
 ## Cost
 
 Measured on 500 holdout pages, 82 candidate nodes per page on average, artifact

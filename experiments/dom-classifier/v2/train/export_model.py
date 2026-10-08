@@ -24,6 +24,16 @@ Binary layout, little-endian, one block per head:
     left      int32[totalInternal]    >= 0 internal index, < 0 leaf -(v)-1
     right     int32[totalInternal]
     leaf      float32[totalLeaves]
+    flags     uint8[totalInternal]    version 2 only: missing-value handling
+
+Version 2 exists for heads trained with missing values (page type with the
+cross-page block dropped to NaN, #2307). A node's flags are LightGBM's own
+missing semantics: bits 0-1 the missing type (0 None, 1 Zero, 2 NaN), bit 2
+default_left. The walk is LightGBM's NumericalDecision: a NaN on a node whose
+missing type is not NaN reads as 0.0; a NaN on a NaN node, or a zero (and so a
+NaN) on a Zero node, goes the default direction; anything else compares <=.
+A head with no missing-aware node is written as version 1, byte for byte what
+it was before, so every earlier artifact and runtime is unaffected.
 
 Tree t predicts for class t % numClass; the class score is the sum of its
 trees' leaf values, and the probabilities are a softmax over those scores.
@@ -48,6 +58,12 @@ DATASET = os.environ.get("DOM_CLASSIFIER_DATASET_VERSION", "silver-v1")
 
 MAGIC = b"SQDC"
 VERSION = 1
+#: Tree blocks carrying per-node missing-value flags.
+VERSION_MISSING = 2
+MISSING_CODES = {None: 0, "None": 0, "Zero": 1, "NaN": 2}
+DEFAULT_LEFT = 4
+#: LightGBM's kZeroThreshold: |x| at or under it is "zero" for a Zero node.
+ZERO_THRESHOLD = 1e-35
 
 
 def flatten_tree(node: dict, columns: list[int] | None) -> tuple[list[dict], list[float]]:
@@ -70,18 +86,21 @@ def flatten_tree(node: dict, columns: list[int] | None) -> tuple[list[dict], lis
         # semantics the TS walk implements, so refuse rather than mis-evaluate.
         if n.get("decision_type") != "<=":
             raise ValueError(f"unsupported decision_type {n.get('decision_type')!r}")
-        if n.get("missing_type") not in (None, "None"):
+        if n.get("missing_type") not in MISSING_CODES:
             raise ValueError(f"unsupported missing_type {n.get('missing_type')!r}")
         index = len(internal)
         internal.append({})
         left = walk(n["left_child"])
         right = walk(n["right_child"])
         split = int(n["split_feature"])
+        missing = MISSING_CODES[n.get("missing_type")]
         internal[index] = {
             "feature": columns[split] if columns is not None else split,
             "threshold": float(n["threshold"]),
             "left": left,
             "right": right,
+            # default_left only means something when a value can be missing.
+            "flags": missing | (DEFAULT_LEFT if missing and n.get("default_left") else 0),
         }
         return index
 
@@ -97,6 +116,7 @@ def pack(trees: list[dict], num_class: int, columns: list[int] | None) -> tuple[
     lefts: list[int] = []
     rights: list[int] = []
     leaf_values: list[float] = []
+    flags: list[int] = []
 
     for tree in trees:
         internal, leaves = flatten_tree(tree["tree_structure"], columns)
@@ -105,6 +125,7 @@ def pack(trees: list[dict], num_class: int, columns: list[int] | None) -> tuple[
         for node in internal:
             features.append(node["feature"])
             thresholds.append(node["threshold"])
+            flags.append(node["flags"])
             # Re-base both child pointers into the concatenated arrays.
             lefts.append(
                 node["left"] + offset_internal
@@ -123,25 +144,35 @@ def pack(trees: list[dict], num_class: int, columns: list[int] | None) -> tuple[
     if features and max(features) > 0xFFFF:
         raise ValueError("feature index does not fit in uint16")
 
+    version = VERSION_MISSING if any(flags) else VERSION
+    # A missing-value split can carry a threshold like 1e300 (every present
+    # value goes left). In float32 that is +inf, and `x <= inf` decides every
+    # finite x exactly as `x <= 1e300` does, so the overflow is the right
+    # answer, not a lossy one: computed once here, without numpy's warning.
+    with np.errstate(over="ignore"):
+        threshold_f32 = np.asarray(thresholds, dtype="<f4")
     out = bytearray()
     out += MAGIC
-    out += struct.pack("<III", VERSION, len(trees), num_class)
+    out += struct.pack("<III", version, len(trees), num_class)
     out += np.asarray(per_internal, dtype="<u4").tobytes()
     out += np.asarray(per_leaves, dtype="<u4").tobytes()
     out += np.asarray(features, dtype="<u2").tobytes()
     while len(out) % 4:
         out += b"\x00"
-    out += np.asarray(thresholds, dtype="<f4").tobytes()
+    out += threshold_f32.tobytes()
     out += np.asarray(lefts, dtype="<i4").tobytes()
     out += np.asarray(rights, dtype="<i4").tobytes()
     out += np.asarray(leaf_values, dtype="<f4").tobytes()
+    if version == VERSION_MISSING:
+        out += np.asarray(flags, dtype="<u1").tobytes()
 
     reference = {
         "feature": np.asarray(features, dtype=np.uint16),
-        "threshold": np.asarray(thresholds, dtype=np.float32),
+        "threshold": threshold_f32.astype(np.float32),
         "left": np.asarray(lefts, dtype=np.int32),
         "right": np.asarray(rights, dtype=np.int32),
         "leaf": np.asarray(leaf_values, dtype=np.float32),
+        "flags": np.asarray(flags, dtype=np.uint8) if version == VERSION_MISSING else None,
         "perInternal": np.asarray(per_internal, dtype=np.int64),
         "perLeaves": np.asarray(per_leaves, dtype=np.int64),
         "numClass": num_class,
@@ -162,6 +193,7 @@ def evaluate(reference: dict, x: np.ndarray) -> np.ndarray:
     left = reference["left"]
     right = reference["right"]
     leaf = reference["leaf"]
+    flags = reference.get("flags")
 
     for row in range(n_rows):
         values = x[row]
@@ -175,7 +207,11 @@ def evaluate(reference: dict, x: np.ndarray) -> np.ndarray:
                 continue
             while True:
                 value = np.float32(values[feature[node]])
-                nxt = left[node] if value <= threshold[node] else right[node]
+                if flags is None:
+                    nxt = left[node] if value <= threshold[node] else right[node]
+                else:
+                    nxt = missing_aware_step(value, int(flags[node]), threshold[node],
+                                             left[node], right[node])
                 if nxt < 0:
                     scores[row, tree % num_class] += leaf[-nxt - 1]
                     break
@@ -184,8 +220,19 @@ def evaluate(reference: dict, x: np.ndarray) -> np.ndarray:
     return exp / exp.sum(axis=1, keepdims=True)
 
 
+def missing_aware_step(value: np.float32, flag: int, threshold: np.float32, left: int,
+                       right: int) -> int:
+    """LightGBM's NumericalDecision for one node (see the module docstring)."""
+    missing = flag & 3
+    if np.isnan(value) and missing != 2:
+        value = np.float32(0.0)
+    if (missing == 1 and abs(float(value)) <= ZERO_THRESHOLD) or (missing == 2 and np.isnan(value)):
+        return left if flag & DEFAULT_LEFT else right
+    return left if value <= threshold else right
+
+
 def head(model_path: Path, columns_path: Path | None, classes: list[str], threshold: float,
-         class_thresholds: list[float] | None = None):
+         class_thresholds: list[float] | None = None, extra_names: list[str] | None = None):
     import lightgbm as lgb
 
     booster = lgb.Booster(model_file=str(model_path))
@@ -204,8 +251,63 @@ def head(model_path: Path, columns_path: Path | None, classes: list[str], thresh
         "classThresholds": class_thresholds,
         "numClass": len(classes),
         "numTrees": len(dumped["tree_info"]),
+        # Page type with cross-page features: the names of the block appended
+        # after [numeric, tokens], in order. The runtime fills it from the
+        # caller's link graph, or with NaN when there is none.
+        **({"extraFeatureNames": extra_names} if extra_names else {}),
         "trees": base64.b64encode(blob).decode("ascii"),
     }, reference
+
+
+def pagetype_parity(args, schema: dict, booster, reference: dict, base_width: int,
+                    extra_width: int, out: Path) -> dict:
+    """Page-type parity on VAL pages, twice: with the cross-page block as
+    computed from the link graph, and with that block MISSING (NaN), which is
+    what the runtime passes when the caller has no graph. Both must keep every
+    argmax LightGBM gives; the fixture lets predict.test.ts hold TS to the same."""
+    import gzip
+
+    dataset = Path(args.parity_dataset) if args.parity_dataset else Path(args.data_root) / DATASET
+    extra = {}
+    with open(args.pagetype_extra_features) as handle:
+        for line in handle:
+            row = json.loads(line)
+            extra[row["p"]] = row["f"]
+    n_numeric = schema["pageFeatureCount"]
+    rows = []
+    with gzip.open(dataset / "pages-val.jsonl.gz", "rt") as handle:
+        for line in handle:
+            page = json.loads(line)
+            if page["p"] not in extra:
+                continue
+            vector = np.zeros(base_width + extra_width, dtype=np.float32)
+            vector[:n_numeric] = page["f"]
+            for bucket in page["k"]:
+                vector[n_numeric + bucket] = 1.0
+            vector[base_width:] = extra[page["p"]]
+            rows.append(vector)
+            if len(rows) >= args.pagetype_parity_rows:
+                break
+    with_graph = np.vstack(rows)
+    no_graph = with_graph.copy()
+    no_graph[:, base_width:] = np.nan
+    report = {"rows": len(rows)}
+    fixture = {"rows": len(rows), "width": int(with_graph.shape[1]), "baseWidth": base_width,
+               "note": "sparse rows WITH the cross-page block; noGraph = same rows with "
+                       "columns >= baseWidth set to NaN"}
+    for name, matrix in (("graph", with_graph), ("noGraph", no_graph)):
+        ref = evaluate(reference, matrix)
+        lgb_probs = booster.predict(matrix)
+        report[name] = {"maxAbsProbDiff": float(np.abs(ref - lgb_probs).max()),
+                        "argmaxAgreement": float(np.mean(ref.argmax(1) == lgb_probs.argmax(1)))}
+        if report[name]["argmaxAgreement"] < 1.0:
+            raise SystemExit(f"page-type float32 packing changed an argmax ({name}); refusing")
+        fixture[f"probs{name[0].upper()}{name[1:]}"] = [[float(v) for v in r] for r in ref]
+    fixture["x"] = [{"i": np.flatnonzero(r).tolist(), "v": [float(r[j]) for j in np.flatnonzero(r)]}
+                    for r in with_graph]
+    (out / "parity-pagetype.json").write_text(json.dumps(fixture, separators=(",", ":")))
+    print(f"page-type parity: {json.dumps(report)}", flush=True)
+    return report
 
 
 def main() -> None:
@@ -219,6 +321,15 @@ def main() -> None:
                              "class-thresholds.json, sample/X-holdout.npz); optional third head")
     parser.add_argument("--pagetype-dir", default="pagetype",
                         help="subdirectory of --models holding the page-type head")
+    parser.add_argument("--pagetype-extra-names", default="",
+                        help="names.json of the cross-page block the page-type head was trained "
+                             "with (--extra-features); its width must equal the head's extra width")
+    parser.add_argument("--pagetype-extra-features", default="",
+                        help="jsonl {p, f} of that block, for the page-type parity fixture")
+    parser.add_argument("--parity-dataset", default="",
+                        help="dataset dir whose pages-val.jsonl.gz feeds the page-type parity "
+                             "fixture (default <data-root>/$DOM_CLASSIFIER_DATASET_VERSION)")
+    parser.add_argument("--pagetype-parity-rows", type=int, default=2_000)
     args = parser.parse_args()
 
     models = Path(args.models)
@@ -274,13 +385,20 @@ def main() -> None:
         if page_threshold_path.exists()
         else None
     )
+    extra_names = (json.loads(Path(args.pagetype_extra_names).read_text())
+                   if args.pagetype_extra_names else None)
     page_booster, page_head, page_ref = head(
         page_dir / "pagetype-model.txt",
         None,
         page_report["classes"],
         0.7,
         page_class_thresholds,
+        extra_names,
     )
+    base_width = schema["pageFeatureCount"] + schema["tokenBuckets"]
+    if page_booster.num_feature() != base_width + len(extra_names or []):
+        raise SystemExit(f"page-type head has {page_booster.num_feature()} features, expected "
+                         f"{base_width} + {len(extra_names or [])} extra")
 
     artifact = {
         "format": "squirrel-dom-classifier",
@@ -376,6 +494,11 @@ def main() -> None:
             "probs": [[float(v) for v in row] for row in ref_s],
         }, separators=(",", ":")))
 
+    page_parity = None
+    if extra_names:
+        page_parity = pagetype_parity(args, schema, page_booster, page_ref, base_width,
+                                      len(extra_names), out)
+
     (out / "export-report.json").write_text(
         json.dumps(
             {
@@ -387,6 +510,9 @@ def main() -> None:
                 "pageTypeTrees": page_head["numTrees"],
                 "sectionTrees": artifact["section"]["numTrees"] if "section" in artifact else None,
                 "sectionFloat32VsLightGBM": section_parity,
+                "pageTypeFloat32VsLightGBM": page_parity,
+                "pageTypeBlockVersion": struct.unpack("<I", base64.b64decode(
+                    page_head["trees"])[4:8])[0],
                 "float32VsLightGBM": {
                     "maxAbsProbDiff": max_diff,
                     "argmaxAgreement": argmax_agreement,

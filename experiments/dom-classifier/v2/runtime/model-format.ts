@@ -18,9 +18,23 @@
 //   int32 left[totalInternal]    >= 0 internal node index, < 0 leaf -(v)-1
 //   int32 right[totalInternal]
 //   float32 leaf[totalLeaves]
+//   uint8 flags[totalInternal]   tree-block version 2 only
+//
+// Version 2 carries LightGBM's missing-value handling per node (a head trained
+// with NaN in its input, e.g. page type with the cross-page block dropped):
+// bits 0-1 missing type (0 None, 1 Zero, 2 NaN), bit 2 default_left. The walk
+// is LightGBM's NumericalDecision, mirrored in export_model.missing_aware_step.
+// A version-1 block has no flags and walks exactly as before.
 
 export const ARTIFACT_FORMAT = "squirrel-dom-classifier";
 export const ARTIFACT_VERSION = 1;
+/** Tree-block versions this runtime evaluates: 1 plain, 2 with missing flags. */
+const TREE_BLOCK_VERSIONS = new Set([1, 2]);
+const MISSING_ZERO = 1;
+const MISSING_NAN = 2;
+const DEFAULT_LEFT = 4;
+/** LightGBM's kZeroThreshold. */
+const ZERO_THRESHOLD = 1e-35;
 const MAGIC = 0x43_44_51_53; // "SQDC" little-endian
 
 export interface HeadJson {
@@ -31,6 +45,9 @@ export interface HeadJson {
   classThresholds: number[] | null;
   numClass: number;
   numTrees: number;
+  /** Names of a block appended after [numeric, tokens] (page type's cross-page
+   *  features). Absent for heads that read only the featurizer vector. */
+  extraFeatureNames?: string[];
   trees: string;
 }
 
@@ -66,6 +83,11 @@ export interface Head {
   left: Int32Array;
   right: Int32Array;
   leaf: Float32Array;
+  /** Per-node missing-value flags (tree-block version 2), or null. */
+  flags: Uint8Array | null;
+  /** Width of the block appended after [numeric, tokens]; 0 for most heads. */
+  extraFeatureCount: number;
+  extraFeatureNames: string[];
 }
 
 export interface Model {
@@ -94,7 +116,7 @@ function decodeHead(json: HeadJson): Head {
   const view = new DataView(buffer);
   if (view.getUint32(0, true) !== MAGIC) throw new ArtifactError("bad tree-block magic");
   const version = view.getUint32(4, true);
-  if (version !== ARTIFACT_VERSION) {
+  if (!TREE_BLOCK_VERSIONS.has(version)) {
     throw new ArtifactError(`unsupported tree-block version ${version}`);
   }
   const numTrees = view.getUint32(8, true);
@@ -133,6 +155,13 @@ function decodeHead(json: HeadJson): Head {
   offset += totalInternal * 4;
   const leaf = new Float32Array(buffer, offset, totalLeaves);
   offset += totalLeaves * 4;
+  let flags: Uint8Array | null = null;
+  if (version === 2) {
+    if (offset + totalInternal > buffer.byteLength)
+      throw new ArtifactError("tree block is truncated");
+    flags = new Uint8Array(buffer, offset, totalInternal);
+    offset += totalInternal;
+  }
   if (offset > buffer.byteLength) throw new ArtifactError("tree block is truncated");
 
   const perClass = new Float64Array(numClass).fill(json.confidenceThreshold);
@@ -158,6 +187,9 @@ function decodeHead(json: HeadJson): Head {
     left,
     right,
     leaf,
+    flags,
+    extraFeatureCount: json.extraFeatureNames?.length ?? 0,
+    extraFeatureNames: json.extraFeatureNames ?? [],
   };
 }
 
@@ -189,6 +221,10 @@ export function loadModel(json: unknown): Model {
  * retained only as metadata describing which columns the head actually uses.
  */
 export function scoreRow(head: Head, values: Float32Array, out: Float32Array): void {
+  if (head.flags) {
+    scoreRowMissing(head, head.flags, values, out);
+    return;
+  }
   out.fill(0);
   const { feature, threshold, left, right, leaf, treeStart, leafStart, perInternal } = head;
   for (let tree = 0; tree < head.numTrees; tree++) {
@@ -213,6 +249,50 @@ export function scoreRow(head: Head, values: Float32Array, out: Float32Array): v
         // well double-counts the offset, which reads a leaf from a later tree
         // and quietly produces a plausible wrong answer: it cost 9,718 of
         // 10,000 parity rows.
+        out[cls]! += leaf[-next - 1]!;
+        break;
+      }
+      node = next;
+    }
+  }
+}
+
+/**
+ * The same walk for a version-2 block, with LightGBM's missing-value decision
+ * at every node. Kept separate so the plain walk, which every region and
+ * section node takes, pays nothing for it.
+ */
+function scoreRowMissing(
+  head: Head,
+  flags: Uint8Array,
+  values: Float32Array,
+  out: Float32Array,
+): void {
+  out.fill(0);
+  const { feature, threshold, left, right, leaf, treeStart, leafStart, perInternal } = head;
+  for (let tree = 0; tree < head.numTrees; tree++) {
+    const cls = tree % head.numClass;
+    if (perInternal[tree]! === 0) {
+      out[cls]! += leaf[leafStart[tree]!]!;
+      continue;
+    }
+    let node = treeStart[tree]!;
+    for (;;) {
+      const flag = flags[node]!;
+      const missing = flag & 3;
+      let value = values[feature[node]!]!;
+      // NaN on a node that does not treat NaN as missing reads as 0.0.
+      if (value !== value && missing !== MISSING_NAN) value = 0;
+      let next: number;
+      if (
+        (missing === MISSING_NAN && value !== value) ||
+        (missing === MISSING_ZERO && Math.abs(value) <= ZERO_THRESHOLD)
+      ) {
+        next = flag & DEFAULT_LEFT ? left[node]! : right[node]!;
+      } else {
+        next = value <= threshold[node]! ? left[node]! : right[node]!;
+      }
+      if (next < 0) {
         out[cls]! += leaf[-next - 1]!;
         break;
       }
