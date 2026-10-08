@@ -50,7 +50,7 @@ def main() -> None:
     arms = {}
     for path in sorted(args.answers.glob("*/answers*.jsonl")):
         arm = path.parent.name
-        mode = "sync" if path.name.endswith("-sync.jsonl") else "batch"
+        mode = path.stem.split("-", 1)[1] if "-" in path.stem else "batch"
         arms[f"{arm}/{mode}"] = {r["itemId"]: r for r in jsonl(path)}
     report = {"arms": {}}
     for name, answers in arms.items():
