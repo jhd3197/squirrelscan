@@ -203,6 +203,10 @@ def main() -> None:
     parser.add_argument("--dump-selection", action="store_true",
                         help="write the selection split's per-page predictions (OOF with "
                              "--cv-folds) for error audits; never holdout")
+    parser.add_argument("--dump-probs", action="store_true",
+                        help="with --dump-selection: also write selection-probs.npy, float16 "
+                             "per-class OOF probabilities in selection-predictions.jsonl row "
+                             "order (columns = class-thresholds.json classes)")
     parser.add_argument("--score-holdout", action="store_true",
                         help="score holdout (only for a KEPT candidate; the loop counts touches)")
     parser.add_argument("--out", required=True)
@@ -587,6 +591,8 @@ def main() -> None:
                                          "pred": classes[top], "conf": round(float(probs[top]), 4),
                                          "fires": bool(probs[top] >= thr[top]),
                                          "fitExcluded": not bool(fit)}) + "\n")
+        if args.dump_probs:
+            np.save(out / "selection-probs.npy", selection["probs"].astype(np.float16))
     booster.save_model(str(out / "pagetype-model.txt"), num_iteration=booster.best_iteration)
     (out / "class-thresholds.json").write_text(json.dumps({"classes": classes,
                                                             "thresholds": thresholds}) + "\n")
