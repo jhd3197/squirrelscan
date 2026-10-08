@@ -22,10 +22,13 @@ describe.skipIf(browserSkipReason !== null)(
     const aboutPageId = "page_aaaaaaaaaaaaaaaaaaaaaa01";
     const pricingPageId = "page_aaaaaaaaaaaaaaaaaaaaaa02";
     const bannerNodeId = "node_aaaaaaaaaaaaaaaaaaaaaa01";
+    const footerNodeId = "node_aaaaaaaaaaaaaaaaaaaaaa02";
     const ids = {
       about: "msug_00000000-0000-4000-8000-0000000000a1",
       banner: "msug_00000000-0000-4000-8000-0000000000a2",
       pricing: "msug_00000000-0000-4000-8000-0000000000a3",
+      pricingBanner: "msug_00000000-0000-4000-8000-0000000000a4",
+      pricingFooter: "msug_00000000-0000-4000-8000-0000000000a5",
     };
     const png = Buffer.from(
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/sgAAAABJRU5ErkJggg==",
@@ -60,6 +63,17 @@ describe.skipIf(browserSkipReason !== null)(
           text: "We use cookies",
           selector: "html > body:nth-of-type(1) > div:nth-of-type(1)",
           rect: { x: 0, y: 700, width: 1440, height: 200 },
+          depth: 2,
+          suggestion: null,
+        },
+        {
+          id: footerNodeId,
+          parentId: null,
+          tag: "footer",
+          role: null,
+          text: "Footer links",
+          selector: "html > body:nth-of-type(1) > footer:nth-of-type(1)",
+          rect: { x: 0, y: 500, width: 1440, height: 120 },
           depth: 2,
           suggestion: null,
         },
@@ -104,7 +118,15 @@ describe.skipIf(browserSkipReason !== null)(
             mappedLabels: { sectionPurposeV3: ["cookie_consent"] },
             alternatives: { sectionPurposeV3: ["none", "promo_banner"] },
           }),
-          row(ids.pricing, pricingPageId, null, { mappedLabels: { pageTypeV8: ["pricing"] } }),
+          // Blind: no suggestion and no alternatives reach the card.
+          row(ids.pricing, pricingPageId, null, { mappedLabels: {}, blindAxis: "pageTypeV8" }),
+          row(ids.pricingBanner, pricingPageId, bannerNodeId, {
+            mappedLabels: { sectionPurposeV3: ["promo_banner"] },
+          }),
+          row(ids.pricingFooter, pricingPageId, footerNodeId, {
+            mappedLabels: {},
+            blindAxis: "sectionPurposeV3",
+          }),
         ]
           .map((item) => JSON.stringify(item))
           .join("\n") + "\n",
@@ -127,7 +149,7 @@ describe.skipIf(browserSkipReason !== null)(
       rmSync(cohortDir, { recursive: true, force: true });
     });
 
-    test("answers, fixes, skips and undoes gold questions from the keyboard", async () => {
+    test("Y, N and S on shown questions, the picker on blind ones, unsure and undo", async () => {
       const page = await browser.newPage({ viewport: { width: 1260, height: 900 } });
       const posted = (path: string) =>
         page.waitForResponse(
@@ -147,56 +169,80 @@ describe.skipIf(browserSkipReason !== null)(
         expect(errors).toEqual([]);
         expect(await page.locator("#gold-tab").getAttribute("aria-selected")).toBe("true");
         expect(await page.locator("#gold-definition").textContent()).toContain("story, mission");
-        // The pane never names which annotator proposed the class.
+        // One clean card: no queue panel, and no annotator named anywhere.
+        expect(await page.locator(".queue-panel").isVisible()).toBe(false);
         expect(await page.locator("#gold-pane").textContent()).not.toContain("Jev");
 
+        // Y: yes, this class.
         let saved = posted("/api/page-annotations");
-        await page.keyboard.press("Enter");
+        await page.keyboard.press("y");
         await saved;
         await asked("Is the outlined element a cookie consent banner?");
         await page.locator(`.node-region.gold-target[data-node-id="${bannerNodeId}"]`).waitFor();
-        expect(await page.locator("#gold-rule").isHidden()).toBe(false);
 
-        await page.keyboard.press("x");
-        await page.locator("#gold-fix");
+        // S: suggest the right class; type to filter, Enter takes the top match.
+        await page.keyboard.press("s");
+        await page.locator("#gold-fix").waitFor();
         expect(await page.locator("#gold-fix-heading").textContent()).toBe(
-          "Not Cookie consent. What is it instead?",
+          "Not Cookie consent? Pick the right class",
         );
+        await page.keyboard.type("no");
+        expect(await page.locator("#gold-filter").textContent()).toBe("no");
         expect(await page.locator("#gold-alternatives button").first().textContent()).toBe(
           "1 None",
         );
         saved = posted("/api/annotations");
-        await page.keyboard.press("1");
+        await page.keyboard.press("Enter");
         await saved;
-        await asked("Is this page a Pricing page?");
 
-        await page.keyboard.press("j");
-        await asked("Only skipped questions are left.");
+        // Blind page: no suggestion, the picker is open at once.
+        await asked("What is this page?");
+        expect(await page.locator("#gold-actions").isHidden()).toBe(true);
+        expect(await page.locator("#gold-fix").isVisible()).toBe(true);
+        await page.keyboard.type("pri");
+        expect(await page.locator("#gold-definition").textContent()).toContain("Pricing");
+        saved = posted("/api/page-annotations");
+        await page.keyboard.press("Enter");
+        await saved;
 
+        // N: no, not this class, no fix.
+        await asked("Is the outlined element the site's own promo or announcement bar?");
+        saved = posted("/api/model-reviews");
+        await page.keyboard.press("n");
+        await saved;
+
+        // Blind section: U is unsure.
+        await asked("What is the outlined element?");
+        saved = posted("/api/annotations");
+        await page.keyboard.press("u");
+        await saved;
+        await asked("Every gold question has an answer.");
+
+        // Cmd-Z undoes the unsure, then J skips the reopened question.
         const undone = posted("/api/review-actions/undo");
         await page.keyboard.press("Meta+z");
         await undone;
-        await asked("Is the outlined element a cookie consent banner?");
+        await asked("What is the outlined element?");
+        await page.keyboard.press("j");
+        await asked("Only skipped questions are left.");
 
-        await page.keyboard.press("x");
-        saved = posted("/api/model-reviews");
-        await page.keyboard.press("x");
-        await saved;
-
-        const queue = store.goldQueue();
-        expect(queue.map((item) => item.status)).toEqual(["accepted", "rejected", "pending"]);
-        expect(store.pageAnnotationsForPage(aboutPageId).at(-1)).toMatchObject({
-          pageTypesV8: ["about"],
-          modelSuggestionId: ids.about,
-          modelReview: "accept",
-          cohortId: "gold-ui",
-        });
-        // The undone fix stays in the journal, superseded by an undo record.
-        expect(store.readAnnotations().at(-1)).toMatchObject({
-          sectionPurposesV3: ["none"],
+        expect(store.goldQueue().map((item) => [item.blind, item.status])).toEqual([
+          [false, "accepted"],
+          [false, "corrected"],
+          [true, "corrected"],
+          [false, "rejected"],
+          [true, "pending"],
+        ]);
+        expect(store.pageAnnotationsForPage(pricingPageId).at(-1)).toMatchObject({
+          pageTypesV8: ["pricing"],
+          modelSuggestionId: ids.pricing,
           modelReview: "correct",
         });
-        expect(store.annotationsForPage(aboutPageId)).toHaveLength(0);
+        expect(store.readAnnotations().at(-1)).toMatchObject({
+          decision: "unsure",
+          modelSuggestionId: ids.pricingFooter,
+        });
+        expect(errors).toEqual([]);
       } finally {
         await page.close();
       }

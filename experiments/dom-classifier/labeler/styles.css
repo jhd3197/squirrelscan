@@ -1174,10 +1174,53 @@ dialog::backdrop {
   background: #fff;
   color: #8c3434;
 }
-#gold-skip {
+#gold-suggest {
   border: 1px solid var(--line);
   background: #fff;
   color: #48575e;
+}
+.gold-filter {
+  margin: 0 0 8px;
+  border: 1px solid #b7d0df;
+  border-radius: 6px;
+  background: #fff;
+  padding: 6px 8px;
+  color: #235a79;
+  font:
+    700 13px ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+}
+.gold-filter.empty {
+  color: #9aa7ab;
+  font-weight: 500;
+}
+.gold-unsure {
+  font-style: italic;
+}
+.gold-keys {
+  margin: 12px 0 0;
+  border-top: 1px solid #cfe1ed;
+  padding-top: 8px;
+  color: #52616a;
+  font-size: 11px;
+  font-weight: 700;
+}
+/* A grid or flex rule must not outrank `hidden` inside the gold card. */
+.gold-card [hidden] {
+  display: none !important;
+}
+/* Gold mode: only the screenshot and the card. */
+.gold-mode .workspace {
+  grid-template-columns: minmax(0, 1fr) 338px;
+}
+.gold-mode .queue-panel,
+.gold-mode #next-suggestion,
+.gold-mode #next-model-suggestion,
+.gold-mode .canvas-hint,
+.gold-mode .selection-mode {
+  display: none !important;
 }
 .gold-done {
   margin-top: 10px;

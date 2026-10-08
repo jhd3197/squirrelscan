@@ -285,6 +285,9 @@ const state = {
     focusedSuggestionId: null,
     // The suggestion whose capture is loaded and drawn; answers wait for it.
     readyFor: null,
+    // Class picker: always open on a blind question, opened by S on a shown one.
+    picking: false,
+    filter: "",
   },
 };
 const $ = (id) => document.getElementById(id);
@@ -374,15 +377,20 @@ function pageModelSuggestionFor() {
 /** Gold questions are answered only in the Gold pane, never by the element or page cards. */
 function isGoldSuggestion(suggestion) {
   const labels = suggestion?.mappedLabels || {};
-  return Boolean(labels.pageTypeV8?.length || labels.sectionPurposeV3?.length);
+  return Boolean(
+    labels.pageTypeV8?.length || labels.sectionPurposeV3?.length || suggestion?.blindAxis,
+  );
 }
 /**
  * Gold answers stay out of the element and page cards' "latest label" view, so
  * a gold answer never reads as a descriptive label or carries its binding.
  */
-function descriptiveOnly(annotations) {
+function descriptiveOnly(annotations, goldSuggestionIds = new Set()) {
   return (annotations || []).filter(
-    (annotation) => !annotation.pageTypesV8?.length && !annotation.sectionPurposesV3?.length,
+    (annotation) =>
+      !annotation.pageTypesV8?.length &&
+      !annotation.sectionPurposesV3?.length &&
+      !goldSuggestionIds.has(annotation.modelSuggestionId),
   );
 }
 function savedModelReviewFor(suggestion) {
@@ -569,8 +577,9 @@ async function undoLastReview() {
             (summary.pageReviewedCount || 0) - last.summaryDelta,
           );
       }
-      state.annotations = descriptiveOnly(response.annotations);
-      state.pageAnnotations = descriptiveOnly(response.pageAnnotations);
+      const goldIds = new Set(state.gold.items.map((item) => item.suggestionId));
+      state.annotations = descriptiveOnly(response.annotations, goldIds);
+      state.pageAnnotations = descriptiveOnly(response.pageAnnotations, goldIds);
       state.modelReviews = response.modelReviews || [];
       if (last.labelMode === "page") {
         setLabelMode("page");
@@ -2166,6 +2175,8 @@ function setLabelMode(mode) {
   $("element-tab").setAttribute("aria-selected", String(mode === "element"));
   $("page-tab").setAttribute("aria-selected", String(mode === "page"));
   $("gold-tab").setAttribute("aria-selected", String(mode === "gold"));
+  // Gold mode shows only the screenshot and the card: no queue, hints or model chrome.
+  document.body.classList.toggle("gold-mode", mode === "gold");
   if (mode === "page") renderPageLabel();
   if (mode !== "gold" && state.selectedId === currentGoldItem()?.nodeId) applyClearSelection();
   syncNodeStates();
@@ -2268,8 +2279,12 @@ async function loadPageNow(index) {
     if (generation !== state.loadGeneration) return;
     state.page = result;
     state.nodes = result.nodes || [];
-    state.annotations = descriptiveOnly(result.annotations);
-    state.pageAnnotations = descriptiveOnly(result.pageAnnotations);
+    // A gold "unsure" carries no gold axis, so gold answers are also known by their question.
+    const goldIds = new Set(
+      (result.modelSuggestions || []).filter(isGoldSuggestion).map((suggestion) => suggestion.id),
+    );
+    state.annotations = descriptiveOnly(result.annotations, goldIds);
+    state.pageAnnotations = descriptiveOnly(result.pageAnnotations, goldIds);
     state.modelSuggestions = (result.modelSuggestions || []).filter(
       (suggestion) => !isGoldSuggestion(suggestion),
     );
@@ -2556,8 +2571,8 @@ function installListeners() {
   $("page-tab").addEventListener("click", () => setLabelMode("page"));
   $("gold-tab").addEventListener("click", () => enterGoldMode());
   $("gold-ok").addEventListener("click", () => saveGoldAnswer("accept"));
-  $("gold-not-ok").addEventListener("click", () => goldNotOk());
-  $("gold-skip").addEventListener("click", () => skipGoldItem());
+  $("gold-not-ok").addEventListener("click", () => saveGoldAnswer("reject"));
+  $("gold-suggest").addEventListener("click", () => openGoldPicker());
   $("gold-review-skipped").addEventListener("click", () => {
     state.gold.skipped.clear();
     showGoldItem(nextGoldPosition(-1));
@@ -2761,7 +2776,8 @@ function nextGoldPosition(from) {
   return -1;
 }
 async function showGoldItem(position) {
-  state.gold.phase = "question";
+  state.gold.picking = false;
+  state.gold.filter = "";
   if (position < 0) {
     state.gold.position = -1;
     renderGold();
@@ -2787,6 +2803,35 @@ async function showGoldItem(position) {
     focusGoldTarget();
   }
 }
+const GOLD_STATUS_TEXT = {
+  accepted: "yes",
+  corrected: "a picked class",
+  rejected: "no",
+  unsure: "unsure",
+};
+function goldPickerOpen(item) {
+  return Boolean(item && (item.blind || state.gold.picking));
+}
+/**
+ * Classes the picker offers: on a shown question its likely alternatives come
+ * first and the shown class is left out; a blind question lists them in
+ * catalogue order. The filter matches the start of any word of a class.
+ */
+function goldMatches(item) {
+  const all = (state.gold.catalogue?.[item.axis] || []).map((entry) => entry.label);
+  const first = item.blind
+    ? []
+    : item.alternatives.filter((label) => label !== item.label && all.includes(label));
+  const ordered = [...first, ...all.filter((label) => label !== item.label && !first.includes(label))];
+  const filter = state.gold.filter;
+  if (!filter) return ordered;
+  return ordered.filter((label) =>
+    `${label.replaceAll("_", " ")} ${goldClassName(item.axis, label)}`
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .some((word) => word.startsWith(filter)),
+  );
+}
 function renderGold() {
   const item = currentGoldItem();
   const items = state.gold.items;
@@ -2795,8 +2840,10 @@ function renderGold() {
     state.gold.skipped.size ? ` · ${state.gold.skipped.size} skipped` : ""
   }`;
   $("gold-done").hidden = Boolean(item);
-  $("gold-actions").hidden = !item;
-  $("gold-fix").hidden = !item || state.gold.phase !== "fix";
+  const picking = goldPickerOpen(item);
+  $("gold-actions").hidden = !item || picking;
+  $("gold-fix").hidden = !item || !picking;
+  $("gold-keys").hidden = !item;
   if (!item) {
     $("gold-kind").textContent = "";
     $("gold-question").textContent = state.gold.skipped.size
@@ -2809,35 +2856,39 @@ function renderGold() {
     $("gold-review-skipped").hidden = state.gold.skipped.size === 0;
     return;
   }
-  const question = goldQuestionFor(item.axis, item.label);
-  $("gold-kind").textContent =
-    item.axis === "pageTypeV8"
-      ? `Page type · item ${state.gold.position + 1}`
-      : `Section · item ${state.gold.position + 1}`;
-  $("gold-question").textContent = question?.question || `Is this ${item.label}?`;
-  $("gold-definition").textContent = question?.definition || "";
-  $("gold-rule").hidden = item.axis !== "sectionPurposeV3";
+  const page = item.axis === "pageTypeV8";
+  $("gold-kind").textContent = `${page ? "Page type" : "Section"} · item ${state.gold.position + 1}`;
+  const matches = picking ? goldMatches(item) : [];
+  if (item.blind) {
+    $("gold-question").textContent = page ? "What is this page?" : "What is the outlined element?";
+    const top = state.gold.filter && matches[0];
+    $("gold-definition").textContent = top
+      ? `${goldClassName(item.axis, top)}: ${goldQuestionFor(item.axis, top)?.definition || ""}`
+      : "";
+  } else {
+    const question = goldQuestionFor(item.axis, item.label);
+    $("gold-question").textContent = question?.question || `Is this ${item.label}?`;
+    $("gold-definition").textContent = question?.definition || "";
+  }
+  $("gold-rule").hidden = page;
   $("gold-rule").textContent = state.gold.catalogue?.sectionGranularity || "";
   $("gold-status").textContent =
     item.status === "pending"
       ? ""
-      : `Saved: ${item.status === "accepted" ? "OK" : item.status === "corrected" ? "fixed" : "Not OK"}. A new answer replaces it.`;
-  if (state.gold.phase === "fix") renderGoldFix(item);
+      : `Saved: ${GOLD_STATUS_TEXT[item.status] || item.status}. A new answer replaces it.`;
+  $("gold-keys").textContent = picking
+    ? `Type to filter · 1–9, 0 pick · Enter top match · U unsure · ${item.blind ? "" : "Esc back · "}J skip · K back · ⌘Z undo`
+    : "Y yes · N no · S suggest the right class · J skip · K back · ⌘Z undo";
+  if (picking) renderGoldPicker(item, matches);
 }
-/** The one-click fixes: the suggestion's alternatives first, then every other class. */
-function goldFixOptions(item) {
-  const all = (state.gold.catalogue?.[item.axis] || []).map((entry) => entry.label);
-  const first = item.alternatives.filter((label) => label !== item.label && all.includes(label));
-  const rest = all.filter((label) => label !== item.label && !first.includes(label));
-  return { first, rest, ordered: [...first, ...rest] };
-}
-function renderGoldFix(item) {
-  const { first, rest, ordered } = goldFixOptions(item);
-  $("gold-fix-heading").textContent =
-    `Not ${goldClassName(item.axis, item.label)}. What is it instead?`;
-  const button = (label) => {
-    const number = ordered.indexOf(label) + 1;
-    return el(
+function renderGoldPicker(item, matches) {
+  $("gold-fix-heading").textContent = item.blind
+    ? "Pick the class"
+    : `Not ${goldClassName(item.axis, item.label)}? Pick the right class`;
+  $("gold-filter").textContent = state.gold.filter || "type to filter…";
+  $("gold-filter").classList.toggle("empty", !state.gold.filter);
+  const button = (label, index) =>
+    el(
       "button",
       {
         type: "button",
@@ -2845,13 +2896,17 @@ function renderGoldFix(item) {
         onClick: () => saveGoldAnswer("correct", label),
       },
       [
-        ...(number <= 9 ? [el("kbd", { text: String(number) }), " "] : []),
+        ...(index < 10 ? [el("kbd", { text: String((index + 1) % 10) }), " "] : []),
         goldClassName(item.axis, label),
       ],
     );
-  };
-  $("gold-alternatives").replaceChildren(...first.map(button));
-  $("gold-more").replaceChildren(...rest.map(button));
+  $("gold-alternatives").replaceChildren(
+    ...matches.map(button),
+    el("button", { type: "button", className: "gold-unsure", onClick: () => saveGoldAnswer("unsure") }, [
+      el("kbd", { text: "U" }),
+      " Unsure / can't tell",
+    ]),
+  );
 }
 function focusGoldTarget() {
   const item = currentGoldItem();
@@ -2919,16 +2974,6 @@ function goldReady(item) {
   showStatus("Wait for the page to load before answering");
   return false;
 }
-function goldNotOk() {
-  const item = currentGoldItem();
-  if (!item || state.saving || !goldReady(item)) return;
-  if (state.gold.phase === "fix") {
-    saveGoldAnswer("reject");
-    return;
-  }
-  state.gold.phase = "fix";
-  renderGold();
-}
 function skipGoldItem() {
   const item = currentGoldItem();
   if (!item || state.saving) return;
@@ -2960,7 +3005,27 @@ async function saveGoldAnswer(review, fixLabel = null) {
   showStatus("Saving answer…");
   try {
     let action;
-    if (review === "reject") {
+    if (review === "unsure") {
+      // "Can't tell" is bound to the question with no class: not a yes, not a no.
+      const binding = {
+        decision: "unsure",
+        captureHash: item.captureHash,
+        modelSuggestionId: item.suggestionId,
+        modelReview: "correct",
+      };
+      if (item.nodeId) {
+        const response = await post("/api/annotations", {
+          ...binding,
+          pageId: item.pageId,
+          nodeId: item.nodeId,
+          boundary: "unsure",
+        });
+        action = { kind: "annotation", id: response.annotation.id };
+      } else {
+        const response = await post("/api/page-annotations", { ...binding, pageId: item.pageId });
+        action = { kind: "page_annotation", id: response.annotation.id };
+      }
+    } else if (review === "reject") {
       const response = await post("/api/model-reviews", {
         pageId: item.pageId,
         nodeId: item.nodeId,
@@ -2995,11 +3060,24 @@ async function saveGoldAnswer(review, fixLabel = null) {
         action = { kind: "page_annotation", id: response.annotation.id };
       }
     }
-    item.status = review === "accept" ? "accepted" : review === "correct" ? "corrected" : "rejected";
+    item.status =
+      review === "unsure"
+        ? "unsure"
+        : review === "accept"
+          ? "accepted"
+          : review === "correct"
+            ? "corrected"
+            : "rejected";
     state.gold.undo.push({ position, item, previousStatus, action });
     state.gold.skipped.delete(item.suggestionId);
     showStatus(
-      review === "accept" ? "Saved OK" : review === "correct" ? "Saved fix" : "Saved Not OK",
+      review === "accept"
+        ? "Saved yes"
+        : review === "correct"
+          ? "Saved class"
+          : review === "unsure"
+            ? "Saved unsure"
+            : "Saved no",
       "success",
     );
     refreshStats();
@@ -3058,63 +3136,97 @@ function browsePage(index) {
   }
   loadPage(index);
 }
-/** Gold-mode keys; returns true when the key was handled here. */
+function openGoldPicker() {
+  const item = currentGoldItem();
+  if (!item || item.blind || !goldReady(item)) return;
+  state.gold.picking = true;
+  state.gold.filter = "";
+  renderGold();
+}
+/**
+ * Gold-mode keys. A shown question: Y yes, N no, S opens the picker. The
+ * picker (always open on a blind question): letters filter, 1–9 and 0 pick,
+ * Enter takes the top match, U is unsure. J skip, K back and Cmd-Z undo work
+ * throughout; while a filter is typed, letters go to the filter.
+ */
 function handleGoldKey(event) {
-  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
-    if (isEditingTarget(event.target)) return false;
+  const key = event.key.toLowerCase();
+  if ((event.metaKey || event.ctrlKey) && key === "z") {
+    if (isEditingTarget(event.target)) return;
     event.preventDefault();
     undoGoldAnswer();
-    return true;
+    return;
   }
-  if (isEditingTarget(event.target) || event.metaKey || event.ctrlKey || event.altKey) return false;
-  const key = event.key.toLowerCase();
-  if (key === "enter") {
-    if (event.target?.closest?.("button, a, [role='button']")) return false;
+  if (isEditingTarget(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
+  const item = currentGoldItem();
+  if (key === "?" || (event.shiftKey && key === "/")) {
     event.preventDefault();
-    if (state.gold.phase === "question") saveGoldAnswer("accept");
-    return true;
-  }
-  if (key === "x") {
-    event.preventDefault();
-    goldNotOk();
-    return true;
-  }
-  if (key === "j") {
-    event.preventDefault();
-    skipGoldItem();
-    return true;
-  }
-  if (key === "k") {
-    event.preventDefault();
-    previousGoldItem();
-    return true;
-  }
-  if (key === "escape") {
-    event.preventDefault();
-    if (state.gold.phase === "fix") {
-      state.gold.phase = "question";
-      renderGold();
-    }
-    return true;
+    $("shortcuts-dialog").showModal();
+    return;
   }
   if (key === "[" || key === "]") {
     event.preventDefault();
     browsePage(state.currentPageIndex + (key === "]" ? 1 : -1));
-    return true;
+    return;
   }
-  if (/^[1-9]$/.test(key) && state.gold.phase === "fix") {
+  if (!item) return;
+  if (goldPickerOpen(item)) {
+    const matches = goldMatches(item);
+    if (/^[0-9]$/.test(key)) {
+      event.preventDefault();
+      const label = matches[(Number(key) + 9) % 10];
+      if (label) saveGoldAnswer("correct", label);
+      return;
+    }
+    if (key === "enter") {
+      if (event.target?.closest?.("button, a, [role='button']")) return;
+      event.preventDefault();
+      if (state.gold.filter && matches[0]) saveGoldAnswer("correct", matches[0]);
+      return;
+    }
+    if (key === "escape") {
+      event.preventDefault();
+      if (state.gold.filter) state.gold.filter = "";
+      else if (!item.blind) state.gold.picking = false;
+      renderGold();
+      return;
+    }
+    if (key === "backspace") {
+      event.preventDefault();
+      state.gold.filter = state.gold.filter.slice(0, -1);
+      renderGold();
+      return;
+    }
+    if (/^[a-z]$/.test(key)) {
+      event.preventDefault();
+      // No class has a word starting with u, j or k, so on an empty filter they are commands.
+      if (!state.gold.filter && key === "u") saveGoldAnswer("unsure");
+      else if (!state.gold.filter && key === "j") skipGoldItem();
+      else if (!state.gold.filter && key === "k") previousGoldItem();
+      else {
+        state.gold.filter += key;
+        renderGold();
+      }
+    }
+    return;
+  }
+  if (key === "y" || key === "enter") {
+    if (key === "enter" && event.target?.closest?.("button, a, [role='button']")) return;
     event.preventDefault();
-    const item = currentGoldItem();
-    const label = item && goldFixOptions(item).ordered[Number(key) - 1];
-    if (label) saveGoldAnswer("correct", label);
-    return true;
-  }
-  if (key === "?" || (event.shiftKey && key === "/")) {
+    saveGoldAnswer("accept");
+  } else if (key === "n") {
     event.preventDefault();
-    $("shortcuts-dialog").showModal();
-    return true;
+    saveGoldAnswer("reject");
+  } else if (key === "s") {
+    event.preventDefault();
+    openGoldPicker();
+  } else if (key === "j") {
+    event.preventDefault();
+    skipGoldItem();
+  } else if (key === "k") {
+    event.preventDefault();
+    previousGoldItem();
   }
-  return false;
 }
 async function bootstrap() {
   installListeners();

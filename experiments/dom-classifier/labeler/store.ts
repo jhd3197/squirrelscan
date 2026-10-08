@@ -481,11 +481,22 @@ export class LabelStore {
       { status: GoldQueueItem["status"]; timestamp: number; order: number }
     >();
     let order = 0;
-    const consider = (suggestionId: string | null, review: ModelReview | null, timestamp: string) => {
+    const consider = (
+      suggestionId: string | null,
+      review: ModelReview | null,
+      timestamp: string,
+      decision?: string,
+    ) => {
       order += 1;
       if (!suggestionId || !review) return;
       const status =
-        review === "accept" ? "accepted" : review === "correct" ? "corrected" : "rejected";
+        decision === "unsure"
+          ? "unsure"
+          : review === "accept"
+            ? "accepted"
+            : review === "correct"
+              ? "corrected"
+              : "rejected";
       const candidate = { status, timestamp: Date.parse(timestamp) || 0, order } as const;
       const existing = decided.get(suggestionId);
       if (
@@ -496,16 +507,27 @@ export class LabelStore {
         decided.set(suggestionId, candidate);
     };
     for (const annotation of this.effectiveAnnotations())
-      consider(annotation.modelSuggestionId, annotation.modelReview, annotation.timestamp);
+      consider(
+        annotation.modelSuggestionId,
+        annotation.modelReview,
+        annotation.timestamp,
+        annotation.decision,
+      );
     for (const annotation of this.effectivePageAnnotations())
-      consider(annotation.modelSuggestionId, annotation.modelReview, annotation.timestamp);
+      consider(
+        annotation.modelSuggestionId,
+        annotation.modelReview,
+        annotation.timestamp,
+        annotation.decision,
+      );
     for (const review of this.effectiveModelReviews())
       consider(review.modelSuggestionId, review.review, review.timestamp);
 
     const items: GoldQueueItem[] = [];
     const seen = new Set<string>();
     for (const suggestion of this.readModelSuggestions()) {
-      const axis = goldAxisOf(suggestion.mappedLabels);
+      const shown = goldAxisOf(suggestion.mappedLabels);
+      const axis = shown ?? suggestion.blindAxis ?? null;
       if (!axis || seen.has(suggestion.id)) continue;
       const target = this.goldTarget(suggestion.pageId);
       if (
@@ -522,8 +544,9 @@ export class LabelStore {
         captureHash: suggestion.captureHash,
         cohortId: this.cohortIdForPage(suggestion.pageId),
         axis,
-        label: suggestion.mappedLabels[axis]![0]!,
-        alternatives: [...(suggestion.alternatives?.[axis] ?? [])],
+        label: shown ? suggestion.mappedLabels[shown]![0]! : null,
+        blind: !shown,
+        alternatives: shown ? [...(suggestion.alternatives?.[axis] ?? [])] : [],
         status: decided.get(suggestion.id)?.status ?? "pending",
       });
     }
@@ -1621,6 +1644,7 @@ function normalizeModelSuggestion(value: unknown): ModelSuggestion | null {
   try {
     const mappedLabels = normalizeMappedLabels(row.mappedLabels);
     const alternatives = normalizeAlternatives(row.alternatives, mappedLabels, row.nodeId);
+    const blindAxis = normalizeBlindAxis(row.blindAxis, mappedLabels, alternatives, row.nodeId);
     const axisProbabilities = normalizeAxisProbabilities(row.axisProbabilities);
     const componentTypeChoice = normalizeComponentTypeChoice(row.componentTypeChoice);
     const usage = normalizeUsage(row.usage);
@@ -1643,6 +1667,7 @@ function normalizeModelSuggestion(value: unknown): ModelSuggestion | null {
       provisional: row.provisional,
       mappedLabels,
       ...(alternatives === undefined ? {} : { alternatives }),
+      ...(blindAxis === undefined ? {} : { blindAxis }),
       ...(axisProbabilities === undefined ? {} : { axisProbabilities }),
       ...(componentTypeChoice === undefined ? {} : { componentTypeChoice }),
       createdAt: row.createdAt,
@@ -1731,6 +1756,23 @@ function normalizeAlternatives(
   if (labels.some((label) => (mapped[axis] as string[]).includes(label)))
     throw new StoreError(400, "Alternatives cannot repeat the suggestion");
   return { [axis]: labels } as ModelSuggestion["alternatives"];
+}
+
+/** A blind question names only its axis: no mapped label, no alternatives. */
+function normalizeBlindAxis(
+  value: unknown,
+  mapped: ModelSuggestion["mappedLabels"],
+  alternatives: ModelSuggestion["alternatives"] | undefined,
+  nodeId: string | null,
+): GoldAxis | undefined {
+  if (value === undefined) return undefined;
+  if (value !== "pageTypeV8" && value !== "sectionPurposeV3")
+    throw new StoreError(400, "Invalid blindAxis");
+  if (Object.keys(mapped).length || alternatives)
+    throw new StoreError(400, "A blind question carries no suggestion");
+  if ((value === "pageTypeV8") !== (nodeId === null))
+    throw new StoreError(400, "A blind question's axis does not match its target");
+  return value;
 }
 
 function goldAxisOf(mapped: ModelSuggestion["mappedLabels"]): GoldAxis | null {

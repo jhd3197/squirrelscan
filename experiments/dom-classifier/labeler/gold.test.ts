@@ -192,6 +192,7 @@ describe("gold review axes", () => {
         cohortId: "gold-v1",
         axis: "sectionPurposeV3",
         label: "cookie_consent",
+        blind: false,
         alternatives: ["none", "promo_banner"],
         status: "pending",
       },
@@ -203,6 +204,7 @@ describe("gold review axes", () => {
         cohortId: "gold-v1",
         axis: "pageTypeV8",
         label: "about",
+        blind: false,
         alternatives: ["contact", "other"],
         status: "pending",
       },
@@ -369,6 +371,70 @@ describe("gold review axes", () => {
       pageQuestion(),
     ]);
     expect(store.goldQueue().map((item) => item.label)).toEqual(["about"]);
+  });
+
+  test("a blind question shows no class; it takes a picked class or unsure, never an accept", async () => {
+    const blindPage = suggestion({ mappedLabels: {}, blindAxis: "pageTypeV8" });
+    const blindNode = suggestion({
+      nodeId: bannerNodeId,
+      mappedLabels: {},
+      blindAxis: "sectionPurposeV3",
+    });
+    const { store } = goldFixture([
+      blindPage,
+      blindNode,
+      // Malformed: a blind row may not carry a class, alternatives, or the wrong target.
+      suggestion({ mappedLabels: { pageTypeV8: ["about"] }, blindAxis: "pageTypeV8" }),
+      suggestion({
+        mappedLabels: {},
+        blindAxis: "pageTypeV8",
+        alternatives: { pageTypeV8: ["about"] },
+      }),
+      suggestion({ nodeId: bannerNodeId, mappedLabels: {}, blindAxis: "pageTypeV8" }),
+    ]);
+    const queue = await request(store, "/api/gold-queue");
+    expect(
+      queue.body.items.map((item: Record<string, unknown>) => [
+        item.label,
+        item.blind,
+        item.alternatives,
+      ]),
+    ).toEqual([
+      [null, true, []],
+      [null, true, []],
+    ]);
+    const accept = await request(store, "/api/page-annotations", {
+      pageId: goldPageId,
+      decision: "label",
+      pageTypesV8: ["about"],
+      captureHash,
+      clientRequestId: "blind_accept_1",
+      modelSuggestionId: blindPage.id,
+      modelReview: "accept",
+    });
+    expect(accept.status).toBe(400);
+    const picked = await request(store, "/api/page-annotations", {
+      pageId: goldPageId,
+      decision: "label",
+      pageTypesV8: ["contact"],
+      captureHash,
+      clientRequestId: "blind_pick_1",
+      modelSuggestionId: blindPage.id,
+      modelReview: "correct",
+    });
+    expect(picked.status).toBe(201);
+    const unsure = await request(store, "/api/annotations", {
+      pageId: goldPageId,
+      nodeId: bannerNodeId,
+      decision: "unsure",
+      boundary: "unsure",
+      captureHash,
+      clientRequestId: "blind_unsure_1",
+      modelSuggestionId: blindNode.id,
+      modelReview: "correct",
+    });
+    expect(unsure.status).toBe(201);
+    expect(store.goldQueue().map((item) => item.status)).toEqual(["corrected", "unsure"]);
   });
 
   test("gold answers count in the review stats like any model review", () => {

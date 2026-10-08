@@ -921,6 +921,12 @@ export type ModelSuggestion = {
    * Likely other answers for a gold question, most likely first, offered as
    * one-click fixes after Not OK. Never includes the suggested value.
    */
+  /**
+   * A blind gold question: the axis is asked with NO suggestion shown, so the
+   * reviewer picks the class without an anchor. `mappedLabels` is then empty
+   * and there are no alternatives; scoring keys stay private.
+   */
+  blindAxis?: GoldAxis;
   alternatives?: {
     pageTypeV8?: PageTypeV8[];
     sectionPurposeV3?: SectionPurposeV3[];
@@ -947,9 +953,12 @@ export type GoldQueueItem = {
   captureHash: string;
   cohortId: string;
   axis: GoldAxis;
-  label: string;
+  /** The shown class; null on a blind question. */
+  label: string | null;
+  blind: boolean;
   alternatives: string[];
-  status: "pending" | "accepted" | "corrected" | "rejected";
+  /** `unsure` is an explicit "can't tell" bound to the question. */
+  status: "pending" | "accepted" | "corrected" | "rejected" | "unsure";
 };
 
 /** Read-only projection over the append-only journals for the current captures. */
