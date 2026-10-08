@@ -472,38 +472,55 @@ def cmd_cost(args) -> None:
     print(json.dumps({"totalUsd": round(total["usd"], 4)}))
 
 
+def unusable(item: dict, renders: dict) -> str | None:
+    """Why an item cannot be judged from its render, or None. Same bar as gold-v1's cohort builder."""
+    r = renders.get(item["pageId"])
+    if not (
+        r
+        and not r.get("error")
+        and r.get("views")
+        and r["quality"]["visibleTextChars"] >= 200
+        and r["quality"]["visibleNodes"] >= 30
+    ):
+        return "page_unusable"
+    if item["axis"] == "section":
+        at = r.get("located", {}).get(str(item["nodeId"]), {})
+        rect = at.get("rect") or {}
+        if not (
+            at.get("visible")
+            and at.get("tagMatches")
+            and rect.get("width", 0) >= 8
+            and rect.get("height", 0) >= 8
+            and f"n{item['nodeId']}" in r["views"]
+        ):
+            return "target_not_visible"
+    return None
+
+
+def cmd_filter(args) -> None:
+    """Usable renders only, no caps (the overnight list)."""
+    renders = {r["pageId"]: r for r in jsonl(args.render / "renders.jsonl")}
+    kept, dropped = [], Counter()
+    for item in jsonl(args.items):
+        reason = unusable(item, renders)
+        if reason:
+            dropped[f"{item['axis']}:{reason}"] += 1
+        else:
+            kept.append(item)
+    args.cohort.write_text("".join(json.dumps(i) + "\n" for i in kept))
+    print(json.dumps({"kept": Counter(i["axis"] for i in kept), "dropped": dropped}, default=dict))
+
+
 def cmd_cohort(args) -> None:
     """Usable renders only; per stratum keep the first N in sample order, re-mark the pilot share."""
     renders = {r["pageId"]: r for r in jsonl(args.render / "renders.jsonl")}
-
-    def usable_page(r) -> bool:
-        return bool(
-            r
-            and not r.get("error")
-            and r.get("views")
-            and r["quality"]["visibleTextChars"] >= 200
-            and r["quality"]["visibleNodes"] >= 30
-        )
-
     out_items, dropped = [], Counter()
     by_stratum = defaultdict(list)
     for item in jsonl(args.items):
-        r = renders.get(item["pageId"])
-        if not usable_page(r):
-            dropped[f"{item['axis']}:page_unusable"] += 1
+        reason = unusable(item, renders)
+        if reason:
+            dropped[f"{item['axis']}:{reason}"] += 1
             continue
-        if item["axis"] == "section":
-            at = r.get("located", {}).get(str(item["nodeId"]), {})
-            rect = at.get("rect") or {}
-            if not (
-                at.get("visible")
-                and at.get("tagMatches")
-                and rect.get("width", 0) >= 8
-                and rect.get("height", 0) >= 8
-                and f"n{item['nodeId']}" in r["views"]
-            ):
-                dropped["section:target_not_visible"] += 1
-                continue
         by_stratum[(item["axis"], item["stratum"])].append(item)
     for (axis, stratum), rows in by_stratum.items():
         cap = (
@@ -571,6 +588,9 @@ def main() -> None:
     h.add_argument("--none-per-stratum", type=int, default=18)
     h.add_argument("--pilot-share", type=float, default=0.5)
     h.set_defaults(func=cmd_cohort)
+    g = sub.add_parser("filter", parents=[common])
+    g.add_argument("--cohort", type=Path, required=True, help="output: the usable items")
+    g.set_defaults(func=cmd_filter)
     args = parser.parse_args()
     if args.cmd in ("sync", "submit") and not args.arm:
         sys.exit("--arm is required")
