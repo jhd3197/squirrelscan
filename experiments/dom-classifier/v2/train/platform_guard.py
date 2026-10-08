@@ -25,7 +25,6 @@ import json
 from pathlib import Path
 
 import numpy as np
-
 from cv_slices import platform_bucket
 
 TARGET = 0.95
@@ -136,7 +135,8 @@ def main() -> None:
         bump = row["bump"]
         print(
             f"{args.head:8s} {row['class']:18s} {row['platform']:12s} P {row['precision']:.3f} "
-            f"n {row['fires']:5d} cov {row['platformCoverage']:.2f} (class {row['classCoverage']:.2f})"
+            f"n {row['fires']:5d} cov {row['platformCoverage']:.2f} "
+            f"(class {row['classCoverage']:.2f})"
             f" | bump: "
             + (
                 f"t {bump['threshold']} P {bump['precision']:.3f} cov "
