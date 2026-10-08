@@ -12,7 +12,14 @@ from pathlib import Path
 
 import numpy as np
 
-from label_model import PAGE_CLASSES, Votes, cross_validate, fit_confusions, normalised_weights, posterior
+from label_model import (
+    PAGE_CLASSES,
+    Votes,
+    cross_validate,
+    fit_confusions,
+    normalised_weights,
+    posterior,
+)
 
 K = len(PAGE_CLASSES)
 
