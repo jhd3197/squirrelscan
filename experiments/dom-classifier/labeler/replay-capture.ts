@@ -161,6 +161,14 @@ export async function captureReplayTarget(
     proxy: { server: egress.server },
     userAgent: "SquirrelScan DOM labeling replay/1.0",
   });
+  // `remaining()` is only checked between steps; an evaluate or screenshot that
+  // never settles would hold a worker forever. Closing the context at the
+  // deadline makes every pending call reject.
+  let expired = false;
+  const deadlineTimer = setTimeout(() => {
+    expired = true;
+    void context.close().catch(() => undefined);
+  }, timeoutMs);
   try {
     // WebSockets bypass `route`, so every socket is answered here and closed
     // before it reaches a server.
@@ -294,7 +302,11 @@ export async function captureReplayTarget(
         documentHeight: Math.ceil(result.documentHeight),
       },
     };
+  } catch (error) {
+    if (expired) throw new Error("Replay exceeded its deadline");
+    throw error;
   } finally {
+    clearTimeout(deadlineTimer);
     await context.close().catch(() => undefined);
   }
 }

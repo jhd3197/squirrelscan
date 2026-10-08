@@ -133,6 +133,23 @@ describe.skipIf(browserSkipReason !== null)(
       }
     }, 40_000);
 
+    test("a page that never settles fails at the deadline instead of hanging", async () => {
+      const store = new LabelStore(dataDir);
+      const started = Date.now();
+      await expect(
+        captureReplayTarget(
+          store,
+          browser,
+          {
+            html: `<!doctype html><title>Busy</title><p>Busy page</p><script>setTimeout(() => { for (;;) {} }, 50);</script>`,
+            url: "https://replay.example.test/busy",
+          },
+          { scripts: true, timeoutMs: 5_000 },
+        ),
+      ).rejects.toThrow("deadline");
+      expect(Date.now() - started).toBeLessThan(15_000);
+    }, 30_000);
+
     test("refuses a private replay URL before rendering", async () => {
       const store = new LabelStore(dataDir);
       await expect(
