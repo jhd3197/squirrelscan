@@ -174,7 +174,9 @@ PLATFORM_MARKERS: list[tuple[str, tuple[str, ...]]] = [
     ("gatsby", ("___gatsby",)),
 ]
 #: <meta name="generator"> values, checked in the first 64 KB only.
-GENERATOR = re.compile(r"<meta[^>]+name=[\"']?generator[^>]*>", re.I)
+#: A <meta> tag longer than this is not read (see generator_tags).
+META_TAG_MAX = 1024
+GENERATOR_ATTRS = ("name=generator", 'name="generator', "name='generator")
 GENERATOR_NAMES = {
     "wordpress": "wordpress",
     "wix.com": "wix",
@@ -199,10 +201,38 @@ PLATFORM_BUCKETS = {
 }
 
 
+def generator_tags(lowered: str) -> list[str]:
+    """`<meta ...>` tags (lower-cased text) declaring name=generator, by an index
+    scan instead of the old `<meta[^>]+name=...` regex, which re-scanned to the
+    end of the input for every `<meta` without a closing `>` (O(k*n) on hostile
+    HTML). The next `>` is found once and reused while the scan moves forward,
+    and a tag is at most META_TAG_MAX characters. runtime/platform.ts
+    `generatorTags` is the same function; keep the two identical."""
+    out: list[str] = []
+    pos, next_gt = 0, -2  # -2: not looked up yet; -1: there is no further ">"
+    while True:
+        start = lowered.find("<meta", pos)
+        if start < 0:
+            break
+        if next_gt != -1 and next_gt < start + 5:
+            next_gt = lowered.find(">", start + 5)
+        end = next_gt
+        if end < 0 or end - start > META_TAG_MAX:
+            pos = start + 5
+            continue
+        tag = lowered[start : end + 1]
+        if any(tag.find(attr, 6) >= 0 for attr in GENERATOR_ATTRS):
+            out.append(tag)
+            pos = end + 1
+        else:
+            pos = start + 5
+    return out
+
+
 def platform_of(html: str) -> str:
     head = html[:300_000].lower()
     hits = {name for name, markers in PLATFORM_MARKERS if any(m in head for m in markers)}
-    for tag in GENERATOR.findall(head[:65_536]):
+    for tag in generator_tags(head[:65_536]):
         for needle, name in GENERATOR_NAMES.items():
             if needle in tag:
                 hits.add(name)
@@ -1190,8 +1220,9 @@ def cmd_tag_pages(args) -> None:
     done = {r["p"] for r in jsonl_read(out)}
     tally: Counter = Counter()
     with out.open("a") as handle:
+        splits = set(args.splits.split(",")) if args.splits else None
         for row in jsonl_read(Path(args.dataset) / "page-index.jsonl.gz"):
-            if row["p"] in done:
+            if row["p"] in done or (splits and row["s"] not in splits):
                 continue
             html = None
             for db in stores:
@@ -1267,6 +1298,7 @@ def main() -> None:
     p.add_argument("--crawl-id", default="commoncrawl")
     p = sub.add_parser("tag-pages")
     p.add_argument("--dataset", required=True)
+    p.add_argument("--splits", default="", help="comma list, e.g. val (default: every page)")
     p.add_argument("--stores", required=True)
     p.add_argument("--out", required=True)
     args = parser.parse_args()

@@ -138,7 +138,10 @@ export function findTableOfContents(document: unknown): Element[] {
   }
 
   const out: Element[] = [];
+  // Computed once per page, not per group: a page with thousands of anchor
+  // groups must not re-walk the document for each one.
   let order: Map<El, number> | null = null;
+  let regionSpan: { start: number; size: number } | null = null;
   const main =
     doc.querySelector("main") ?? doc.querySelector('[role="main"]') ?? doc.querySelector("article");
   for (const anchors of groups.values()) {
@@ -147,11 +150,15 @@ export function findTableOfContents(document: unknown): Element[] {
     let placed = within(container, new Set(["nav", "aside", "navigation", "complementary"]));
     if (!placed) {
       order ??= preorder(body);
+      if (!regionSpan) {
+        const region = main ?? body;
+        regionSpan = {
+          start: order.get(region) ?? 0,
+          size: region.querySelectorAll("*").length + 1,
+        };
+      }
       const at = order.get(container) ?? 0;
-      const region = main ?? body;
-      const start = order.get(region) ?? 0;
-      const size = region.querySelectorAll("*").length + 1;
-      placed = at < start || (at >= start && at - start <= size / 3);
+      placed = at < regionSpan.start || at - regionSpan.start <= regionSpan.size / 3;
     }
     if (placed) out.push(container);
   }

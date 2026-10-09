@@ -27,7 +27,10 @@ export const PLATFORM_MARKERS: ReadonlyArray<readonly [string, readonly string[]
   ["astro", ["astro-island", "/_astro/"]],
   ["gatsby", ["___gatsby"]],
 ];
-const GENERATOR = /<meta[^>]+name=["']?generator[^>]*>/gi;
+/** A <meta> tag longer than this is not read: real generator tags are tiny,
+ *  and the bound keeps the scan linear on hostile markup. */
+export const META_TAG_MAX = 1024;
+const GENERATOR_ATTRS = ["name=generator", 'name="generator', "name='generator"] as const;
 /** In the Python dict's order. */
 const GENERATOR_NAMES: ReadonlyArray<readonly [string, string]> = [
   ["wordpress", "wordpress"],
@@ -50,6 +53,41 @@ export const PLATFORM_BUCKETS = [
   "nextjs",
 ] as const;
 
+/**
+ * `<meta ...>` tags (in already lower-cased text) that declare
+ * name=generator. An indexOf scan, NOT a regex: the earlier
+ * `/<meta[^>]+name=.../` re-scanned to the end of the input for every
+ * `<meta` without a closing `>` (O(k*n) on untrusted HTML). Here the next `>`
+ * is found once and reused while the scan moves forward (linear overall), and
+ * a tag is at most META_TAG_MAX characters from `<meta` to `>`. Semantics
+ * otherwise match the old regex: the tag ends at the first `>`, `name=` must
+ * follow at least one character after `<meta`, after a match the scan resumes
+ * past it. corpus/cc_corpus.py `generator_tags` is the same function.
+ */
+export function generatorTags(lowered: string): string[] {
+  const out: string[] = [];
+  let pos = 0;
+  let nextGt = -2; // -2: not looked up yet; -1: there is no further `>`
+  for (;;) {
+    const start = lowered.indexOf("<meta", pos);
+    if (start < 0) break;
+    if (nextGt !== -1 && nextGt < start + 5) nextGt = lowered.indexOf(">", start + 5);
+    const end = nextGt;
+    if (end < 0 || end - start > META_TAG_MAX) {
+      pos = start + 5;
+      continue;
+    }
+    const tag = lowered.slice(start, end + 1);
+    if (GENERATOR_ATTRS.some((attr) => tag.indexOf(attr, 6) >= 0)) {
+      out.push(tag);
+      pos = end + 1;
+    } else {
+      pos = start + 5;
+    }
+  }
+  return out;
+}
+
 /** Python's `s[:n]` counts code points; a JS slice counts UTF-16 units. */
 function codePointPrefix(text: string, n: number): string {
   if (text.length <= n) return text;
@@ -66,7 +104,7 @@ export function platformOf(html: string): string {
   const hits = new Set<string>();
   for (const [name, markers] of PLATFORM_MARKERS)
     if (markers.some((marker) => head.includes(marker))) hits.add(name);
-  for (const tag of codePointPrefix(head, 65_536).match(GENERATOR) ?? [])
+  for (const tag of generatorTags(codePointPrefix(head, 65_536)))
     for (const [needle, name] of GENERATOR_NAMES) if (tag.includes(needle)) hits.add(name);
   if (hits.has("shopify")) return "shopify";
   if (hits.has("woocommerce") && hits.has("wordpress")) return "woocommerce";

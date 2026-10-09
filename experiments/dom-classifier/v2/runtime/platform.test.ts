@@ -4,7 +4,7 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { platformBucket, platformOf } from "./platform.ts";
+import { generatorTags, META_TAG_MAX, platformBucket, platformOf } from "./platform.ts";
 
 const page = (head: string, body = "") =>
   `<!doctype html><html><head>${head}</head><body>${body}</body></html>`;
@@ -57,5 +57,32 @@ describe("platformBucket", () => {
     expect(platformBucket("wix")).toBe("wix");
     expect(platformBucket("drupal")).toBe("custom");
     expect(platformBucket(null)).toBe("custom");
+  });
+});
+
+describe("generator tags on hostile markup (ReDoS, #2307)", () => {
+  // The earlier /<meta[^>]+name=.../ re-scanned to the end for every `<meta`
+  // without a `>`: ~1.6 s on 64 KB in Python, seconds per page at worst.
+  const timed = (html: string) => {
+    const started = performance.now();
+    platformOf(html);
+    return performance.now() - started;
+  };
+
+  test('64 KB of "<meta name=" with no ">" finishes in < 50 ms', () => {
+    expect(timed("<meta name=".repeat(6_000).slice(0, 65_536))).toBeLessThan(50);
+  });
+
+  test('"<meta " x 10k with no ">" finishes in < 50 ms', () => {
+    expect(timed("<meta ".repeat(10_000))).toBeLessThan(50);
+  });
+
+  test("same tags as the old regex on ordinary markup, and a bounded tag length", () => {
+    const html = '<meta charset="utf-8"><meta name="generator" content="wordpress 6"><meta name=x>';
+    expect(generatorTags(html)).toEqual(['<meta name="generator" content="wordpress 6">']);
+    expect(generatorTags("<metaname=generator>")).toEqual([]);
+    expect(generatorTags(`<meta name=generator content="${"x".repeat(META_TAG_MAX)}">`)).toEqual(
+      [],
+    );
   });
 });
