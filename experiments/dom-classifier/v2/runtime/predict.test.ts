@@ -8,7 +8,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, statSync } from "node:fs";
 
-import { ArtifactError, loadModel, scoreRow, softmax } from "./model-format.ts";
+import { ArtifactError, loadModel, scoreRow, softmax, thresholdsFor } from "./model-format.ts";
 import { classifyPage, tryLoadModel, withExtraBlock } from "./predict.ts";
 import { isRootPath } from "./rules-fallback.ts";
 
@@ -213,6 +213,34 @@ describe("missing-value splits (tree-block version 2, #2307)", () => {
     expect(Number.isNaN(absent[2]!) && Number.isNaN(absent[3]!)).toBe(true);
     const short = withExtraBlock(base, 2, [3]);
     expect(Number.isNaN(short[2]!)).toBe(true);
+  });
+});
+
+describe("platform guard thresholds (#2307)", () => {
+  const withGuard = (overrides: Record<string, Record<string, number>>) => {
+    const head = { ...oneSplitHead(null), platformClassThresholds: overrides };
+    return loadModel({
+      format: "squirrel-dom-classifier",
+      artifactVersion: 1,
+      featurizerVersion: "test",
+      nodeFeatureCount: 1,
+      pageFeatureCount: 1,
+      tokenBuckets: 0,
+      region: oneSplitHead(null),
+      pageType: head,
+    });
+  };
+
+  test("a platform with an override gets it; any other platform, or none, gets the head's", () => {
+    const model = withGuard({ wix: { only: 1.01 } });
+    expect(thresholdsFor(model.pageType, "wix")[0]).toBe(1.01);
+    expect(thresholdsFor(model.pageType, "shopify")[0]).toBe(0.5);
+    expect(thresholdsFor(model.pageType, null)[0]).toBe(0.5);
+    expect(thresholdsFor(model.region, "wix")[0]).toBe(0.5);
+  });
+
+  test("an override naming a class the head does not have is refused", () => {
+    expect(() => withGuard({ wix: { nope: 0.9 } })).toThrow(ArtifactError);
   });
 });
 
@@ -462,6 +490,28 @@ describe.if(HAS_ARTIFACT && existsSync(PARITY_PAGETYPE))(
     });
   },
 );
+
+describe.if(HAS_ARTIFACT)("platform guard applied by classifyPage (#2307)", () => {
+  test("the page's platform picks the override row; another platform's row is ignored", () => {
+    const json = artifactJson() as Record<string, Record<string, unknown>>;
+    const abstainAll = (head: { classes: string[] }) =>
+      Object.fromEntries(head.classes.map((c) => [c, 1.01]));
+    for (const name of ["pageType", "region"])
+      json[name]!.platformClassThresholds = {
+        custom: abstainAll(json[name] as unknown as { classes: string[] }),
+      };
+    const { model } = tryLoadModel(json);
+    // The fixture page carries no platform markers: its bucket is "custom".
+    const guarded = classifyPage(PAGE, URL, { model });
+    expect(guarded.platform).toBe("custom");
+    expect(guarded.pageType.source).not.toBe("model");
+    for (const node of guarded.nodes)
+      if (node.source === "model") expect(node.label).toBe("unknown");
+    const other = classifyPage(PAGE, URL, { model, platform: "wix" });
+    expect(other.platform).toBe("wix");
+    expect(other.nodes.some((n) => n.source === "model" && n.label !== "unknown")).toBe(true);
+  });
+});
 
 describe("page-type rules", () => {
   const withJson = (json: string): string =>

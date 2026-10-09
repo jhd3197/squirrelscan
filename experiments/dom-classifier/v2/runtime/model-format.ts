@@ -48,6 +48,9 @@ export interface HeadJson {
   /** Names of a block appended after [numeric, tokens] (page type's cross-page
    *  features). Absent for heads that read only the featurizer vector. */
   extraFeatureNames?: string[];
+  /** The platform guard: platform bucket -> class name -> threshold, replacing
+   *  the class threshold on pages of that platform (a value above 1 abstains). */
+  platformClassThresholds?: Record<string, Record<string, number>>;
   trees: string;
 }
 
@@ -88,6 +91,8 @@ export interface Head {
   /** Width of the block appended after [numeric, tokens]; 0 for most heads. */
   extraFeatureCount: number;
   extraFeatureNames: string[];
+  /** Full per-class threshold arrays for the platforms the guard overrides. */
+  platformThresholds: Map<string, Float64Array>;
 }
 
 export interface Model {
@@ -172,6 +177,18 @@ function decodeHead(json: HeadJson): Head {
     perClass.set(json.classThresholds);
   }
 
+  const platformThresholds = new Map<string, Float64Array>();
+  for (const [platform, overrides] of Object.entries(json.platformClassThresholds ?? {})) {
+    const row = Float64Array.from(perClass);
+    for (const [name, value] of Object.entries(overrides)) {
+      const index = json.classes.indexOf(name);
+      if (index < 0 || typeof value !== "number")
+        throw new ArtifactError(`platform override for unknown class ${name}`);
+      row[index] = value;
+    }
+    platformThresholds.set(platform, row);
+  }
+
   return {
     classes: json.classes,
     classThresholds: perClass,
@@ -190,7 +207,14 @@ function decodeHead(json: HeadJson): Head {
     flags,
     extraFeatureCount: json.extraFeatureNames?.length ?? 0,
     extraFeatureNames: json.extraFeatureNames ?? [],
+    platformThresholds,
   };
+}
+
+/** The per-class thresholds for a page of this platform bucket: the guard's
+ *  override row when the artifact has one for it, the head's own otherwise. */
+export function thresholdsFor(head: Head, platform: string | null): Float64Array {
+  return (platform !== null && head.platformThresholds.get(platform)) || head.classThresholds;
 }
 
 /** Parse an artifact. Throws ArtifactError on anything it cannot trust. */

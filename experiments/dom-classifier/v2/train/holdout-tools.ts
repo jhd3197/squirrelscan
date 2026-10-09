@@ -181,7 +181,8 @@ async function bench(limit: number): Promise<void> {
     const { document } = parseHTML(html);
     const parsed = (Bun.nanoseconds() - start) / 1e6;
     start = Bun.nanoseconds();
-    const result = classifyDocument(document, entry.u, { model, budgetMs: 10_000 });
+    // `html` adds the platform fingerprint the guard needs, so it is timed too.
+    const result = classifyDocument(document, entry.u, { model, budgetMs: 10_000, html });
     const classified = (Bun.nanoseconds() - start) / 1e6;
     parseMs.push(parsed);
     classifyMs.push(classified);

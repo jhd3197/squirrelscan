@@ -330,6 +330,10 @@ def main() -> None:
                         help="dataset dir whose pages-val.jsonl.gz feeds the page-type parity "
                              "fixture (default <data-root>/$DOM_CLASSIFIER_DATASET_VERSION)")
     parser.add_argument("--pagetype-parity-rows", type=int, default=2_000)
+    parser.add_argument("--platform-overrides", default="",
+                        help="platform_guard.py --overrides-out, merged per head: "
+                             "{pageType|region|section: {platform: {class: threshold}}}; written "
+                             "into each head as platformClassThresholds")
     args = parser.parse_args()
 
     models = Path(args.models)
@@ -422,6 +426,17 @@ def main() -> None:
             1.01,
             section_thresholds["thresholds"],
         )
+    if args.platform_overrides:
+        guard = json.loads(Path(args.platform_overrides).read_text())
+        for name, overrides in guard.items():
+            if name not in artifact:
+                raise SystemExit(f"platform overrides for a head the artifact lacks: {name}")
+            classes = set(artifact[name]["classes"])
+            unknown = {c for row in overrides.values() for c in row} - classes
+            if unknown:
+                raise SystemExit(f"{name}: platform overrides for unknown classes {sorted(unknown)}")
+            if overrides:
+                artifact[name]["platformClassThresholds"] = overrides
     artifact_path = out / "classifier-v2.json"
     artifact_path.write_text(json.dumps(artifact, separators=(",", ":")))
     size = artifact_path.stat().st_size

@@ -18,7 +18,15 @@ import {
   TOKEN_BUCKETS,
   type NodeFeatures,
 } from "../featurize.ts";
-import { ArtifactError, loadModel, scoreRow, softmax, type Model } from "./model-format.ts";
+import {
+  ArtifactError,
+  loadModel,
+  scoreRow,
+  softmax,
+  thresholdsFor,
+  type Model,
+} from "./model-format.ts";
+import { platformBucket, platformOf } from "./platform.ts";
 import {
   declaresOwnRegion,
   isRootPath,
@@ -59,6 +67,8 @@ export interface PageClassification {
   nodes: NodePrediction[];
   /** Why any part of this page fell back, or "" when nothing did. */
   degraded: string;
+  /** The platform bucket the thresholds were chosen for, or null when unknown. */
+  platform: string | null;
 }
 
 export interface ClassifyOptions {
@@ -77,6 +87,12 @@ export interface ClassifyOptions {
    * trained to work on a single-URL audit.
    */
   siteFeatures?: ArrayLike<number> | null;
+  /** The page's raw HTML, read ONLY for the platform fingerprint that picks
+   *  the guard's per-platform thresholds. classifyPage passes it itself. */
+  html?: string;
+  /** A platform the caller already knows (bucket or platform name); wins over
+   *  `html`. Neither given: the artifact's global thresholds apply. */
+  platform?: string | null;
 }
 
 const DEFAULT_BUDGET_MS = 25;
@@ -99,7 +115,7 @@ export function classifyPage(
   options: ClassifyOptions = {},
 ): PageClassification {
   const { document } = parseHTML(html);
-  return classifyDocument(document, url, options);
+  return classifyDocument(document, url, { html, ...options });
 }
 
 /** For callers that already hold a parsed document, which the CLI does. */
@@ -129,6 +145,11 @@ export function classifyDocument(
     degraded = "artifact node-feature width does not match the featurizer";
   }
   const usable = degraded === "" ? model : null;
+  const platform = options.platform
+    ? platformBucket(options.platform)
+    : options.html !== undefined
+      ? platformBucket(platformOf(options.html))
+      : null;
 
   // Page type. The homepage rule runs FIRST, ahead of the model, because it is
   // the one page class whose silver label came from the URL: the model was
@@ -154,7 +175,7 @@ export function classifyDocument(
     const { index, probability } = softmax(scores);
     // Per class when the artifact carries them (page type v8); otherwise every
     // entry equals the head's single confidenceThreshold.
-    const threshold = options.threshold ?? usable.pageType.classThresholds[index]!;
+    const threshold = options.threshold ?? thresholdsFor(usable.pageType, platform)[index]!;
     pageType =
       probability >= threshold
         ? {
@@ -169,6 +190,7 @@ export function classifyDocument(
 
   const nodes: NodePrediction[] = [];
   const scores = usable ? new Float32Array(usable.region.numClass) : null;
+  const regionThresholds = usable ? thresholdsFor(usable.region, platform) : null;
   let values: Float32Array | null = null;
   let previousTokens: number[] | null = null;
   let budgetSpent = false;
@@ -207,7 +229,7 @@ export function classifyDocument(
     // Per class, not global. One threshold cannot serve ten classes whose
     // precision curves differ by 40 points, and the single value the old rule
     // selected (0.95) left two thirds of nodes unnamed.
-    const threshold = options.threshold ?? usable.region.classThresholds[index]!;
+    const threshold = options.threshold ?? regionThresholds![index]!;
     if (probability >= threshold) {
       nodes.push({
         nodeRef,
@@ -236,6 +258,7 @@ export function classifyDocument(
   const section = usable?.section ?? null;
   if (section && !budgetSpent) {
     const sectionScores = new Float32Array(section.numClass);
+    const sectionThresholds = thresholdsFor(section, platform);
     let sectionValues: Float32Array | null = null;
     let sectionTokens: number[] | null = null;
     for (let i = 0; i < featurized.nodes.length; i++) {
@@ -255,12 +278,12 @@ export function classifyDocument(
       scoreRow(section, sectionValues, sectionScores);
       const { index, probability } = softmax(sectionScores);
       const label = section.classes[index]!;
-      if (label !== "none" && probability >= section.classThresholds[index]!)
+      if (label !== "none" && probability >= sectionThresholds[index]!)
         nodes[i]!.section = { label, confidence: probability };
     }
   }
 
-  return { pageType, nodes, degraded };
+  return { pageType, nodes, degraded, platform };
 }
 
 function withRules(

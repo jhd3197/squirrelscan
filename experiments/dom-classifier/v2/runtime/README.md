@@ -180,6 +180,25 @@ graph", and the block goes in as NaN. That is the input the head was trained
 to handle: 30% of its training pages had the block dropped to NaN. The exporter
 checks parity against LightGBM both ways, with the block and with it NaN.
 
+### Per-platform thresholds: the platform guard (#2307)
+
+A head may carry `platformClassThresholds`: platform bucket → class → threshold.
+On a page of that platform, these replace the class thresholds; a value above 1
+abstains. `retrain-all` computes them from strict CV. A (class, platform) cell
+gets an override only when it fires ≥ 50 times at precision < 0.95. The
+threshold is raised if that keeps at least half the platform's coverage;
+otherwise the class abstains on that platform. Smaller cells keep the global
+threshold.
+
+`runtime/platform.ts` names the platform from raw HTML with lower-cased
+substring checks. The buckets are shopify, woocommerce, wordpress, wix,
+squarespace, webflow, nextjs and custom. It matches the Python tagger the guard
+was computed with on all 9,147 val pages (`experiments/platform-parity.ts`).
+
+`classifyPage` fingerprints its own HTML. `classifyDocument` uses
+`options.platform` or `options.html`, and falls back to the global thresholds
+without either. The result reports the `platform` it used.
+
 ## Cost
 
 Measured on 500 holdout pages, 82 candidate nodes per page on average, artifact

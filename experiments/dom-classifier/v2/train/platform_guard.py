@@ -25,6 +25,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+
 from cv_slices import platform_bucket
 
 TARGET = 0.95
@@ -66,6 +67,13 @@ def main() -> None:
     parser.add_argument("--tags", required=True)
     parser.add_argument("--min-fires", type=int, default=50)
     parser.add_argument("--out", required=True)
+    parser.add_argument(
+        "--overrides-out",
+        default="",
+        help="also write the adopted overrides {platform: {class: threshold}}: bump when it "
+        "keeps >= half of the platform's coverage, otherwise abstain (1.01); cells under "
+        "--min-fires keep the global threshold",
+    )
     args = parser.parse_args()
 
     report = json.loads(Path(args.thresholds).read_text())
@@ -128,6 +136,16 @@ def main() -> None:
                     "abstain": {"platformCoverage": 0.0, "classCoverage": round(abstain_all, 4)},
                 }
             )
+    overrides: dict[str, dict[str, float]] = {}
+    for row in out:
+        bump = row["bump"]
+        keep = bump is not None and bump["platformCoverage"] >= 0.5 * row["platformCoverage"]
+        row["adopted"] = "bump" if keep else "abstain"
+        overrides.setdefault(row["platform"], {})[row["class"]] = (
+            bump["threshold"] if keep else 1.01
+        )
+    if args.overrides_out:
+        Path(args.overrides_out).write_text(json.dumps(overrides, indent=2) + "\n")
     Path(args.out).write_text(
         json.dumps({"head": args.head, "minFires": args.min_fires, "flags": out}, indent=2) + "\n"
     )
