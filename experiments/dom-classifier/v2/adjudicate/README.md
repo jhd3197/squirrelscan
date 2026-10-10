@@ -77,3 +77,39 @@ start/stop thresholds are in the private runbook.
 
 Record the arm, modality and `PROMPT_REVISION` on every output row. Bump
 `PROMPT_REVISION` whenever the prompt or schema changes.
+
+## Teacher runs
+
+A teacher is a frontier model that labels gold items in the human's place;
+the human reviews only what the teachers leave open.
+
+- **Inputs:** `teacher_prep.py` cuts the views from a gold set's existing
+  labeller captures with Pillow (`views.py`, the same crops the Modal renderer
+  makes): no browser, no re-render. `teacher-packets.ts` builds the text
+  packets from the capture's node walk. Outside labels (Jev, Clef, earlier
+  arms) go to a separate `sources.jsonl` and never reach a prompt.
+- **Section scope:** a section answer carries `scope: whole | item`, the
+  labeller's "item of" answer. `item` means the outline is one or several
+  items of that section (one comment, one FAQ question, the phone and email
+  lines of a contact block). It maps to training label `none`, with the
+  purpose kept as `itemOf`.
+- **Second teacher (Codex CLI):** `adjudicate_codex.py` sends the same views,
+  policy prompt and JSON schema to an OpenAI model.
+  - Call the binary directly. A shell alias may add a full-access sandbox.
+  - Flags: `--sandbox read-only --ephemeral --ignore-user-config --ignore-rules`,
+    run from an empty directory.
+  - The policy prompt replaces Codex's base instructions (`-c model_instructions_file=…`).
+  - Shell, exec, browser, computer-use, app, plugin, skill, hook and
+    image-generation features are disabled.
+  - `-i` takes several values, so the prompt goes on stdin.
+  - The `--json` stream is the guard: any item other than the agent message or
+    its reasoning aborts the whole run.
+  - The stream carries no model id. An id the account cannot use fails with a
+    400, so the requested id is the one that ran.
+- **Comparison and review:** `teacher_check.py` puts two teachers side by side
+  with the outside sources, and emits the items where the teachers disagree as
+  a BLIND labeller cohort, with a few agreed controls. `teacher_queue.py`
+  selects the hard items for a second, higher-effort pass and builds a review
+  queue: unresolved hard items are shown, a stratified audit is blind, and
+  attention checks are added.
+
