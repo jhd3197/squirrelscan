@@ -10,6 +10,22 @@ data root.
 | `page-type-map-v5.json` | The 65-to-11 page-type collapse, and the projection used to compare a v4 label set with a v5 choice. |
 | `purposes-v5.json` | The 27-to-12 purpose reduction, with the support counts that justify each drop. |
 
+## Current revisions (2026-10-10)
+
+| axis | policy | prompt revision | notes |
+|---|---|---|---|
+| page type | `policy-v8.2.md` | `dom-suggestions-v8.2` | v8.1 plus: ONE product, plan or service is `product_detail` even with no price or buy button (SaaS product and feature pages, a single service page); MANY of them is `product_listing`; `other` no longer covers landing or service pages about one offering; locale roots (`/de/`, `/en-us/`) are `homepage`; Wix `/post/<slug>` is a blog post. Changelog at the top of the file. |
+| section purpose | `policy-section-v3.md` | `section-purpose-v3` | Labels the region, not the item. Table of contents uses the v2 tightest-node granularity. `ad` means a third-party network; the site's own promotion is `promo_banner`. |
+
+Earlier files (`policy-v5` … `policy-v8.1`, `policy-section-v2`,
+`section-purpose-v1`) stay for reproducing labels made under them. A label row
+records the revision it was made under; never relabel silently under a newer
+one. The human gold UI also records an **item** answer for sections ("one or
+several items of this section"). For the section head that counts as `none`,
+because under v3 a fragment is not the section.
+
+The sections below are the history that led here: v5 through the v7 freeze.
+
 ## Why a policy file at all
 
 Prompt revision v4 gave the two annotators **no shared definitions**. Measured

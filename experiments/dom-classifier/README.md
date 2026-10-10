@@ -1,4 +1,24 @@
-# DOM classification corpus tooling
+# Treetop: DOM classifier experiment (#2307)
+
+Treetop classifies a page's type (homepage, article, product detail, ...) and
+its DOM regions and sections (header, footer, navigation, cookie banner, FAQ,
+reviews, ...). It uses one featurizer and three small LightGBM heads, and every
+class abstains below a precision-0.95 threshold. The code lives in `v2/`.
+
+Start with [DEVELOPMENT.md](DEVELOPMENT.md): the rules, the vocabulary, a map of which
+directories are live and which are legacy, the commands, and which doc owns
+which topic. Then go to the doc for your task:
+
+- [v2/README.md](v2/README.md): featurizer, silver labels, dataset build, corpus growth, training
+- [v2/runtime/README.md](v2/runtime/README.md): the runtime contract and thresholds
+- [v2/labels/README.md](v2/labels/README.md): label policies and their revisions
+- [v2/adjudicate/README.md](v2/adjudicate/README.md): the LLM adjudicator and label model
+- [labeler/README.md](labeler/README.md): the localhost human labeller and gold review
+
+## Legacy: v1 corpus tooling
+
+Everything below describes the September 2026 v1 corpus builder. It is kept so
+earlier results can be reproduced; new work goes in `v2/`.
 
 `build_corpus.py` creates a private annotation corpus from retained crawler bodies. It
 never emits source HTML, raw URLs, arbitrary attributes, scripts, styles, comments, or
