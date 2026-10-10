@@ -30,6 +30,8 @@ from pathlib import Path
 
 import modal
 
+from views import OUTLINE, _jpeg, compose_views
+
 VOLUME_NAME = "dom-classifier-2307"
 HERE = Path(__file__).parent
 EXPERIMENT = HERE.parent.parent  # experiments/dom-classifier
@@ -58,71 +60,9 @@ image = (
         HERE / "reveal-capture.ts", f"{APP_ROOT}/experiments/dom-classifier/v2/adjudicate/reveal-capture.ts"
     )
     .add_local_file(HERE / "reveal-worker.ts", f"{APP_ROOT}/experiments/dom-classifier/v2/adjudicate/reveal-worker.ts")
+    .add_local_python_source("views")
 )
 app = modal.App("dom-classifier-adjudicate-render", image=image)
-
-PAGE_TOP = 2400
-PAGE_SCALE = 0.75
-OVERVIEW_WIDTH = 320
-OVERVIEW_MAX_HEIGHT = 2400
-BAND_CONTEXT = 250
-BAND_MAX = 1700
-BAND_SCALE = 0.8
-OUTLINE = (0, 200, 83)
-
-
-def _jpeg(img, quality: int = 82) -> bytes:
-    buffer = io.BytesIO()
-    img.convert("RGB").save(buffer, "JPEG", quality=quality, optimize=True)
-    return buffer.getvalue()
-
-
-def _outline(draw, box, width: int, label: bool, font=None):
-    x0, y0, x1, y1 = box
-    # A dark hairline outside the green keeps the outline visible on green pages.
-    draw.rectangle((x0 - width - 1, y0 - width - 1, x1 + width + 1, y1 + width + 1), outline=(20, 20, 20), width=1)
-    draw.rectangle((x0 - width, y0 - width, x1 + width, y1 + width), outline=OUTLINE, width=width)
-    if label:
-        tag_y = y0 - width - 26 if y0 - width - 26 >= 0 else y0 + 2
-        draw.rectangle((x0 - width, tag_y, x0 - width + 84, tag_y + 24), fill=OUTLINE)
-        draw.text((x0 - width + 8, tag_y + 4), "TARGET", fill=(255, 255, 255), font=font)
-
-
-def compose_views(png: bytes, located: dict) -> dict[str, bytes]:
-    from PIL import Image, ImageDraw, ImageFont
-
-    Image.MAX_IMAGE_PIXELS = None
-    shot = Image.open(io.BytesIO(png)).convert("RGB")
-    width, height = shot.size
-    try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf", 16)
-    except OSError:
-        font = ImageFont.load_default()
-    views: dict[str, bytes] = {}
-    top = shot.crop((0, 0, width, min(height, PAGE_TOP)))
-    views["page"] = _jpeg(top.resize((int(top.width * PAGE_SCALE), int(top.height * PAGE_SCALE)), Image.LANCZOS))
-    scale = min(OVERVIEW_WIDTH / width, OVERVIEW_MAX_HEIGHT / height)
-    overview = shot.resize((max(1, int(width * scale)), max(1, int(height * scale))), Image.LANCZOS)
-    views["overview"] = _jpeg(overview, 75)
-    for marker, at in located.items():
-        rect = at.get("rect")
-        if not (at.get("visible") and rect):
-            continue
-        x0, y0 = rect["x"], rect["y"]
-        x1, y1 = x0 + rect["width"], y0 + rect["height"]
-        top_y = max(0, y0 - BAND_CONTEXT)
-        bottom_y = min(height, y1 + BAND_CONTEXT, top_y + BAND_MAX)
-        band = shot.crop((0, top_y, width, bottom_y))
-        draw = ImageDraw.Draw(band)
-        _outline(draw, (x0, y0 - top_y, x1, min(y1, bottom_y) - top_y), 5, True, font)
-        views[f"n{marker}"] = _jpeg(
-            band.resize((int(band.width * BAND_SCALE), int(band.height * BAND_SCALE)), Image.LANCZOS)
-        )
-        thumb = overview.copy()
-        tdraw = ImageDraw.Draw(thumb)
-        _outline(tdraw, (x0 * scale, y0 * scale, x1 * scale, y1 * scale), 3, False)
-        views[f"n{marker}-overview"] = _jpeg(thumb, 75)
-    return views
 
 
 @app.function(cpu=4, memory=8192, timeout=1800, volumes={"/data": volume}, max_containers=40)

@@ -71,8 +71,11 @@ def command(model: str, effort: str, system_text: str, schema: dict) -> list[str
     ]  # fmt: skip
 
 
-def valid(answer: object, classes: list[str]) -> bool:
-    if not isinstance(answer, dict) or set(answer) != {"reason", "label", "confidence", "runner_up", "render_quality"}:
+def valid(answer: object, classes: list[str], section: bool = False) -> bool:
+    keys = {"reason", "label", "confidence", "runner_up", "render_quality"} | ({"scope"} if section else set())
+    if not isinstance(answer, dict) or set(answer) != keys:
+        return False
+    if section and answer["scope"] not in ("whole", "item"):
         return False
     return (
         answer["label"] in classes
@@ -89,6 +92,7 @@ class Guard:
         self.stop_at = stop_at
         self.stopped: str | None = None
         self.utilization: float | None = None
+        self.resets_at: int | None = None
         self.lock = threading.Lock()
 
     def observe(self, info: dict | None, error_text: str = "") -> None:
@@ -97,6 +101,8 @@ class Guard:
                 window = (info.get("unifiedWindows") or {}).get("five_hour") or {}
                 if window.get("utilization") is not None:
                     self.utilization = window["utilization"]
+                if window.get("resetsAt"):
+                    self.resets_at = window["resetsAt"]
                 if info.get("status") not in (None, "allowed"):
                     self.stopped = f"rate_limit_status:{info.get('status')}"
                 elif self.utilization is not None and self.utilization >= self.stop_at:
@@ -105,7 +111,9 @@ class Guard:
                 self.stopped = f"limit_error:{error_text[:120]}"
 
 
-def run_item(item: dict, args, packets: dict, system: dict, ad_marked: set, guard: Guard, cwd: Path) -> dict | None:
+def run_item(
+    item: dict, args, packets: dict, system: dict, ad_marked: set | None, guard: Guard, cwd: Path
+) -> dict | None:
     if guard.stopped:
         return None
     params = build_params(item, packets, args.render / "views", "sonnet-5-5-low", system, args.modality)
@@ -148,9 +156,12 @@ def run_item(item: dict, args, packets: dict, system: dict, ad_marked: set, guar
         return {**row, "error": f"no_result:rc={proc.returncode}:{proc.stderr[-200:]}"}
     model_usage = result.get("modelUsage") or {}
     usage = result.get("usage") or {}
+    resolved = next(iter(model_usage), init.get("model") if init else None)
+    if args.expect_model and (resolved != args.expect_model or (init and init.get("model") != args.expect_model)):
+        guard.stopped = f"model_mismatch:{init.get('model') if init else None}/{resolved}"
     row.update(
         {
-            "model": next(iter(model_usage), init.get("model") if init else None),
+            "model": resolved,
             "latencyMs": result.get("duration_ms"),
             "apiMs": result.get("duration_api_ms"),
             "turns": result.get("num_turns"),
@@ -165,8 +176,10 @@ def run_item(item: dict, args, packets: dict, system: dict, ad_marked: set, guar
     )
     if result.get("is_error") or result.get("subtype") != "success":
         return {**row, "error": f"{result.get('subtype')}:{str(result.get('result'))[:160]}"}
+    if guard.stopped and guard.stopped.startswith("model_mismatch"):
+        return {**row, "error": guard.stopped}
     answer = result.get("structured_output")
-    if not valid(answer, classes):
+    if not valid(answer, classes, item["axis"] == "section"):
         return {**row, "error": "invalid_output"}
     raw_label = answer["label"]
     if item["axis"] == "page":
@@ -175,13 +188,17 @@ def run_item(item: dict, args, packets: dict, system: dict, ad_marked: set, guar
             page_rules(answer["runner_up"], item["url"], item.get("platform")) if answer["runner_up"] != "-" else None
         )
     else:
-        marked = f"{item['pageId']}#{item['nodeId']}" in ad_marked
-        mapped = section_rules(raw_label, marked)
+        marked = None if ad_marked is None else f"{item['pageId']}#{item['nodeId']}" in ad_marked
+        purpose = section_rules(raw_label, marked)
+        # An item OF a section is not the section: the training label is none, the purpose is kept as itemOf.
+        scope = answer["scope"] if purpose != "none" else "whole"
+        mapped = purpose if scope == "whole" else "none"
         runner = section_rules(answer["runner_up"], marked) if answer["runner_up"] != "-" else None
     return {
         **row,
         "raw": raw_label,
         "label": mapped,
+        **({"scope": scope, "itemOf": purpose if scope == "item" else None} if item["axis"] == "section" else {}),
         "runnerUp": runner if runner != mapped else None,
         "confidence": answer["confidence"],
         "reason": answer["reason"],
@@ -197,6 +214,7 @@ def main() -> None:
     parser.add_argument("--ad-markers", type=Path)
     parser.add_argument("--model", required=True, help="claude --model alias: sonnet, opus, fable, haiku")
     parser.add_argument("--effort", default="low")
+    parser.add_argument("--expect-model", help="stop unless every call resolves to this model id")
     parser.add_argument(
         "--modality",
         choices=["image", "text", "revealed"],
@@ -236,7 +254,8 @@ def main() -> None:
     if any(args.scratch.iterdir()):
         raise SystemExit(f"scratch cwd is not empty: {args.scratch}")
     packets = {p["pageId"]: p for p in jsonl(args.render / "packets.jsonl")}
-    ad_marked = {f"{r['pageId']}#{r['nodeId']}" for r in jsonl(args.ad_markers)} if args.ad_markers else set()
+    # No marker list (the gold sets): ad and promo_banner stay as answered.
+    ad_marked = {f"{r['pageId']}#{r['nodeId']}" for r in jsonl(args.ad_markers)} if args.ad_markers else None
     system = systems()
     guard = Guard(args.stop_utilization)
     started = time.time()
@@ -271,6 +290,7 @@ def main() -> None:
                 "reason": guard.stopped,
                 **counts,
                 "utilization": guard.utilization,
+                "resetsAt": guard.resets_at,
                 "elapsed": round(time.time() - started),
             }
         )
