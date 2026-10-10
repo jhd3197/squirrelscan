@@ -434,8 +434,12 @@ Chromium's Private/Local Network Access features were measured ineffective in
 the bundled headless shell (140), so they are not relied on. Residual risks:
 with scripts on, a WebSocket opened from a worker is not closed by the page's
 WebSocket route, but it still leaves through the guard and so reaches public
-hosts only. The page's JavaScript still runs in Chromium, and
-`replayLaunchOptions()` keeps Playwright's default of no Chromium OS sandbox.
+hosts only. The page's JavaScript still runs in Chromium, inside Chromium's OS
+sandbox: `replayLaunchOptions()` turns it on, and a sandbox that cannot start
+fails the launch rather than falling back. The only opt-out is
+`disableChromiumSandbox`, which the Modal render workers set because their
+container runs as root, where Chromium refuses the sandbox, and the container is
+the isolation there. Those replays run without the sandbox.
 
 ## Private corpus rendering
 

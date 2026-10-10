@@ -93,6 +93,9 @@ def render_chunk(run: str, jobs: list[dict], html: dict[str, bytes]) -> list[dic
             str(results_path),
             "--concurrency",
             "3",
+            # The container runs as root, where Chromium refuses its OS sandbox;
+            # the container is the isolation. Local replays keep the sandbox.
+            "--disable-chromium-sandbox",
         ],
         capture_output=True,
         text=True,
@@ -208,9 +211,10 @@ def reveal_chunk(jobs: list[dict], html: dict[str, bytes], allow_data: bool) -> 
     for page_id, data in html.items():
         (work / "html" / f"{page_id}.html").write_bytes(gzip.decompress(data))
     (work / "jobs.json").write_text(json.dumps(jobs))
+    # --disable-chromium-sandbox: as for render_chunk, the root container is the isolation.
     cmd = ["bun", "run", f"{APP_ROOT}/experiments/dom-classifier/v2/adjudicate/reveal-worker.ts",
            "--jobs", str(work / "jobs.json"), "--html", str(work / "html"), "--out", str(work / "out"),
-           "--concurrency", "3"] + (["--allow-data"] if allow_data else [])  # fmt: skip
+           "--concurrency", "3", "--disable-chromium-sandbox"] + (["--allow-data"] if allow_data else [])  # fmt: skip
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1700)
     results = work / "out" / "results.jsonl"
     rows = [json.loads(line) for line in results.read_text().splitlines()] if results.exists() else []

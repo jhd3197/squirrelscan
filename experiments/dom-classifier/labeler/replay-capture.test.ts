@@ -7,10 +7,53 @@ import { browserRuntimeUnavailableReason, loadPlaywright } from "./browser-runti
 import {
   captureReplayTarget,
   promoteDeferredStyles,
+  REPLAY_BROWSER_ARGS,
   REPLAY_MARKER,
   replayLaunchOptions,
 } from "./replay-capture.ts";
 import { LabelStore } from "./store.ts";
+
+describe("replay launch options", () => {
+  test("keep Chromium's OS sandbox on unless the caller opts out by name", () => {
+    expect(replayLaunchOptions().chromiumSandbox).toBeTrue();
+    expect(replayLaunchOptions({}).chromiumSandbox).toBeTrue();
+    expect(replayLaunchOptions({ disableChromiumSandbox: false }).chromiumSandbox).toBeTrue();
+    expect(replayLaunchOptions({ disableChromiumSandbox: true }).chromiumSandbox).toBeFalse();
+    for (const options of [
+      replayLaunchOptions(),
+      replayLaunchOptions({ disableChromiumSandbox: true }),
+    ])
+      expect(options.args).toEqual([...REPLAY_BROWSER_ARGS]);
+  });
+});
+
+/** This process's replay browsers and their renderers, by command line. */
+function replayProcesses() {
+  const rows = Bun.spawnSync(["ps", "-Ao", "pid=,ppid=,args="])
+    .stdout.toString()
+    .split("\n")
+    .map((line) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line))
+    .filter((match) => match !== null)
+    .map(([, pid, ppid, args]) => ({ pid: Number(pid), ppid: Number(ppid), args: args! }));
+  const parent = new Map(rows.map((row) => [row.pid, row.ppid]));
+  const descends = (pid: number, ancestors: Set<number>) => {
+    for (let at = parent.get(pid); at !== undefined && at > 1; at = parent.get(at))
+      if (ancestors.has(at)) return true;
+    return false;
+  };
+  const browsers = rows.filter(
+    (row) =>
+      descends(row.pid, new Set([process.pid])) &&
+      row.args.includes(REPLAY_BROWSER_ARGS[0]) &&
+      !row.args.includes("--type="),
+  );
+  // Renderers are the browser's children on macOS, and a zygote's on Linux.
+  const ids = new Set(browsers.map((row) => row.pid));
+  const renderers = rows.filter(
+    (row) => descends(row.pid, ids) && row.args.includes("--type=renderer"),
+  );
+  return { browsers, renderers };
+}
 
 const browserSkipReason = browserRuntimeUnavailableReason();
 describe.skipIf(browserSkipReason !== null)(
@@ -78,6 +121,24 @@ describe.skipIf(browserSkipReason !== null)(
       expect(header.tag).toBe("header");
       expect(result.quality.visibleTextChars).toBeGreaterThan(20);
     }, 40_000);
+
+    test("the replay browser and its renderers run inside Chromium's OS sandbox", async () => {
+      const context = await browser.newContext();
+      try {
+        const page = await context.newPage();
+        await page.setContent("<p>sandboxed</p>");
+        const { browsers, renderers } = replayProcesses();
+        expect(browsers.length).toBeGreaterThan(0);
+        expect(renderers.length).toBeGreaterThan(0);
+        for (const row of [...browsers, ...renderers])
+          expect(row.args).not.toContain("--no-sandbox");
+        // macOS renderers start under a seatbelt profile only when the sandbox is on.
+        if (process.platform === "darwin")
+          for (const row of renderers) expect(row.args).toContain("--seatbelt-client");
+      } finally {
+        await context.close();
+      }
+    });
 
     test("replays with scripts off unless asked", async () => {
       const store = new LabelStore(dataDir);

@@ -2,6 +2,7 @@
  * Forced-reveal worker for a Modal container (#2307): one element screenshot per hidden target.
  *
  *   bun run reveal-worker.ts --jobs <jobs.json> --html <dir> --out <dir> [--allow-data] [--concurrency 3]
+ *                            [--disable-chromium-sandbox]
  *
  * <jobs.json> rows: {pageId, url, scripts: "on" | "policy", markers: [n...]}. Writes
  * <out>/<pageId>-n<N>.png for every revealed target and <out>/results.jsonl.
@@ -27,7 +28,12 @@ const concurrency = Number(arg("--concurrency", "3"));
 const work = jobs.flatMap((job) => job.markers.map((marker) => ({ job, marker })));
 
 const { chromium } = await loadPlaywright();
-const browser = await chromium.launch(replayLaunchOptions());
+// Only modal_render.py passes this: the Modal container runs as root, where
+// Chromium refuses its OS sandbox, and the container is the isolation. Run
+// anywhere else, the replay keeps the sandbox and fails if it cannot start.
+const browser = await chromium.launch(
+  replayLaunchOptions({ disableChromiumSandbox: Bun.argv.includes("--disable-chromium-sandbox") }),
+);
 let cursor = 0;
 async function worker() {
   for (;;) {

@@ -9,6 +9,7 @@
  * quality signals are blank (an SPA shell). Every row records `scriptReason`.
  *
  *   bun run render-worker.ts --jobs <jobs.json> --html <dir> --store <dir> --out <results.jsonl>
+ *                            [--disable-chromium-sandbox]
  *
  * <jobs.json> is an array of prepare-render.ts job rows; <dir>/<pageId>.html is the
  * marked document. Captures land in <store>/captures as `historical_replay` pages.
@@ -42,9 +43,15 @@ const concurrency = Number(arg("--concurrency", "3"));
 const store = new LabelStore(arg("--store"));
 const blank = (quality: { visibleTextChars: number; visibleNodes: number }) =>
   quality.visibleTextChars < 200 || quality.visibleNodes < 30;
+// Only modal_render.py passes this: the Modal container runs as root, where
+// Chromium refuses its OS sandbox, and the container is the isolation. Run
+// anywhere else, the replay keeps the sandbox and fails if it cannot start.
+const launchOptions = replayLaunchOptions({
+  disableChromiumSandbox: Bun.argv.includes("--disable-chromium-sandbox"),
+});
 
 const { chromium } = await loadPlaywright();
-let browser = await chromium.launch(replayLaunchOptions());
+let browser = await chromium.launch(launchOptions);
 let cursor = 0;
 let rendered = 0;
 async function worker() {
@@ -111,7 +118,7 @@ async function worker() {
     // A long-lived browser grows; recycle it between pages.
     if (++rendered % 40 === 0) {
       const old = browser;
-      browser = await chromium.launch(replayLaunchOptions());
+      browser = await chromium.launch(launchOptions);
       setTimeout(() => void old.close().catch(() => undefined), 50_000);
     }
   }

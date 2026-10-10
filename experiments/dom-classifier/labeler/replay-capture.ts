@@ -43,9 +43,21 @@ export const REPLAY_BROWSER_ARGS = [
   "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
 ] as const;
 
-/** Launch options for the browser a caller passes to `captureReplayTarget`. */
-export function replayLaunchOptions(): LaunchOptions {
-  return { ...browserLaunchOptions(), args: [...REPLAY_BROWSER_ARGS] };
+/**
+ * Launch options for the browser a caller passes to `captureReplayTarget`.
+ * Chromium's OS sandbox is on: a sandbox that fails to start fails the launch,
+ * never a silent unsandboxed browser. `disableChromiumSandbox` is for a
+ * container that is itself the isolation and runs as root, where Chromium
+ * refuses its sandbox (the Modal render workers); nothing else sets it.
+ */
+export function replayLaunchOptions(
+  options: { disableChromiumSandbox?: boolean } = {},
+): LaunchOptions {
+  return {
+    ...browserLaunchOptions(),
+    chromiumSandbox: options.disableChromiumSandbox !== true,
+    args: [...REPLAY_BROWSER_ARGS],
+  };
 }
 
 /**

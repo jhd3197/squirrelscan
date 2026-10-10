@@ -15,7 +15,9 @@ which run is live are in the private runbook.
    - `prepare-render.ts` reads the stored HTML and marks the section targets.
    - `modal_render.py` replays pages on Modal (`render-worker.ts` →
      `labeler/replay-capture.ts`, egress guard unchanged) and composes the
-     views.
+     views. Its workers pass `--disable-chromium-sandbox`: the container runs
+     as root, where Chromium refuses its sandbox, and is itself the isolation.
+     Run anywhere else, the workers keep the sandbox.
    - `reveal-capture.ts` / `reveal-worker.ts` force hidden targets visible and
      screenshot just the element.
    - `replay-html.ts` handles the scripts-off replay details.
