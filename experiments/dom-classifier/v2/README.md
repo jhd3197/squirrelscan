@@ -8,6 +8,11 @@ Experiment code for #2307. Three files carry the whole contract:
 | `silver-labels.ts` | Free supervision from the page's own semantics: landmarks for region, structured data for page type. |
 | `build-dataset.ts` | Streams the local content store into `nodes-*.jsonl.gz` / `pages-*.jsonl.gz` under the private data root. |
 
+Updated 2026-10-10. Read `../DEVELOPMENT.md` first: it holds the rules, the
+glossary and which doc owns which topic. Sections marked *(superseded)* are
+kept as history: the numbers in them are true for their date, not for the
+current model.
+
 Nothing here is wired into the CLI. `experiments/` is not a workspace member and
 nothing installs into it: `linkedom` is reached through
 `../../../packages/parser/src/dom.ts` (the same parse entry the CLI uses,
@@ -28,7 +33,7 @@ ARIA roles, so the masked variant replaces a landmark tag with `div`, drops its
 role (explicit *and* implicit), masks landmark tags in the ancestor chain, and
 drops class/id tokens that literally spell a label word with p = 0.5, seeded by
 `(nodeId, token)`. The test asserts that a masked `<footer>` and a masked `<div>`
-with the same subtree produce byte-identical vectors, and — separately — that
+with the same subtree produce byte-identical vectors, and, separately, that
 they differ when unmasked, so the first assertion cannot pass vacuously.
 
 There is one deliberate asymmetry, pinned by its own test: masking hides the tag
@@ -58,7 +63,7 @@ a training row.
   because the confusion matrix showed article_chrome losing 55% of its nodes to
   content_block and sidebar losing 33%, neither of which is separable from a
   node's own statistics. None of them reads a landmark tag or role, so the mask
-  is unaffected — `<article>` and `<section>` are not landmarks.
+  is unaffected: `<article>` and `<section>` are not landmarks.
 - **137 page features**: URL shape (path depth, date in path, numeric id, eleven
   slug flags), document shape (title/h1, text length, heading histogram, link
   density, forms, media, code blocks, tables), landmark counts, page-level
@@ -92,6 +97,15 @@ landmark. The brief's rule (inside `<main>` → `content_block`, outside every
 landmark → `unlabelled`) is what `label` holds; `containerLabel` is the strictly
 richer answer, recorded so the training lane can choose without a rebuild.
 
+**Page type and section now train mainly on Jev labels.** Since 2026-09-20
+the page-type head trains on Jev labels, now under policy v8.2
+(`labels/policy-v8.2.md`). A page's own schema adds a silver label only for
+classes whose schema agreed with Jev on a noise sample, and only on train. The
+section-purpose head trains on Jev section labels (policy-section-v3), plus
+free labels on train for (class, source) pairs measured >= 0.85 precise
+against Jev. Both are described in "Datasets and slices" below. Region still
+trains on silver labels.
+
 ### The third label source, and what it can and cannot reach
 
 Silver labels come from the page's own landmarks, so a landmark-less page
@@ -108,7 +122,7 @@ chosen between. It is not in the `regions` vocabulary at all, while
 read only `regions` would produce no navigation labels whatsoever.
 
 **Measured ceiling.** On a 62-node probe, Jev mapped 79% of landmark-page nodes
-and **11%** of div-soup nodes — the same shape of gap silver has. Reading the
+and **11%** of div-soup nodes, the same shape of gap silver has. Reading the
 packets explains it: the div-soup population here is mostly single-page-app
 shells (`classTokens=app-container`, one node holding the whole application),
 and `layout_container` with an empty regions axis is the right answer, because
@@ -120,13 +134,13 @@ What does help is not sampling div-soup uniformly, at either level.
 **Which pages.** "div-soup" means fewer than two landmark kinds, which lumps
 together two populations that are not alike. A page with ZERO kinds is usually
 an app shell with no chrome to find. A page with ONE has real site chrome and
-simply did not declare the rest of it — a `<nav>` but no `<footer>` — so that is
+simply did not declare the rest of it (a `<nav>` but no `<footer>`), so that is
 where an undeclared footer actually exists. `corpus/node-sample.ts` spends the
 div-soup budget on the one-landmark tier first and reports both counts.
 
 **Which nodes.** Within a page it ranks candidates by
-`max(1 - startPos, endPos) * (0.5 + min(linkDensity, 1))` — a header sits at the
-start, a footer at the end, both are link-dense — and spends two thirds of each
+`max(1 - startPos, endPos) * (0.5 + min(linkDensity, 1))` (a header sits at the
+start, a footer at the end, both are link-dense) and spends two thirds of each
 page's budget at the top of that ranking. On the same pages and the same node
 budget, div-soup chrome labels went from 3 to 6 and navigation from 2 to 5.
 
@@ -139,8 +153,8 @@ record 19183572) in as a tagged cohort. Every row carries
 stay on squirrelscan's own distribution.
 
 It is worth the trouble for two reasons. Its functional-classification segments
-are `header` / `nav` / `maincontent` / `footer` — the region axis itself, not an
-approximation — labelled by three to four **people** per page. And its 844 pages
+are `header` / `nav` / `maincontent` / `footer`: the region axis itself, not an
+approximation, labelled by three to four **people** per page. And its 844 pages
 span 25 languages of European public-service sites, which is the CMS-shaped,
 non-English web the crawl does not reach. Imported: 5,960 human-labelled nodes
 (navigation 1,446, main_content 2,189, site_header 1,285, footer 1,040), of
@@ -217,6 +231,51 @@ Four things in there are not obvious:
   corpus grew. `pagetype-queue.ts --verify-against` checks that against the
   previous manifest and refuses to write if one domain disagrees.
 
+### The Common Crawl diversity corpus (2026-10-08)
+
+The squirrelscan-user crawls are dev-site skewed. On 1,500-page samples of the
+training stores (2026-10-08, html lang and platform asset fingerprints):
+Next.js 27-31%, custom 40-43%, WordPress 5-8%, WooCommerce 2-4%, Shopify about
+1%, English 75-85%. Cloud customers run mostly WordPress, WooCommerce and
+Shopify. So a second corpus was drawn from Common Crawl, stratified by
+platform, language and vertical
+(`corpus/cc_corpus.py` subcommands, plus `cc-exclusions.ts` and
+`cc-domains.ts`):
+
+1. **Index, not crawl.** The CC columnar index is read over https, one row
+   group at a time, row groups picked per TLD so the language mix is chosen
+   rather than inherited. Per domain it keeps page counts, URL-shape counts
+   and platform hints from the URLs (e.g. `/collections/` + `/products/` for
+   Shopify).
+2. **Fingerprint, then fill quotas.** A sample of candidate homepages is
+   fetched and tagged by `platform_of` (lower-cased marker substrings and
+   generator metas; the runtime twin is `runtime/platform.ts`). Domains are
+   then picked per platform x language cell (non-English held to a target
+   share inside each platform) with minimums per vertical (recipe, event,
+   job, gov/edu, news, local business) and for smaller platforms.
+3. **A page mix per domain by URL shape**: the homepage plus product, listing,
+   article, about, contact, legal, pricing and the rare shapes when present.
+4. **One WARC range request per page**, rate-limited pool-wide (the CC CDN
+   blocks an address that goes too fast; a 403 is treated as a pause, not a
+   failure). The HTML is decoded with its own charset and written to a
+   squirrel-shaped store (`content-store.db` + `projects/<x>/project.db`), so
+   `build-dataset.ts` and every downstream script read it unchanged.
+5. **Every domain is new.** `cc-exclusions.ts` collects every registrable
+   domain the corpus has seen (all earlier datasets, seeds, ledgers, cloud
+   pages, plus every split manifest's domain hashes) and candidates in it are
+   dropped. Cloud customer domains are excluded the same way.
+6. **The same split rule.** `cc-domains.ts` computes each candidate's split
+   with the exact `splitOf` of `build-dataset.ts` (tldts with private
+   suffixes), and `build-dataset.ts --verify-against` checks the build
+   against the previous split manifest. New domains in the holdout bucket
+   are built but never merged into a training dataset: they are a stored
+   test slice, scored once at the end.
+
+Result (2026-10-09, new corpus): 2,915 new domains and 19,166 pages, of which
+train 15,509, val 1,759 and holdout bucket 1,898. Platform mix of those
+pages: Shopify 19.3%, WordPress 15.8%, WooCommerce 15.7%, Squarespace 7.5%,
+Wix 7.1%, Webflow 5.0%, custom 19.4%.
+
 ## Building the dataset
 
 ```sh
@@ -229,7 +288,7 @@ bun run build-dataset.ts [--index-only] [--limit N] [--max-per-domain N]
 No path is hardcoded. `SQUIRREL_STORES` is colon-separated and each entry is a
 directory holding `content-store.db` and `projects/`; `SQUIRREL_STORE`
 (singular) still names one. A content hash present in two stores is featurized
-once — the hash is the sha256 of the exact bytes, so it is the same page.
+once: the hash is the sha256 of the exact bytes, so it is the same page.
 
 `DOM_CLASSIFIER_DATASET_VERSION` names the output directory and defaults to
 `silver-v1`. Every script in `train/` reads the same variable, so a larger
@@ -242,7 +301,7 @@ because another process writes to it while this runs.
 Output, all under `$DOM_CLASSIFIER_DATA_ROOT/$DOM_CLASSIFIER_DATASET_VERSION/`: `nodes-{train,val,holdout}.jsonl.gz`
 (two rows per node, `m: 0` unmasked and `m: 1` masked), `pages-*.jsonl.gz`,
 `feature-schema.json`, `split-manifest.json`, `stats.json`, and
-`page-index.jsonl.gz` — the only file that holds a URL. Rows carry
+`page-index.jsonl.gz`, the only file that holds a URL. Rows carry
 `d`, a 16-hex domain hash, never the domain.
 
 The split is 80/10/10 by registrable domain, `sha256(domain)[0:8] % 100`, and
@@ -250,11 +309,55 @@ The split is 80/10/10 by registrable domain, `sha256(domain)[0:8] % 100`, and
 domain between splits fails rather than contaminating the holdout.
 
 That manifest lives inside the dataset-version directory, so a build of a NEW
-version finds none and writes a fresh one — which disables the check in exactly
+version finds none and writes a fresh one, which disables the check in exactly
 the case it was written for. Pass `--verify-against <prior>/split-manifest.json`
 to check a new version's splits against the corpus the current holdout came
 from. It is not a formality: the 2026-09-22 build verified 3,657 domains with
 zero drift, which is what makes the old holdout still a holdout.
+
+## Datasets and slices
+
+**silver-v4** = silver-v3 + the new corpus's train and val pages
+(`corpus/merge_datasets.py`; it refuses to merge a holdout split and checks
+that both inputs share one featurizer schema and agree on every domain's
+split). Row files are concatenated as gzip members. silver-v3's holdout is
+carried unchanged. Pool sizes (2026-10-09): train 75,494 and val 9,147 pages.
+
+**Slices.** Every CV number is reported per slice:
+
+- **corpus**: old corpus (squirrelscan-user crawls) vs new corpus (Common Crawl);
+- **platform**: shopify, woocommerce, wordpress, wix, squarespace, webflow,
+  nextjs, custom (everything else), from `cc_corpus.py tag-pages`, which tags
+  old and new pages with the same function;
+- **language**: en, non-en, unk (html lang, else a script or stopword vote).
+
+**Page-type labels.** Jev under the page-type policy for every page; the new
+corpus was labelled under v8.1, the old under v8. Where Jev is unsure
+(confidence < 0.7) Clef gives a second vote, and a page where the two
+disagree is dropped from training and from scoring. The policy's URL rules
+(the site root and locale roots are homepages; a page under `/blog/` or a Wix
+`/post/` page that Jev called docs, article or other is a blog_post) are
+applied on every split (`--policy-rules --policy-version
+v8.2`). Clef can't vote on every unsure page, so on unvoted ones the Jev label
+stands.
+
+**section-v4: section-head inputs.**
+
+- *Section labels*: Jev under policy-section-v3 (region level) on a
+  shortlist of candidate nodes per labelled page, old and new corpus, train
+  and val. Since 2026-10-09 the pool is pure v3: the old train pages that
+  once carried the tightest-node (v2) policy were relabelled.
+- *TOC tightest labels*: a node that either policy calls `table_of_contents`
+  takes its v2 (tightest-node) answer. Old pages and the new pages with a TOC
+  candidate carry both labels.
+- *Ad markers*: nodes with third-party ad markup (network token, known ad
+  host, EasyList match). The promo/ad rule makes an ad/promo label `ad` on a
+  marked node and `promo_banner` on an unmarked one, on every split.
+- *Free labels* (`corpus/section-labels.ts`): train only, see Labels above.
+
+The section sample is built by `train/section_sample.py`; the region sample by
+`train/sample.py` under the same memory budget as before, so a larger corpus
+buys a more diverse draw rather than more rows.
 
 ## Tests
 
@@ -267,6 +370,9 @@ soup, article with nested chrome, product, product listing, docs, homepage,
 microdata-only about page) and `expected.json`, their hand-checked labels.
 
 ## Training and the runtime
+
+*(superseded, 2026-09-20: the original per-head commands, kept so early
+results reproduce. Current training is "Strict cross-validation" below.)*
 
 ```sh
 export DOM_CLASSIFIER_DATA_ROOT=/path/to/private/root
@@ -290,9 +396,13 @@ across the whole pipeline is 660 MB, on a dataset that is ~17 GB dense.
 
 ### What is selected where
 
-Every choice that could read the answer is made on VAL: the class-weight
-exponent, the feature set, the tree size, the boosting cut. Holdout is touched
-once per reported number. The splits themselves are frozen by registrable
+*(superseded in part.)* Through the v8.1 page-type experiments every choice
+that could read the answer was made on VAL (the class-weight exponent, the
+feature set, the tree size, the boosting cut) and holdout was touched once per
+reported number. After those experiments the silver-v3 holdout was frozen.
+Every choice and every threshold now comes from domain-grouped
+cross-validation over train + val, and the final score is read once, on fresh
+test slices. The splits themselves are frozen by registrable
 domain in `split-manifest.json` and are never recomputed.
 
 Two traps worth keeping in mind if these are re-run:
@@ -309,21 +419,76 @@ Two traps worth keeping in mind if these are re-run:
   `p >= 0.9` product metric read zero across the entire corpus. Early stopping
   on weighted logloss is the criterion that is about probabilities.
 
+### Strict cross-validation and slices (current, 2026-10-09)
+
+Every head is measured by 5-fold cross-validation grouped by domain over
+train + val, in two arms scored on the same rows:
+
+- **old**: the old corpus and its sampling. Its models are never fit on a new
+  page and its thresholds are picked on old pages only (`--fit-exclude` in the
+  page-type trainer, a separate old sample in `cv_compare.py`).
+- **new**: silver-v4.
+
+A section run also carries the shipped section config as an arm, fit on its
+own labels but scored on the current ones (`trainLabels`).
+
+**Strict thresholds.** One threshold per class, the lowest that holds
+precision >= 0.95 on BOTH corpus slices (a slice with fewer than 20 fires is
+not held to it). A class that cannot reach it abstains. Then the **platform
+guard**: a (class, platform) cell with >= 50 fires below 0.95 gets a higher
+threshold for that platform if that keeps at least half its coverage, and
+otherwise the class abstains on that platform. Thresholds picked on the pooled
+out-of-fold rows were not safe: the easier new-corpus pages carried precision
+that the old corpus didn't have (2026-10-08: region 4, section 11 classes
+below 0.95 on the old slice).
+
+| script | role |
+|---|---|
+| `train/train_pagetype_v8.py --cv-folds 5` | page-type CV; `--fit-exclude`, `--drop-pages`, `--policy-version`, `--platform-tags`, `--dump-selection`, `--dump-probs` |
+| `train/cv_compare.py` | region and section CV, both arms on one row set; `--dump-probs` writes OOF probabilities for confident learning |
+| `train/sample_groups.py` | per-row fold bucket and page index for a sample |
+| `train/cv_slices.py` | slices, old-only recalibration of the old arm, strict thresholds, tables and a summary |
+| `train/platform_guard.py` | the guard table and the adopted overrides |
+| `train/refit_heads.py` | region or section refit on a whole pool, for export |
+| `train/export_model.py` | artifact: missing-value splits, cross-page block names, platform overrides, parity fixtures from val rows |
+
+None of them opens a holdout file.
+
+### The one-command retrain
+
+One script runs the whole loop. Region is not retrained: its last refit and
+strict thresholds are reused.
+
+1. page-type CV in both arms;
+2. section CV in three arms (old, new, and the shipped config);
+3. slices and strict thresholds;
+4. the platform guard;
+5. the section refit;
+6. the export with the guard's overrides;
+7. the runtime parity tests;
+8. an alternating latency bench against the shipped artifact.
+
+It writes a retrain report holding the CV summary, the guard table, the export
+report and the bench. Its location and inputs are in the private runbook.
+
 ### The runtime
 
 `runtime/predict.ts` exposes `classifyPage(html, url, {model})` and
-`classifyDocument(document, url, {model})`, returning
-`{pageType: {label, confidence, source}, nodes: [{nodeRef, label, confidence, source}], degraded}`.
-`source` is `"model"` or `"rules"`, and the shape is identical either way.
+`classifyDocument(document, url, {model})`. `runtime/README.md` owns the
+contract, including the section head, the platform guard and the cross-page
+block. `source` is `"model"` or `"rules"`, and the shape is identical either
+way.
 
 The rules path (`runtime/rules-fallback.ts`) runs when the artifact is absent,
 unparseable or built for another featurizer version, when a prediction is under
 the artifact's threshold, or when the per-page time budget is spent. It reads
-landmarks, ARIA roles and structured data — the same reading `silver-labels.ts`
+landmarks, ARIA roles and structured data, the same reading `silver-labels.ts`
 does, minus the corpus-level parts. A missing model degrades attribution, never
 detection.
 
 Float parity is by construction: `export_model.py` rounds thresholds to float32
 and walks the rounded trees in a numpy reference evaluator, and `predict.ts`
 implements the same walk with `Math.fround` on the feature value. The parity
-test compares TS against that reference on 10k holdout rows.
+test compares TS against that reference on 10k rows. Since 2026-10-09 those
+rows are val rows, plus 2,000 val pages for the page-type head with and
+without its cross-page block.
