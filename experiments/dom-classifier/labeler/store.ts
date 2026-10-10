@@ -491,7 +491,12 @@ export class LabelStore {
   goldQueue(): GoldQueueItem[] {
     const decided = new Map<
       string,
-      { status: GoldQueueItem["status"]; timestamp: number; order: number }
+      {
+        status: GoldQueueItem["status"];
+        answer: GoldQueueItem["answer"];
+        timestamp: number;
+        order: number;
+      }
     >();
     let order = 0;
     const consider = (
@@ -499,10 +504,11 @@ export class LabelStore {
       review: ModelReview | null,
       timestamp: string,
       decision?: string,
+      answer: GoldQueueItem["answer"] = null,
     ) => {
       order += 1;
       if (!suggestionId || !review) return;
-      const status =
+      const status: GoldQueueItem["status"] =
         decision === "unsure"
           ? "unsure"
           : review === "accept"
@@ -510,7 +516,7 @@ export class LabelStore {
             : review === "correct"
               ? "corrected"
               : "rejected";
-      const candidate = { status, timestamp: Date.parse(timestamp) || 0, order } as const;
+      const candidate = { status, answer, timestamp: Date.parse(timestamp) || 0, order };
       const existing = decided.get(suggestionId);
       if (
         !existing ||
@@ -525,6 +531,10 @@ export class LabelStore {
         annotation.modelReview,
         annotation.timestamp,
         annotation.decision,
+        {
+          label: annotation.sectionPurposesV3?.[0] ?? null,
+          itemOf: annotation.sectionItemOfV3 ?? null,
+        },
       );
     for (const annotation of this.effectivePageAnnotations())
       consider(
@@ -532,6 +542,7 @@ export class LabelStore {
         annotation.modelReview,
         annotation.timestamp,
         annotation.decision,
+        { label: annotation.pageTypesV8?.[0] ?? null, itemOf: null },
       );
     for (const review of this.effectiveModelReviews())
       consider(review.modelSuggestionId, review.review, review.timestamp);
@@ -568,6 +579,7 @@ export class LabelStore {
           blind: !shown,
           alternatives: shown ? [...(suggestion.alternatives?.[axis] ?? [])] : [],
           status: decided.get(suggestion.id)?.status ?? "pending",
+          answer: decided.get(suggestion.id)?.answer ?? null,
         });
       }
     }

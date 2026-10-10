@@ -2841,12 +2841,14 @@ async function showGoldItem(position, notice = "") {
     focusGoldTarget();
   }
 }
-const GOLD_STATUS_TEXT = {
-  accepted: "yes",
-  corrected: "a picked class",
-  rejected: "no",
-  unsure: "unsure",
-};
+/** What the card says was saved: the reviewer's own answer, never a source's label. */
+function goldSavedText(item) {
+  if (item.status === "accepted") return "yes";
+  if (item.status === "rejected") return "no";
+  if (item.status === "unsure") return "unsure";
+  if (item.answer?.itemOf) return `an item of ${goldClassName(item.axis, item.answer.itemOf)}`;
+  return item.answer?.label ? goldClassName(item.axis, item.answer.label) : item.status;
+}
 function goldPickerOpen(item) {
   return Boolean(item && (item.blind || state.gold.picking));
 }
@@ -2920,7 +2922,7 @@ function renderGold() {
     state.gold.notice ||
     (item.status === "pending"
       ? ""
-      : `Saved: ${GOLD_STATUS_TEXT[item.status] || item.status}. A new answer replaces it.`);
+      : `Saved: ${goldSavedText(item)}. A new answer replaces it.`);
   const itemKey = page ? "" : "I individual item · ";
   $("gold-keys").textContent = picking
     ? `Type to filter · 1–9, 0 pick · Enter top match · ${itemKey}U unsure · ${item.blind && !state.gold.itemMode ? "" : "Esc back · "}J skip · K back · ⌘Z undo`
@@ -3053,6 +3055,7 @@ async function saveGoldAnswer(review, fixLabel = null) {
   if (!item || state.saving || !goldReady(item)) return;
   const position = state.gold.position;
   const previousStatus = item.status;
+  const previousAnswer = item.answer;
   const post = (path, body) =>
     api(path, {
       method: "POST",
@@ -3130,7 +3133,15 @@ async function saveGoldAnswer(review, fixLabel = null) {
           : review === "correct" || review === "item"
             ? "corrected"
             : "rejected";
-    state.gold.undo.push({ position, item, previousStatus, action });
+    item.answer =
+      review === "item"
+        ? { label: "none", itemOf: fixLabel }
+        : review === "correct"
+          ? { label: fixLabel, itemOf: null }
+          : review === "accept"
+            ? { label: item.label, itemOf: null }
+            : null;
+    state.gold.undo.push({ position, item, previousStatus, previousAnswer, action });
     state.gold.skipped.delete(item.suggestionId);
     showStatus(
       review === "accept"
@@ -3173,6 +3184,7 @@ async function undoGoldAnswer() {
       }),
     });
     last.item.status = last.previousStatus;
+    last.item.answer = last.previousAnswer;
     state.gold.skipped.delete(last.item.suggestionId);
     showStatus("Last answer undone", "success");
     refreshStats();

@@ -970,6 +970,8 @@ export type GoldQueueItem = {
   alternatives: string[];
   /** `unsure` is an explicit "can't tell" bound to the question. */
   status: "pending" | "accepted" | "corrected" | "rejected" | "unsure";
+  /** The class the latest answer saved, and for an item answer the section it is an item of. */
+  answer: { label: string | null; itemOf: string | null } | null;
 };
 
 /** Read-only projection over the append-only journals for the current captures. */

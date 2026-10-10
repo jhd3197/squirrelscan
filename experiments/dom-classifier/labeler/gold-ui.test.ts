@@ -325,6 +325,14 @@ describe.skipIf(browserSkipReason !== null)(
         await page.goto(`${server.url}#gold-ui-0`);
         await asked("Is this page an About page?");
         expect(await page.locator("#gold-status").textContent()).toContain("Saved: yes");
+        // An item answer says which section it is an item of.
+        await page.goto(`${server.url}#gold-ui-5`);
+        await page.reload();
+        await page.waitForFunction(() =>
+          document
+            .querySelector("#gold-status")
+            ?.textContent?.includes("Saved: an item of Comments."),
+        );
         // The long suggestion id works too, and moving updates the address bar.
         await page.goto(`${server.url}#${ids.pricing}`);
         await page.reload();

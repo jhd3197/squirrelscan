@@ -196,6 +196,7 @@ describe("gold review axes", () => {
         blind: false,
         alternatives: ["none", "promo_banner"],
         status: "pending",
+        answer: null,
       },
       {
         itemId: "g1-1",
@@ -209,6 +210,7 @@ describe("gold review axes", () => {
         blind: false,
         alternatives: ["contact", "other"],
         status: "pending",
+        answer: null,
       },
     ]);
   });
@@ -497,6 +499,7 @@ describe("gold review axes", () => {
         ).status,
       ).toBe(400);
     expect(store.goldQueue()[0]!.status).toBe("corrected");
+    expect(store.goldQueue()[0]!.answer).toEqual({ label: "none", itemOf: "comments" });
     // Older rows carry no item field at all.
     expect(store.readAnnotations().filter((row) => "sectionItemOfV3" in row)).toHaveLength(1);
   });
