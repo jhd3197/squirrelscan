@@ -494,6 +494,13 @@ export interface FeaturizeOptions {
   emitMasked?: boolean;
   /** Candidate cap, for tests. Defaults to MAX_CANDIDATES. */
   maxCandidates?: number;
+  /**
+   * When given, receives every walked element in nodeId order (index =
+   * nodeId), filled by the same walk that assigns the ids. For consumers that
+   * map a DOM element back to a node (experiments/link-position.ts) without a
+   * second walk that could drift. Not a feature: the schema is unchanged.
+   */
+  elementsOut?: unknown[];
 }
 
 export interface NodeFeatures {
@@ -723,7 +730,7 @@ function hostOf(url: string): string {
 // Pass 1: walk
 // ---------------------------------------------------------------------------
 
-function walkDocument(body: ElementLike, host: string): Walk {
+function walkDocument(body: ElementLike, host: string, elementsOut?: unknown[]): Walk {
   const walk = allocate(1024);
   let capacity = 1024;
 
@@ -814,6 +821,7 @@ function walkDocument(body: ElementLike, host: string): Walk {
 
     const index = walk.count++;
     grow(index);
+    elementsOut?.push(el);
     walk.tag.push(tag);
     walk.parent[index] = frame.parent;
     walk.depth[index] = frame.depth;
@@ -1757,6 +1765,7 @@ export function featurizeDocument(
   url: string,
   options: FeaturizeOptions = {},
 ): FeaturizedPage {
+  if (options.elementsOut) options.elementsOut.length = 0;
   const root = safeRoot(document);
   const host = hostOf(url);
   const empty: FeaturizedPage = {
@@ -1771,7 +1780,7 @@ export function featurizeDocument(
   };
   if (!root) return empty;
 
-  const walk = walkDocument(root, host);
+  const walk = walkDocument(root, host, options.elementsOut);
   if (walk.count === 0) return empty;
   flagPatterns(walk);
   foldSubtrees(walk);

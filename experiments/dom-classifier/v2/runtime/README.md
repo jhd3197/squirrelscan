@@ -40,6 +40,7 @@ Options, all optional:
 | `siteFeatures` | the page-type head's cross-page block, when the caller holds the site's link graph (see "Missing values and the cross-page block") |
 | `html` | raw HTML, read only for the platform fingerprint; `classifyPage` passes its own |
 | `platform` | a platform the caller already knows; wins over `html` |
+| `elementsOut` | analysis only: an array that receives the walked elements in nodeId order, so a caller can map a DOM element to the node carrying its label (`experiments/link-position.ts`) |
 
 ### Three heads, one featurizer
 

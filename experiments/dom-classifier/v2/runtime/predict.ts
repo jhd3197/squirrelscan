@@ -93,6 +93,10 @@ export interface ClassifyOptions {
   /** A platform the caller already knows (bucket or platform name); wins over
    *  `html`. Neither given: the artifact's global thresholds apply. */
   platform?: string | null;
+  /** Analysis only: receives the walked elements in nodeId order (see
+   *  FeaturizeOptions.elementsOut), so a caller can map an element to the
+   *  node that carries its label. */
+  elementsOut?: unknown[];
 }
 
 const DEFAULT_BUDGET_MS = 25;
@@ -126,7 +130,11 @@ export function classifyDocument(
 ): PageClassification {
   const started = Date.now();
   const budget = options.budgetMs ?? DEFAULT_BUDGET_MS;
-  const featurized = featurizeDocument(document as never, url);
+  const featurized = featurizeDocument(
+    document as never,
+    url,
+    options.elementsOut ? { elementsOut: options.elementsOut } : {},
+  );
   const byId = new Map<number, NodeFeatures>();
   for (const node of featurized.nodes) byId.set(node.nodeId, node);
 

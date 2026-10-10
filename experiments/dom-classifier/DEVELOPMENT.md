@@ -107,7 +107,7 @@ Live (v2, current):
 | `v2/runtime/` | the TS runtime: `predict.ts`, `model-format.ts`, platform fingerprint, TOC rule, rules fallback |
 | `v2/labels/` | label policies and vocabularies (no label data) |
 | `v2/adjudicate/` | adjudicator, renders (Modal), forced reveal, votes, label model, confident learning |
-| `v2/experiments/` | one-off evaluations (div-soup, platform parity, TOC rule) |
+| `v2/experiments/` | one-off evaluations (div-soup, platform parity, TOC rule, link position: `link-position.ts` + its `claude -p` check `link_position_check.py`) |
 | `labeler/` | localhost human labeller: captures, gold review UI, egress guard |
 | `model-suggestions/` | Jev (TypeSafe) adapter and its runners |
 
