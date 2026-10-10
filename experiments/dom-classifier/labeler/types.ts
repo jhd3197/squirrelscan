@@ -361,9 +361,9 @@ export const STATEFUL_COMPONENT_TYPES = {
  * no single `docs` or `listing_index` value. Rows without these axes are
  * unchanged.
  *
- * Page type v8 (policy-v8.1): the 12 classes of the page-type head. The six
- * rare v8 classes (event, search_results, local_business, job_posting, faq,
- * recipe) are `other` here.
+ * Page type v8 (policy v8.1; v8.2 kept the classes): the 12 classes of the
+ * page-type head. The six rare v8 classes (event, search_results,
+ * local_business, job_posting, faq, recipe) are `other` here.
  */
 export const PAGE_TYPES_V8 = [
   "homepage",
@@ -405,8 +405,13 @@ export const SECTION_PURPOSES_V3 = [
   "locale_switcher",
   "none",
 ] as const;
+/**
+ * The policy each gold axis's card text states. A gold answer records the
+ * revision it was given under (`goldPolicyRevision`); bump the value whenever
+ * the card text changes meaning, so answers given under older text stay apart.
+ */
 export const GOLD_POLICY_REVISIONS = {
-  pageTypeV8: "dom-suggestions-v8.1",
+  pageTypeV8: "dom-suggestions-v8.2",
   sectionPurposeV3: "section-purpose-v3",
 } as const;
 /** The reviewer's prompt for one class: a concrete yes/no question and the policy one-liner. */
@@ -805,6 +810,8 @@ export type Annotation = Omit<
   timestamp: string;
   /** Which mounted capture set this label belongs to. Absent on pre-cohort rows. */
   cohortId?: string;
+  /** The gold card's policy revision (`GOLD_POLICY_REVISIONS`) when this answers a gold question. */
+  goldPolicyRevision?: string;
 };
 
 export type PageAnnotationInput = {
@@ -813,7 +820,7 @@ export type PageAnnotationInput = {
   /** Read-only for the same reason as `AnnotationInput`'s axes. */
   pageTypes?: readonly PageType[];
   contentKinds?: readonly ContentKind[];
-  /** Gold axis: page type v8 (policy-v8.1). Exactly one value. */
+  /** Gold axis: page type v8 (`GOLD_POLICY_REVISIONS.pageTypeV8`). Exactly one value. */
   pageTypesV8?: readonly PageTypeV8[];
   comment?: string;
   clientRequestId: string;
@@ -842,6 +849,8 @@ export type PageAnnotation = Omit<
   timestamp: string;
   /** Which mounted capture set this label belongs to. Absent on pre-cohort rows. */
   cohortId?: string;
+  /** The gold card's policy revision (`GOLD_POLICY_REVISIONS`) when this answers a gold question. */
+  goldPolicyRevision?: string;
 };
 
 /** A standalone rejection preserves feedback without manufacturing a human label. */
@@ -863,6 +872,8 @@ export type ModelReviewRecord = Omit<ModelReviewInput, "comment" | "captureHash"
   timestamp: string;
   /** Which mounted capture set this label belongs to. Absent on pre-cohort rows. */
   cohortId?: string;
+  /** The gold card's policy revision (`GOLD_POLICY_REVISIONS`) when this answers a gold question. */
+  goldPolicyRevision?: string;
 };
 
 /** An append-only reversal of one effective human review action. */

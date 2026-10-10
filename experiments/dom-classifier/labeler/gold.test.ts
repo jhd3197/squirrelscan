@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { handleRequest } from "./server.ts";
 import { LabelStore, shortCohortId } from "./store.ts";
 import {
+  GOLD_POLICY_REVISIONS,
   PAGE_TYPES_V8,
   PAGE_TYPE_V8_QUESTIONS,
   SECTION_PURPOSES_V3,
@@ -502,6 +503,65 @@ describe("gold review axes", () => {
     expect(store.goldQueue()[0]!.answer).toEqual({ label: "none", itemOf: "comments" });
     // Older rows carry no item field at all.
     expect(store.readAnnotations().filter((row) => "sectionItemOfV3" in row)).toHaveLength(1);
+  });
+
+  test("every gold answer records its card's policy revision; other rows carry none", () => {
+    const shown = pageQuestion();
+    const blindPage = suggestion({ mappedLabels: {}, blindAxis: "pageTypeV8" });
+    const blindNode = suggestion({
+      nodeId: bannerNodeId,
+      mappedLabels: {},
+      blindAxis: "sectionPurposeV3",
+    });
+    const descriptive = suggestion({ mappedLabels: { pageTypes: ["about"] } });
+    const { store } = goldFixture([shown, blindPage, blindNode, descriptive]);
+    const page = { pageId: goldPageId, captureHash } as const;
+    const accepted = store.savePageAnnotation({
+      ...page,
+      decision: "label",
+      pageTypesV8: ["about"],
+      clientRequestId: "policy_accept",
+      modelSuggestionId: shown.id,
+      modelReview: "accept",
+    });
+    const rejected = store.saveModelReview({
+      ...page,
+      nodeId: null,
+      modelSuggestionId: shown.id,
+      review: "reject",
+      clientRequestId: "policy_reject",
+    });
+    const picked = store.savePageAnnotation({
+      ...page,
+      decision: "label",
+      pageTypesV8: ["contact"],
+      clientRequestId: "policy_pick",
+      modelSuggestionId: blindPage.id,
+      modelReview: "correct",
+    });
+    const unsure = store.saveAnnotation({
+      ...page,
+      nodeId: bannerNodeId,
+      decision: "unsure",
+      boundary: "unsure",
+      clientRequestId: "policy_unsure",
+      modelSuggestionId: blindNode.id,
+      modelReview: "correct",
+    });
+    const offGold = store.savePageAnnotation({
+      ...page,
+      decision: "label",
+      pageTypes: ["about"],
+      clientRequestId: "policy_descriptive",
+      modelSuggestionId: descriptive.id,
+      modelReview: "accept",
+    });
+    expect(GOLD_POLICY_REVISIONS.pageTypeV8).toBe("dom-suggestions-v8.2");
+    for (const row of [accepted, rejected, picked])
+      expect(row.goldPolicyRevision).toBe(GOLD_POLICY_REVISIONS.pageTypeV8);
+    expect(unsure.goldPolicyRevision).toBe(GOLD_POLICY_REVISIONS.sectionPurposeV3);
+    expect("goldPolicyRevision" in offGold).toBeFalse();
+    expect("goldPolicyRevision" in store.readAnnotations()[0]!).toBeFalse();
   });
 
   test("gold answers count in the review stats like any model review", () => {

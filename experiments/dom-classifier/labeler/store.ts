@@ -25,6 +25,7 @@ import {
   STATEFUL_COMPONENT_TYPES,
   TAXONOMY_REVISION,
   COHORT_ID_PATTERN,
+  GOLD_POLICY_REVISIONS,
   PRIMARY_COHORT_ID,
   type Annotation,
   type CohortSource,
@@ -961,6 +962,7 @@ export class LabelStore {
         timestamp: new Date().toISOString(),
         // Which mounted capture set this label belongs to.
         cohortId: this.cohortIdForPage(input.pageId),
+        ...(modelReview?.policy ? { goldPolicyRevision: modelReview.policy } : {}),
       };
       appendFileSync(this.annotationsPath, `${JSON.stringify(annotation)}\n`, {
         encoding: "utf8",
@@ -1054,6 +1056,7 @@ export class LabelStore {
         timestamp: new Date().toISOString(),
         // Which mounted capture set this label belongs to.
         cohortId: this.cohortIdForPage(input.pageId),
+        ...(modelReview?.policy ? { goldPolicyRevision: modelReview.policy } : {}),
       };
       appendFileSync(this.pageAnnotationsPath, `${JSON.stringify(annotation)}\n`, {
         encoding: "utf8",
@@ -1079,6 +1082,7 @@ export class LabelStore {
       suggestion.captureHash !== page.captureHash
     )
       throw new StoreError(400, "Model suggestion does not belong to this capture target");
+    const policy = goldPolicyRevisionOf(suggestion);
     this.ensureDirectories();
     this.acquireLock();
     try {
@@ -1111,6 +1115,7 @@ export class LabelStore {
         source: "human",
         timestamp: new Date().toISOString(),
         cohortId: this.cohortIdForPage(input.pageId),
+        ...(policy ? { goldPolicyRevision: policy } : {}),
       };
       appendFileSync(this.modelReviewsPath, `${JSON.stringify(review)}\n`, {
         encoding: "utf8",
@@ -1150,7 +1155,13 @@ export class LabelStore {
       )
         throw new StoreError(400, "Accept must include this model suggestion's mapped labels");
     }
-    return review && { id: review.suggestion.id, review: review.review };
+    return (
+      review && {
+        id: review.suggestion.id,
+        review: review.review,
+        policy: goldPolicyRevisionOf(review.suggestion),
+      }
+    );
   }
 
   private modelReviewForPage(
@@ -1175,7 +1186,13 @@ export class LabelStore {
       )
         throw new StoreError(400, "Accept must include this model suggestion's mapped labels");
     }
-    return review && { id: review.suggestion.id, review: review.review };
+    return (
+      review && {
+        id: review.suggestion.id,
+        review: review.review,
+        policy: goldPolicyRevisionOf(review.suggestion),
+      }
+    );
   }
 
   private resolveModelReview(
@@ -1847,6 +1864,12 @@ function goldAxisOf(mapped: ModelSuggestion["mappedLabels"]): GoldAxis | null {
   if (mapped.pageTypeV8?.length) return "pageTypeV8";
   if (mapped.sectionPurposeV3?.length) return "sectionPurposeV3";
   return null;
+}
+
+/** The policy revision a gold question's card states, which its answers record; null off gold. */
+function goldPolicyRevisionOf(suggestion: ModelSuggestion): string | null {
+  const axis = goldAxisOf(suggestion.mappedLabels) ?? suggestion.blindAxis ?? null;
+  return axis ? GOLD_POLICY_REVISIONS[axis] : null;
 }
 
 function normalizeAxisProbabilities(

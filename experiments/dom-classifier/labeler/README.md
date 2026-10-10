@@ -271,8 +271,8 @@ Two additive answer axes sit beside the descriptive v2 taxonomy. Rows without
 them are unchanged, and each field is written only when present.
 
 - `pageTypesV8`: the 12 page-type classes. The card text follows the current
-  page-type policy (`v2/labels/policy-v8.2.md`). `GOLD_POLICY_REVISIONS` still
-  names v8.1, the revision the current cohorts were built under.
+  page-type policy (`v2/labels/policy-v8.2.md`), and
+  `GOLD_POLICY_REVISIONS.pageTypeV8` names it.
 - `sectionPurposesV3`: the section classes of `v2/labels/section-classes-v2.json`
   at `policy-section-v3.md` granularity. The table of contents is judged at its
   tightest node, and `ad` means third-party only (the site's own promotion is
@@ -287,7 +287,10 @@ sidecar of gold questions. `LABELER_COHORTS` mounts cohorts as comma-separated
 `id=/absolute/dir` pairs, and their order is the queue order: the primary data
 directory's questions first, then each cohort in turn. Answers always go to the
 primary data directory's journals, stamped with the cohort id, so mounting or
-unmounting a cohort never moves an answer. The server reads cohorts at start:
+unmounting a cohort never moves an answer. A gold answer is also stamped with
+its axis's `goldPolicyRevision`, the policy its card text stated when it was
+saved. Answers saved before that field existed carry none, and the scorer
+dates them. The server reads cohorts at start:
 restart it after changing `LABELER_COHORTS`, and reload the page afterwards. The
 current cohorts (test gold and calibration gold sets), their paths and their
 sizes are in the private runbook.
