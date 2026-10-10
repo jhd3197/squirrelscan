@@ -2,8 +2,9 @@
 
 This is a private, localhost-only review service for rendered public pages. It
 stores a full-page PNG and a bounded DOM geometry snapshot for each immutable
-capture. The browser is used only to make a fresh capture; the review server
-does not serve archived HTML or execute archived page scripts.
+capture. A browser is used only to make a capture, either a fresh render or a
+historical replay of stored HTML (see "Historical replay captures"); the review
+server itself never renders, serves archived HTML or runs page scripts.
 
 Its fixed seed list is only a small smoke-capture mode: SquirrelScan, Taskmux,
 Example, and one public MDN reference page. Larger corpus work is supplied to a
@@ -29,8 +30,9 @@ bun experiments/dom-classifier/labeler/server.ts capture
 ```
 
 Then start the service through the repository's managed runtime configuration.
-It defaults to `127.0.0.1:4317`; `PORT` and `LABELER_DATA_DIR` are supported.
-The service never starts a crawl or re-captures pages on its own.
+It defaults to `127.0.0.1:4317`; `PORT`, `LABELER_DATA_DIR` and
+`LABELER_COHORTS` (see "Gold review") are supported. The service never starts a
+crawl or re-captures pages on its own.
 
 Portable local output defaults to `~/.local/share/squirrel/dom-labeler`. Set
 `LABELER_DATA_DIR` to choose another review store:
@@ -54,6 +56,10 @@ annotation records that capture hash and remains `source: "human"` and
   catalogues.
 - `GET /api/pages/:id` returns the immutable page, nodes, node annotations,
   and `pageAnnotations`.
+- `GET /api/gold-queue` returns the mounted gold questions whose captures are
+  present, in review order, each with its
+  item id, target, axis, shown class (`null` on a blind item), alternatives,
+  status and saved answer (see "Gold review").
 - `GET /api/stats` returns current queue totals, page-level labels
   (`pages.currentPageLabels`), positive element labels, and model-review
   actions. `pages.labelled` means a page has any current positive page or
@@ -252,67 +258,181 @@ Run the focused checks with:
 bun test experiments/dom-classifier/labeler/server.test.ts
 ```
 
-## Gold review (page type v8, section purpose v3)
+## Gold review
 
-Gold review asks the exact questions a trained head is scored on, one yes/no
-question per item: "Is this page an About page?" or "Is the outlined element a
-cookie consent banner?", with the policy one-liner for that class. These are
-two additive axes beside the descriptive v2 taxonomy: `pageTypesV8` (the 12
-page-type classes of `v2/labels/policy-v8.1.md`, rare classes folded into
-`other`) and `sectionPurposesV3` (`v2/labels/section-classes-v2.json` at
-`policy-section-v3.md` granularity, with the table of contents at its tightest
-node and `ad` meaning third-party only). Rows without these axes are byte-for-
-byte unchanged, and the fields are written only when present.
+Gold review collects human answers to the exact questions the Treetop heads
+are scored on: test gold, which measures the model and the label sources, and
+calibration gold, which may weight the sources in the label model (see
+`../DEVELOPMENT.md`, rule 4). One question per item, one class per answer.
 
-A gold question is a sidecar row whose `mappedLabels` carries exactly one of
-`pageTypeV8` (a page, `nodeId: null`) or `sectionPurposeV3` (a node), with one
-value, plus optional `alternatives` on the same axis. `GET /api/gold-queue`
-returns the questions in sidecar order across the primary set and mounted
-cohorts, each with its latest effective status. When any is pending, the
-labeller opens the **Gold** tab:
+### Axes
 
-- `Enter` saves OK: the shown class as an `accept` on the gold axis.
-- `X` opens the one-click fixes (the suggestion's alternatives first, numbered
-  `1`–`9`, then every other class); a fix saves a `correct` with the chosen
-  class. `X` again saves a standalone Not OK rejection; `Esc` goes back.
-- `J` skips for this browser session, `K` goes back one question, and
-  `Cmd/Ctrl` + `Z` undoes the last answer with an append-only undo record.
+Two additive answer axes sit beside the descriptive v2 taxonomy. Rows without
+them are unchanged, and each field is written only when present.
 
-Answering an answered question again appends a newer answer; the latest
-effective action per suggestion id is the answer. Gold rows never appear on
-the element or page cards, and the card never names the annotator.
+- `pageTypesV8`: the 12 page-type classes. The card text follows the current
+  page-type policy (`v2/labels/policy-v8.2.md`). `GOLD_POLICY_REVISIONS` still
+  names v8.1, the revision the current cohorts were built under.
+- `sectionPurposesV3`: the section classes of `v2/labels/section-classes-v2.json`
+  at `policy-section-v3.md` granularity. The table of contents is judged at its
+  tightest node, and `ad` means third-party only (the site's own promotion is
+  `promo_banner`).
+- `sectionItemOfV3`: an item answer (see "Keys"). It always sits next to
+  `sectionPurposesV3: ["none"]`, so v3 scoring reads it as none.
+
+### Cohorts
+
+A cohort is a directory holding `captures/` and a `model-suggestions.jsonl`
+sidecar of gold questions. `LABELER_COHORTS` mounts cohorts as comma-separated
+`id=/absolute/dir` pairs, and their order is the queue order: the primary data
+directory's questions first, then each cohort in turn. Answers always go to the
+primary data directory's journals, stamped with the cohort id, so mounting or
+unmounting a cohort never moves an answer. The server reads cohorts at start:
+restart it after changing `LABELER_COHORTS`, and reload the page afterwards. The
+current cohorts (test gold and calibration gold sets), their paths and their
+sizes are in the private runbook.
+
+Scoring keys (which items are attention checks, every source's label, the
+sampling weights) live outside anything the server reads. Never put them in a
+sidecar or a capture. A blind item is marked in the sidecar, because the card
+has to ask it differently, but its sources' labels are not.
+
+### Questions
+
+- **Shown item**: the sidecar row's `mappedLabels` carries one class on one
+  axis (`pageTypeV8` for a page, `sectionPurposeV3` for a node), with optional
+  `alternatives` on the same axis. The card asks a concrete question ("Is this
+  page an About page?", "Is the outlined element a cookie consent banner?")
+  and shows the class's policy one-liner.
+- **Blind item**: the row carries only `blindAxis`, with empty `mappedLabels`
+  and no alternatives. The card asks "What is this page?" or "What is the
+  outlined element?" with the class picker already open, so the reviewer
+  answers without an anchor.
+- **Attention check**: a small share of shown items carry a deliberately
+  wrong class. They look exactly like any other shown item; which items they
+  are is recorded only in a private key.
+
+The card never names a source and shows no model score, and the cohort
+builders give every gold row the same neutral `modelId`. Gold questions never appear on the
+element or page cards.
+
+### Keys
+
+| key | on a shown item | in the picker |
+|---|---|---|
+| `Y` / `Enter` | yes, it is this class | `Enter` saves the top match once something is typed |
+| `N` | no, it is not this class (a rejection with no fix) | |
+| `S` | suggest the right class: opens the picker | |
+| `I` (sections) | an item answer of the shown class | switches to (or out of) "an item of which section?" |
+| letters | | filter by the start of any word ("coo" finds cookie consent) |
+| `1`–`9`, `0` | | pick one of the first ten classes |
+| `U` | | unsure: a "can't tell" bound to the question |
+| `Esc` | | clear the filter, leave item mode, or close the picker |
+| `J` / `K` | skip for this session / go back one question | same, when the filter is empty |
+| `Cmd`/`Ctrl` + `Z` | undo the last answer | same |
+
+Section cards show the buttons No, Suggest, Item and Yes; page cards show No,
+Suggest and Yes. On a section, the picker also has an "Item of…" button. With
+the filter empty, `u`, `j` and `k` (and `i` on a section) act as commands, so a
+class with a word starting with one of them is reached by typing a different
+word of it ("bus" for Business info).
+
+An **item answer** says the outline covers one item of a section: one comment,
+review, FAQ question, product card or breadcrumb link. On a shown section, `I`
+records an item of the shown class. On a blind section (or a shown `none`), `I`
+opens the picker to choose the section. It is stored as
+`sectionPurposesV3: ["none"]` plus `sectionItemOfV3: "<class>"`; the store
+refuses an item on any other purpose, or one that names `none`. The private
+scorer reports item answers apart from the v3 scores; they seed a later item
+layer.
+
+### Item ids and deep links
+
+Every gold question has a short, stable id, `<cohort short>-<position>`.
+`gold-v<N>` becomes `g<N>` (so `gold-v1b` is `g1b`), `gold-cal-v1` becomes `cal`
+(`gold-cal-v<N>` becomes `cal<N>`), and any other cohort keeps its own id.
+Position counts the cohort's well-formed gold rows in sidecar order, including
+rows later skipped for a missing capture, so a missing capture never shifts
+an id. The id shows
+in the card's corner (select it to copy), and the address bar follows the
+question on screen (`#g1-234`, via `history.replaceState`). Opening
+`/#<id>`, or `/#msug_…` with a suggestion id, jumps to that question, answered
+or not; pasting another id into the address bar jumps without a reload. An
+unknown id shows "No such item" and opens the next open question.
+
+### Answers and undo
+
+| answer | stored as |
+|---|---|
+| yes | a page or node annotation with the shown class, `modelReview: "accept"` |
+| a picked class (fix or blind) | the same with the picked class, `modelReview: "correct"` |
+| no | a standalone model review, `review: "reject"` |
+| unsure | an annotation with `decision: "unsure"`, bound to the question |
+| item | `sectionPurposesV3: ["none"]` + `sectionItemOfV3`, `modelReview: "correct"` |
+
+Every answer is bound to its question by `modelSuggestionId`, and the latest
+effective action per question is the answer. Answering an answered question
+appends a newer answer, and the card says what is saved ("Saved: Contact",
+"Saved: an item of Comments"). `Cmd`/`Ctrl` + `Z` undoes answers one by one,
+newest first, within the browser session, each with an append-only undo
+record, so the journals keep every revision. The queue opens at the first
+unanswered question.
 
 ## Historical replay captures
 
-`replay-capture.ts` renders STORED html rather than fetching the page, so a
+`replay-capture.ts` renders STORED HTML rather than fetching the page, so a
 reviewer sees the bytes a model was given (`sourceKind: "historical_replay"`,
-`assetMode: "hybrid"`). The navigation to the original url is answered with the
-stored document; stylesheets, images and fonts load from their public hosts,
-while data requests, beacons, WebSockets, popups, private-network hosts and any
-later top-level navigation are blocked. Fixed elements are pinned where they
-were measured so the full-page screenshot and the node boxes agree. Elements a
-caller marked with `data-replay-target` are reported as located, hidden, or
-gone (a script replaced them). It is a library for a private, command-line
-builder; the review server never renders anything.
+`assetMode: "hybrid"`). The navigation to the original URL is answered with the
+stored document; stylesheets, images and fonts load from their public hosts.
+Fixed elements are pinned where they were measured, so the full-page
+screenshot and the node boxes agree. Elements a caller marked with
+`data-replay-target` are reported as located, hidden, or gone (a script
+replaced them). It is a library for a private, command-line builder; the
+review server never renders anything.
 
-A replayed page is untrusted code on a machine where local services listen, so:
+Page content is hostile, and a replayed page runs on a machine where local
+services listen (`../DEVELOPMENT.md`, rule 8). The hardening:
 
-- **Scripts are off by default** (`scriptMode: "disabled"`, enforced with a
-  `script-src 'none'` policy on the stored document). A caller turns them on per
-  page, for platforms that render client-side and for SPA shells.
-- **All traffic leaves through the egress guard** (`egress-guard.ts`), a
-  loopback CONNECT proxy that resolves each host once, refuses it when any
-  address is private, and connects to exactly the address it checked, which
-  closes DNS rebinding. Playwright sends loopback through the proxy too. Plain
-  http subresources are refused.
-- **WebRTC may not open non-proxied UDP.** Launch the browser with
-  `replayLaunchOptions()`.
+- **Deny-by-default addresses.** `isPublicAddress` (in `capture.ts`) refuses
+  the IPv4 special-purpose blocks (private, loopback, link-local, shared,
+  benchmarking, documentation, multicast, reserved). It parses every IPv6
+  spelling and judges mapped, compatible, translated and NAT64 forms by the
+  IPv4 inside them. Any other IPv6 address must be in 2000::/3, and
+  2001::/23 (Teredo and other protocol assignments), 2001:db8::/32, 2002::/16
+  (6to4) and 3fff::/20 are refused too, so `::`, loopback, link-local,
+  site-local, unique-local and multicast addresses never pass. `isPrivateHostname` uses it for IP literals and also refuses
+  `localhost` and `.local` names. Fresh captures and replays both check
+  through it.
+- **Egress guard.** All replay traffic leaves through `egress-guard.ts`, a
+  loopback CONNECT proxy. It resolves each host itself (caching the decision
+  for ten minutes), refuses the host if any address is not public, and connects
+  to exactly the address it checked, which closes DNS rebinding. Playwright sends loopback through the proxy too. Plain
+  HTTP subresources are refused.
+- **Blocked requests.** Data requests (`fetch`, XHR, event streams), beacons,
+  WebSockets (closed by a WebSocket route), popups and any top-level
+  navigation after the stored document are refused. Launch the browser with
+  `replayLaunchOptions()`, which also stops WebRTC from using non-proxied UDP.
+- **Scripts off by default.** A replay serves the stored document under
+  `script-src 'none'` (`scriptMode: "disabled"`). A caller turns scripts on per
+  page only where the page needs them: client-rendered builders, and SPA shells
+  whose scripts-off render comes out blank. The private render builder records
+  why (`scriptReason`).
+- **Deferred stylesheets.** `script-src 'none'` also blocks the inline handler
+  that loadCSS-style pages use to switch a stylesheet on (`rel="preload"
+  as="style"` or a `media="print"`/`media="none"` switch), and `<noscript>`
+  stays unrendered. Scripts-off replays promote those links to plain
+  stylesheets (`promoteDeferredStyles`), so such pages are not drawn
+  unstyled.
+- **Deadline.** Once its browser context exists, a replay that has not finished
+  by the deadline closes that context, so a page that never settles cannot hold
+  a render worker.
 
 Chromium's Private/Local Network Access features were measured ineffective in
-the bundled headless shell (140), so they are not relied on. Residual: with
-scripts on, a WebSocket opened from a worker is not closed by the page's
-WebSocket route, but it still leaves through the guard, so it reaches public
-hosts only.
+the bundled headless shell (140), so they are not relied on. Residual risks:
+with scripts on, a WebSocket opened from a worker is not closed by the page's
+WebSocket route, but it still leaves through the guard and so reaches public
+hosts only. The page's JavaScript still runs in Chromium, and
+`replayLaunchOptions()` keeps Playwright's default of no Chromium OS sandbox.
 
 ## Private corpus rendering
 
