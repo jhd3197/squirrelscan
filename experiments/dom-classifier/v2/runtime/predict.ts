@@ -113,8 +113,16 @@ export interface ClassifyTimings {
   sectionMs: number;
 }
 
-const DEFAULT_BUDGET_MS = 25;
-const DEFAULT_SCORING_BATCH = 1;
+// Measured on Modal, 2026-10-11 (experiments/perf-bench.ts, 1,500 real pages,
+// batched scoring). With 500 ms the model finishes every normal page (CLI-path
+// p95 ~75 ms) and about three quarters of link-heavy pages. Huge DOMs (10k+
+// elements) still overrun, since featurize itself can take ~400 ms; they then
+// finish on the rules path. The old 25 ms finished only 44-64% of normal pages.
+const DEFAULT_BUDGET_MS = 500;
+// Rows per tree pass. Scores are bit-identical at any size; 32 cut region time
+// ~1.9x and section ~1.6x against row-at-a-time, and keeps the budget checked
+// every 32 nodes, as before.
+const DEFAULT_SCORING_BATCH = 32;
 
 /** Parse an artifact, returning null (never throwing) when it cannot be used. */
 export function tryLoadModel(json: unknown): { model: Model | null; reason: string } {

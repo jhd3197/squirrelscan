@@ -36,7 +36,9 @@ Options, all optional:
 | option | meaning |
 |---|---|
 | `model` | the parsed artifact; omit for the rules path only |
-| `budgetMs` | per-page wall-clock budget, default 25 ms |
+| `budgetMs` | per-page wall-clock budget, default 500 ms (see the measurement note on `DEFAULT_BUDGET_MS`) |
+| `scoringBatch` | rows scored per tree pass, default 32; any size gives bit-identical scores (`scoreRows`), only the speed differs |
+| `timingsOut` | analysis only: receives featurize, page type, region and section milliseconds |
 | `siteFeatures` | the page-type head's cross-page block, when the caller holds the site's link graph (see "Missing values and the cross-page block") |
 | `html` | raw HTML, read only for the platform fingerprint; `classifyPage` passes its own |
 | `platform` | a platform the caller already knows; wins over `html` |
@@ -268,7 +270,7 @@ frozen by registrable domain in `split-manifest.json` and are never recomputed.
 | artifact unparseable, wrong format, or a future `artifactVersion` | the parse error |
 | artifact built for another featurizer version | `artifact built for featurizer X, this build is Y` |
 | artifact token-bucket count or node-feature width disagrees with this build | which one disagreed |
-| per-page time budget spent (`budgetMs`, default 25 ms) | `time budget Nms exceeded` |
+| per-page time budget spent (`budgetMs`, default 500 ms) | `time budget Nms exceeded` |
 | one node's top probability is under the threshold | `""`: the page is not degraded, that node's `source` is `rules` |
 
 The first four are page-wide: every node comes back from rules. The budget is
