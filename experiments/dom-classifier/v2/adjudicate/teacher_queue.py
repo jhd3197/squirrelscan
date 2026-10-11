@@ -202,7 +202,9 @@ def cmd_queue(args) -> None:
     shown_ids = [i for i in queue_ids if i not in audit]
     n_checks = round(args.check_share * len(shown_ids))
     checks = set(sorted(shown_ids, key=lambda i: rank(f"check:{i}"))[:n_checks])
-    created = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    # The labeller keeps a sidecar row only with provider "typesafe" (its sidecar schema, not who answered:
+    # modelId says that) and a createdAt Date.parse accepts; anything else is dropped silently.
+    created = datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     items, sidecar, key = [], [], []
     for position, i in enumerate(queue_ids):
         r = rows[i]
@@ -244,7 +246,7 @@ def cmd_queue(args) -> None:
             "pageId": r["pageId"],
             "nodeId": r["nodeId"],
             "captureHash": capture["captureHash"],
-            "provider": "anthropic",
+            "provider": "typesafe",
             "modelId": "teacher-opus-5-5",
             "modelRevision": a.get("promptRevision", "adjudicator-v3"),
             "promptRevision": a.get("promptRevision", "adjudicator-v3"),

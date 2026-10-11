@@ -139,7 +139,9 @@ def main() -> None:
         share = round(n_controls * sum(1 for r in disagree if r["axis"] == axis) / max(len(disagree), 1))
         controls += [r for r in agreed if r["axis"] == axis][:share]
     cohort = sorted(disagree + controls, key=lambda r: rank(f"order:{r['itemId']}"))
-    created = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    # The labeller keeps a sidecar row only with provider "typesafe" (its sidecar schema, not who answered:
+    # modelId says that) and a createdAt Date.parse accepts; anything else is dropped silently.
+    created = datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     out_items, sidecar, key = [], [], []
     for position, r in enumerate(cohort):
         item = items[r["itemId"]]
@@ -160,7 +162,7 @@ def main() -> None:
         sidecar.append(
             {
                 "schemaVersion": 1, "id": sid, "pageId": item["pageId"], "nodeId": item["nodeId"],
-                "captureHash": capture["captureHash"], "provider": "teacher-check", "modelId": "teacher-check-v1",
+                "captureHash": capture["captureHash"], "provider": "typesafe", "modelId": "teacher-check-v1",
                 "modelRevision": "v1", "promptRevision": first[r["itemId"]].get("promptRevision"),
                 "snapshotHash": "sha256:" + hashlib.sha256(f"{sid}:{axis}:blind".encode()).hexdigest(),
                 "rawAnswers": None, "provisional": True, "mappedLabels": {}, "blindAxis": axis, "createdAt": created,
