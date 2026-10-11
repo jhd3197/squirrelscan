@@ -10,6 +10,9 @@
  *
  * Read-only on the corpus. Sequential, one report resident at a time, because
  * the snapshot is 1,462 files and a few are very large.
+ *
+ *   NOISE_SURVEY_CORPUS=<snapshot dir> NOISE_SURVEY_OUT=<private out dir> \
+ *     bun run scripts/component-findings/noise-survey.ts
  */
 import { mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
@@ -18,10 +21,14 @@ import { renderLlm } from "../../packages/report/src/output/llm.ts";
 import { renderMarkdown } from "../../packages/report/src/output/markdown.ts";
 import type { AuditReport, CheckResult, ReportRuleResult } from "../../packages/report/src/types.ts";
 
-const CORPUS = resolve(
-  "/Users/n/Projects/SquirrelScan/squirrelscan/marketing/campaigns/producthunt-launch-study/review-2026-09-17/snapshot/reports-local",
-);
-const OUT_DIR = resolve("/Users/n/Projects/SquirrelScan/dom-classifier-data/2026-09-19/noise-survey");
+/** Both paths are private and machine-local, so they come from the environment. */
+function requiredEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) throw new Error(`set ${name} (a private, machine-local path)`);
+  return value;
+}
+const CORPUS = resolve(requiredEnv("NOISE_SURVEY_CORPUS"));
+const OUT_DIR = resolve(requiredEnv("NOISE_SURVEY_OUT"));
 
 /** repo#2320: an unbounded sitemap bug produced a few enormous reports. */
 const MAX_BYTES = 5 * 1024 * 1024;

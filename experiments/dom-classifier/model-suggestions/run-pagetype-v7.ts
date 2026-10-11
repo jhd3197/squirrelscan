@@ -16,7 +16,7 @@
  *
  *   bun --env-file="$TYPESAFE_ENV_FILE" run-pagetype-v7.ts \
  *     --pages <private>/pagetype-jev-v7/queue-holdout.jsonl \
- *     --store /Volumes/BACKUP/squirrel-store/content-store.db \
+ *     --store <private>/content-store.db \
  *     --output <private>/pagetype-jev-v7/holdout.jsonl \
  *     --policy-revision v7 --concurrency 4
  */
