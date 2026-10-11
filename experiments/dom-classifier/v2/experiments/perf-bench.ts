@@ -139,11 +139,14 @@ function summarize(pages: PageTiming[]) {
       ];
     }),
   );
+  const stageStats = Object.fromEntries(
+    STAGES.map((stage) => [stage, stats(pages.map((p) => p[stage]))]),
+  ) as Record<(typeof STAGES)[number], ReturnType<typeof stats>>;
   return {
     pages: pages.length,
     elements: stats(pages.map((p) => p.elements)),
     nodes: stats(pages.map((p) => p.nodes)),
-    ...Object.fromEntries(STAGES.map((stage) => [stage, stats(pages.map((p) => p[stage]))])),
+    ...stageStats,
     timeShare: Object.fromEntries(
       STAGES.filter((stage) => stage !== "cliMs" && stage !== "totalMs").map((stage) => [
         stage.replace(/Ms$/, ""),
@@ -158,14 +161,6 @@ function summarize(pages: PageTiming[]) {
       ]),
     ),
     bySize,
-  } as Record<string, unknown> & {
-    pages: number;
-    cliMs: ReturnType<typeof stats>;
-    sectionMs: ReturnType<typeof stats>;
-    regionMs: ReturnType<typeof stats>;
-    featurizeMs: ReturnType<typeof stats>;
-    timeShare: Record<string, number>;
-    cliFinishedWithin: Record<number, number>;
   };
 }
 
