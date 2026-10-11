@@ -10,7 +10,11 @@
  * the CLI pays: everything but the parse, which the audit has already done.
  *
  *   bun run experiments/perf-bench.ts --in name=<dir>[,name=<dir>...] \
- *     --artifact classifier-v2.json --out <dir> [--reps 3] [--limit N]
+ *     --artifact classifier-v2.json --out <dir> [--reps 3] [--limit N] [--arms 1,32]
+ *
+ * `--arms` A/Bs `scoringBatch` values in ONE process: every page runs every arm
+ * in rotating order each rep, and an arm whose answers differ from the first
+ * arm's is counted in `mismatches` (scoring is meant to be output-identical).
  *
  * Input dirs use the link probe's format (`manifest.jsonl` + `blobs/<sha256>.html.gz`).
  * A row with a `source` reports under `<name>:<source>`.
@@ -36,6 +40,7 @@ interface Row {
 
 interface PageTiming {
   set: string;
+  arm: string;
   sha256: string;
   bytes: number;
   elements: number;
@@ -175,6 +180,7 @@ async function main(): Promise<void> {
   const outDir = argument("--out");
   const reps = Number(argument("--reps", "3"));
   const limit = Number(argument("--limit", "0"));
+  const arms = argument("--arms", "default").split(",");
   const artifactText = readFileSync(argument("--artifact"), "utf8");
   const loadStarted = performance.now();
   const { model, reason } = tryLoadModel(JSON.parse(artifactText));
@@ -194,46 +200,65 @@ async function main(): Promise<void> {
     }
   }
 
-  const best = new Map<number, PageTiming>();
+  const best = new Map<string, PageTiming>();
+  const mismatches: Record<string, number> = Object.fromEntries(arms.map((a) => [a, 0]));
   const started = new Date().toISOString();
   const loadStart = loadavg().map(round);
   for (let rep = 0; rep < reps; rep++) {
     for (const [i, { set, dir, row }] of work.entries()) {
       // Decoding is I/O, not runtime cost: it stays outside every timer.
       const html = decode(gunzipSync(readFileSync(`${dir}/blobs/${row.sha256}.html.gz`)));
-      const t0 = performance.now();
-      const { document } = parseHTML(html);
-      const t1 = performance.now();
-      const timings: ClassifyTimings = { featurizeMs: 0, pageTypeMs: 0, regionMs: 0, sectionMs: 0 };
-      const result = classifyDocument(document, row.url, {
-        model,
-        budgetMs: 1e9,
-        html,
-        timingsOut: timings,
-      });
-      const t2 = performance.now();
-      const previous = best.get(i);
-      const timing: PageTiming = {
-        set,
-        sha256: row.sha256,
-        bytes: html.length,
-        // Counted once, outside every timer.
-        elements:
-          previous?.elements ??
-          (
-            document as unknown as { querySelectorAll(s: string): ArrayLike<unknown> }
-          ).querySelectorAll("*").length,
-        nodes: result.nodes.length,
-        parseMs: t1 - t0,
-        ...timings,
-        cliMs: t2 - t1,
-        totalMs: t2 - t0,
-      };
-      if (previous)
-        for (const stage of STAGES) timing[stage] = Math.min(previous[stage], timing[stage]);
-      best.set(i, timing);
+      const answers = new Map<string, string>();
+      for (let a = 0; a < arms.length; a++) {
+        const armIndex = (a + rep + i) % arms.length;
+        const arm = arms[armIndex]!;
+        const t0 = performance.now();
+        const { document } = parseHTML(html);
+        const t1 = performance.now();
+        const timings: ClassifyTimings = {
+          featurizeMs: 0,
+          pageTypeMs: 0,
+          regionMs: 0,
+          sectionMs: 0,
+        };
+        const result = classifyDocument(document, row.url, {
+          model,
+          budgetMs: 1e9,
+          html,
+          timingsOut: timings,
+          ...(arm === "default" ? {} : { scoringBatch: Number(arm) }),
+        });
+        const t2 = performance.now();
+        if (rep === 0) answers.set(arm, JSON.stringify(result));
+        const key = `${i}|${arm}`;
+        const previous = best.get(key);
+        const timing: PageTiming = {
+          set,
+          arm,
+          sha256: row.sha256,
+          bytes: html.length,
+          // Counted once, outside every timer.
+          elements:
+            previous?.elements ??
+            (
+              document as unknown as { querySelectorAll(s: string): ArrayLike<unknown> }
+            ).querySelectorAll("*").length,
+          nodes: result.nodes.length,
+          parseMs: t1 - t0,
+          ...timings,
+          cliMs: t2 - t1,
+          totalMs: t2 - t0,
+        };
+        if (previous) {
+          for (const stage of STAGES) timing[stage] = Math.min(previous[stage], timing[stage]);
+        }
+        best.set(key, timing);
+      }
+      for (const arm of arms.slice(1)) {
+        if (rep === 0 && answers.get(arm) !== answers.get(arms[0]!)) mismatches[arm]!++;
+      }
     }
-    console.log(`rep ${rep + 1}/${reps}: ${work.length} pages`);
+    console.log(`rep ${rep + 1}/${reps}: ${work.length} pages x ${arms.length} arms`);
   }
 
   const pages = [...best.values()].map((p) => {
@@ -248,6 +273,8 @@ async function main(): Promise<void> {
       artifactSha256: createHash("sha256").update(artifactText).digest("hex"),
       coldLoadMs,
       reps,
+      arms,
+      mismatches,
       cpu: cpuModel(),
       cpus: cpus().length,
       bun: Bun.version,
@@ -255,17 +282,19 @@ async function main(): Promise<void> {
       loadavgEnd: loadavg().map(round),
     },
     sets: Object.fromEntries(
-      [...new Set(work.map((w) => w.set))].map((name) => [
-        name,
-        summarize(pages.filter((p) => p.set === name)),
-      ]),
+      [...new Set(work.map((w) => w.set))].flatMap((name) =>
+        arms.map((arm) => [
+          arms.length > 1 ? `${name} @${arm}` : name,
+          summarize(pages.filter((p) => p.set === name && p.arm === arm)),
+        ]),
+      ),
     ),
   };
   writeFileSync(`${outDir}/summary.json`, `${JSON.stringify(summary, null, 2)}\n`);
   const lines = [
     `# perf bench ${started}`,
     "",
-    `cpu ${summary.run.cpu} x${summary.run.cpus}, bun ${summary.run.bun}, ${reps} reps (min per stage), artifact ${summary.run.artifactSha256.slice(0, 12)}, cold load ${coldLoadMs} ms. cli = featurize + page type + region + section (the parse is the audit's).`,
+    `cpu ${summary.run.cpu} x${summary.run.cpus}, bun ${summary.run.bun}, ${reps} reps (min per stage), arms ${arms.join(",")} (answers differing from the first arm: ${JSON.stringify(mismatches)}), artifact ${summary.run.artifactSha256.slice(0, 12)}, cold load ${coldLoadMs} ms. cli = featurize + page type + region + section (the parse is the audit's).`,
     "",
     "| set | pages | cli p50 / p95 / max | featurize p95 | region p95 | section p95 | share parse / feat / pageType / region / section | cli within 25 / 50 / 100 / 200 ms |",
     "|---|---|---|---|---|---|---|---|",

@@ -22,6 +22,7 @@ import {
   ArtifactError,
   loadModel,
   scoreRow,
+  scoreRows,
   softmax,
   thresholdsFor,
   type Model,
@@ -100,6 +101,9 @@ export interface ClassifyOptions {
   /** Analysis only: receives wall-clock ms per stage, so a bench can time the
    *  heads directly instead of subtracting a separate featurize run. */
   timingsOut?: ClassifyTimings;
+  /** Rows scored per tree pass (see `scoreRows`); 1 is the row-at-a-time walk.
+   *  Scores are identical either way; only the speed differs. */
+  scoringBatch?: number;
 }
 
 export interface ClassifyTimings {
@@ -110,6 +114,7 @@ export interface ClassifyTimings {
 }
 
 const DEFAULT_BUDGET_MS = 25;
+const DEFAULT_SCORING_BATCH = 1;
 
 /** Parse an artifact, returning null (never throwing) when it cannot be used. */
 export function tryLoadModel(json: unknown): { model: Model | null; reason: string } {
@@ -223,60 +228,123 @@ export function classifyDocument(
   let previousTokens: number[] | null = null;
   let budgetSpent = false;
 
-  for (const node of featurized.nodes) {
-    const nodeRef = { nodeId: node.nodeId, tag: node.tag, elementId: node.elementId };
-    if (!usable || !scores || budgetSpent) {
-      nodes.push({ nodeRef, ...withRules(node, byId) });
-      continue;
+  const batch = Math.max(1, Math.floor(options.scoringBatch ?? DEFAULT_SCORING_BATCH));
+  const width = usable ? usable.nodeFeatureCount + TOKEN_BUCKETS : 0;
+  const matrix = usable && batch > 1 ? new Float32Array(batch * width) : null;
+  if (matrix && usable && scores) {
+    // The same decisions as the row-at-a-time loop below, a chunk of `batch`
+    // nodes at a time: markup wins, the budget is checked once per chunk, and
+    // the model's rows for the chunk are scored together.
+    const k = usable.region.numClass;
+    const chunkScores = new Float32Array(batch * k);
+    const asked = new Uint8Array(batch);
+    const all = featurized.nodes;
+    for (let start = 0; start < all.length; start += batch) {
+      const end = Math.min(start + batch, all.length);
+      if (!budgetSpent && Date.now() - started > budget) {
+        budgetSpent = true;
+        degraded = degraded || `time budget ${budget}ms exceeded`;
+      }
+      let rows = 0;
+      for (let i = start; i < end; i++) {
+        const ask = !budgetSpent && !declaresOwnRegion(all[i]!);
+        asked[i - start] = ask ? 1 : 0;
+        if (ask) writeRow(matrix, rows++ * width, all[i]!, usable.nodeFeatureCount);
+      }
+      if (rows > 0) scoreRows(usable.region, matrix, width, rows, chunkScores);
+      let row = 0;
+      for (let i = start; i < end; i++) {
+        const node = all[i]!;
+        const nodeRef = { nodeId: node.nodeId, tag: node.tag, elementId: node.elementId };
+        if (!asked[i - start]) {
+          nodes.push({ nodeRef, ...withRules(node, byId) });
+          continue;
+        }
+        const rowScores = chunkScores.subarray(row * k, (row + 1) * k);
+        row++;
+        const { index, probability } = softmax(rowScores);
+        const threshold = options.threshold ?? regionThresholds![index]!;
+        nodes.push(
+          probability >= threshold
+            ? {
+                nodeRef,
+                label: usable.region.classes[index] as RegionLabel,
+                confidence: probability,
+                source: "model",
+              }
+            : {
+                nodeRef,
+                label: "unknown",
+                confidence: 0,
+                source: "model",
+                rawLabel: usable.region.classes[index],
+                rawConfidence: probability,
+              },
+        );
+      }
     }
-    // MARKUP WINS. A node carrying its own landmark tag or ARIA role has been
-    // told what it is by the page author, and the model is not asked. "Model
-    // primary, rules fallback" is about nodes where the markup is SILENT; it
-    // never means overriding a correct declaration.
-    //
-    // This is not a style preference, it is a measured defect: with the model
-    // consulted first, a <nav class="main-navigation"> came back content_block
-    // at 0.74 on 66 of 68 pages of a stored site, contradicting a deterministic
-    // answer that was right. See runtime/README.md.
-    if (declaresOwnRegion(node)) {
-      nodes.push({ nodeRef, ...withRules(node, byId) });
-      continue;
-    }
-    // Checked every 32 nodes: Date.now() per node is itself measurable at the
-    // scale this runs at (400 nodes x pages x rules).
-    if ((nodes.length & 31) === 0 && Date.now() - started > budget) {
-      budgetSpent = true;
-      degraded = degraded || `time budget ${budget}ms exceeded`;
-      nodes.push({ nodeRef, ...withRules(node, byId) });
-      continue;
-    }
-    values = toVector(node.features, node.tokens, usable.nodeFeatureCount, values, previousTokens);
-    previousTokens = node.tokens;
-    scoreRow(usable.region, values, scores);
-    const { index, probability } = softmax(scores);
-    // Per class, not global. One threshold cannot serve ten classes whose
-    // precision curves differ by 40 points, and the single value the old rule
-    // selected (0.95) left two thirds of nodes unnamed.
-    const threshold = options.threshold ?? regionThresholds![index]!;
-    if (probability >= threshold) {
-      nodes.push({
-        nodeRef,
-        label: usable.region.classes[index] as RegionLabel,
-        confidence: probability,
-        source: "model",
-      });
-    } else {
-      // The model was asked and declined. That is a MODEL answer of "unknown",
-      // not a rules answer: saying `source: "rules"` here would claim the
-      // deterministic path had looked and found nothing, which it has not.
-      nodes.push({
-        nodeRef,
-        label: "unknown",
-        confidence: 0,
-        source: "model",
-        rawLabel: usable.region.classes[index],
-        rawConfidence: probability,
-      });
+  } else {
+    for (const node of featurized.nodes) {
+      const nodeRef = { nodeId: node.nodeId, tag: node.tag, elementId: node.elementId };
+      if (!usable || !scores || budgetSpent) {
+        nodes.push({ nodeRef, ...withRules(node, byId) });
+        continue;
+      }
+      // MARKUP WINS. A node carrying its own landmark tag or ARIA role has been
+      // told what it is by the page author, and the model is not asked. "Model
+      // primary, rules fallback" is about nodes where the markup is SILENT; it
+      // never means overriding a correct declaration.
+      //
+      // This is not a style preference, it is a measured defect: with the model
+      // consulted first, a <nav class="main-navigation"> came back content_block
+      // at 0.74 on 66 of 68 pages of a stored site, contradicting a deterministic
+      // answer that was right. See runtime/README.md.
+      if (declaresOwnRegion(node)) {
+        nodes.push({ nodeRef, ...withRules(node, byId) });
+        continue;
+      }
+      // Checked every 32 nodes: Date.now() per node is itself measurable at the
+      // scale this runs at (400 nodes x pages x rules).
+      if ((nodes.length & 31) === 0 && Date.now() - started > budget) {
+        budgetSpent = true;
+        degraded = degraded || `time budget ${budget}ms exceeded`;
+        nodes.push({ nodeRef, ...withRules(node, byId) });
+        continue;
+      }
+      values = toVector(
+        node.features,
+        node.tokens,
+        usable.nodeFeatureCount,
+        values,
+        previousTokens,
+      );
+      previousTokens = node.tokens;
+      scoreRow(usable.region, values, scores);
+      const { index, probability } = softmax(scores);
+      // Per class, not global. One threshold cannot serve ten classes whose
+      // precision curves differ by 40 points, and the single value the old rule
+      // selected (0.95) left two thirds of nodes unnamed.
+      const threshold = options.threshold ?? regionThresholds![index]!;
+      if (probability >= threshold) {
+        nodes.push({
+          nodeRef,
+          label: usable.region.classes[index] as RegionLabel,
+          confidence: probability,
+          source: "model",
+        });
+      } else {
+        // The model was asked and declined. That is a MODEL answer of "unknown",
+        // not a rules answer: saying `source: "rules"` here would claim the
+        // deterministic path had looked and found nothing, which it has not.
+        nodes.push({
+          nodeRef,
+          label: "unknown",
+          confidence: 0,
+          source: "model",
+          rawLabel: usable.region.classes[index],
+          rawConfidence: probability,
+        });
+      }
     }
   }
 
@@ -288,27 +356,52 @@ export function classifyDocument(
   if (section && !budgetSpent) {
     const sectionScores = new Float32Array(section.numClass);
     const sectionThresholds = thresholdsFor(section, platform);
-    let sectionValues: Float32Array | null = null;
-    let sectionTokens: number[] | null = null;
-    for (let i = 0; i < featurized.nodes.length; i++) {
-      if ((i & 31) === 0 && Date.now() - started > budget) {
-        degraded = degraded || `time budget ${budget}ms exceeded`;
-        break;
+    if (matrix) {
+      const k = section.numClass;
+      const chunkScores = new Float32Array(batch * k);
+      const all = featurized.nodes;
+      for (let start = 0; start < all.length; start += batch) {
+        if (Date.now() - started > budget) {
+          degraded = degraded || `time budget ${budget}ms exceeded`;
+          break;
+        }
+        const end = Math.min(start + batch, all.length);
+        for (let i = start; i < end; i++) {
+          writeRow(matrix, (i - start) * width, all[i]!, usable!.nodeFeatureCount);
+        }
+        scoreRows(section, matrix, width, end - start, chunkScores);
+        for (let i = start; i < end; i++) {
+          const { index, probability } = softmax(
+            chunkScores.subarray((i - start) * k, (i - start + 1) * k),
+          );
+          const label = section.classes[index]!;
+          if (label !== "none" && probability >= sectionThresholds[index]!)
+            nodes[i]!.section = { label, confidence: probability };
+        }
       }
-      const node = featurized.nodes[i]!;
-      sectionValues = toVector(
-        node.features,
-        node.tokens,
-        usable!.nodeFeatureCount,
-        sectionValues,
-        sectionTokens,
-      );
-      sectionTokens = node.tokens;
-      scoreRow(section, sectionValues, sectionScores);
-      const { index, probability } = softmax(sectionScores);
-      const label = section.classes[index]!;
-      if (label !== "none" && probability >= sectionThresholds[index]!)
-        nodes[i]!.section = { label, confidence: probability };
+    } else {
+      let sectionValues: Float32Array | null = null;
+      let sectionTokens: number[] | null = null;
+      for (let i = 0; i < featurized.nodes.length; i++) {
+        if ((i & 31) === 0 && Date.now() - started > budget) {
+          degraded = degraded || `time budget ${budget}ms exceeded`;
+          break;
+        }
+        const node = featurized.nodes[i]!;
+        sectionValues = toVector(
+          node.features,
+          node.tokens,
+          usable!.nodeFeatureCount,
+          sectionValues,
+          sectionTokens,
+        );
+        sectionTokens = node.tokens;
+        scoreRow(section, sectionValues, sectionScores);
+        const { index, probability } = softmax(sectionScores);
+        const label = section.classes[index]!;
+        if (label !== "none" && probability >= sectionThresholds[index]!)
+          nodes[i]!.section = { label, confidence: probability };
+      }
     }
   }
 
@@ -324,6 +417,18 @@ function withRules(
   return { label, confidence: label === "unknown" ? 0 : 1, source: "rules" };
 }
 
+/** `toVector`'s row, written into a batch matrix at `offset`. */
+function writeRow(
+  matrix: Float32Array,
+  offset: number,
+  node: NodeFeatures,
+  numericCount: number,
+): void {
+  matrix.fill(0, offset + numericCount, offset + numericCount + TOKEN_BUCKETS);
+  for (let i = 0; i < numericCount; i++) matrix[offset + i] = node.features[i] ?? 0;
+  for (const bucket of node.tokens) matrix[offset + numericCount + bucket] = 1;
+}
+
 /**
  * Numeric features followed by the one-hot token buckets, as one float32 row.
  *
@@ -333,7 +438,7 @@ function withRules(
  * was doing ~200k redundant writes per page for ~3k useful ones. The numeric
  * half needs no clearing: every one of its slots is written every time.
  */
-function toVector(
+export function toVector(
   features: number[],
   tokens: number[],
   numericCount: number,

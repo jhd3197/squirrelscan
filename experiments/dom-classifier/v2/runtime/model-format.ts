@@ -282,6 +282,60 @@ export function scoreRow(head: Head, values: Float32Array, out: Float32Array): v
 }
 
 /**
+ * Raw class scores for `count` rows at once: `rows` holds them back to back,
+ * `width` floats each, and `out` receives `numClass` scores per row.
+ *
+ * Tree-major: each tree walks every row before the next tree starts. A region
+ * tree is ~127 leaves and the head is 3.6 MB, so the row-at-a-time walk in
+ * `scoreRow` reads a fresh tree from memory for every node; here a tree's upper
+ * levels stay in cache for the whole batch. Every row still adds its trees'
+ * leaves in tree order, into a float32 slot, so the scores are bit-for-bit
+ * those of `scoreRow`. Plain (version-1) blocks only: a head with missing-value
+ * flags falls back to one `scoreRow` per row.
+ */
+export function scoreRows(
+  head: Head,
+  rows: Float32Array,
+  width: number,
+  count: number,
+  out: Float32Array,
+): void {
+  const k = head.numClass;
+  if (head.flags) {
+    const scores = new Float32Array(k);
+    for (let r = 0; r < count; r++) {
+      scoreRow(head, rows.subarray(r * width, (r + 1) * width), scores);
+      out.set(scores, r * k);
+    }
+    return;
+  }
+  out.fill(0, 0, count * k);
+  const { feature, threshold, left, right, leaf, treeStart, leafStart, perInternal } = head;
+  let cls = 0;
+  for (let tree = 0; tree < head.numTrees; tree++) {
+    if (perInternal[tree]! === 0) {
+      const value = leaf[leafStart[tree]!]!;
+      for (let r = 0; r < count; r++) out[r * k + cls]! += value;
+    } else {
+      const root = treeStart[tree]!;
+      for (let r = 0, base = 0; r < count; r++, base += width) {
+        let node = root;
+        for (;;) {
+          const next =
+            rows[base + feature[node]!]! <= threshold[node]! ? left[node]! : right[node]!;
+          if (next < 0) {
+            out[r * k + cls]! += leaf[-next - 1]!;
+            break;
+          }
+          node = next;
+        }
+      }
+    }
+    cls = cls + 1 === k ? 0 : cls + 1;
+  }
+}
+
+/**
  * The same walk for a version-2 block, with LightGBM's missing-value decision
  * at every node. Kept separate so the plain walk, which every region and
  * section node takes, pays nothing for it.

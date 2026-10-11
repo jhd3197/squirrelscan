@@ -8,7 +8,14 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, statSync } from "node:fs";
 
-import { ArtifactError, loadModel, scoreRow, softmax, thresholdsFor } from "./model-format.ts";
+import {
+  ArtifactError,
+  loadModel,
+  scoreRow,
+  scoreRows,
+  softmax,
+  thresholdsFor,
+} from "./model-format.ts";
 import { classifyPage, tryLoadModel, withExtraBlock } from "./predict.ts";
 import { isRootPath } from "./rules-fallback.ts";
 
@@ -383,6 +390,73 @@ describe.if(HAS_ARTIFACT && HAS_PARITY)("G4 parity with the Python evaluator", (
     expect(maxDiff).toBeLessThan(1e-5);
   });
 });
+
+describe.if(HAS_ARTIFACT && HAS_PARITY && existsSync(PARITY_SECTION))(
+  "batched scoring is the row-at-a-time walk, bit for bit (#2307)",
+  () => {
+    test("scoreRows equals scoreRow on every parity row, in batches of 1, 7, 32 and all", () => {
+      const model = loadModel(artifactJson());
+      for (const [path, head] of [
+        [PARITY, model.region],
+        [PARITY_SECTION, model.section!],
+      ] as const) {
+        const fixture = JSON.parse(readFileSync(path, "utf8")) as {
+          rows: number;
+          width: number;
+          x: Array<{ i: number[]; v: number[] }>;
+        };
+        const rows = Math.min(fixture.rows, 2_000);
+        const matrix = new Float32Array(rows * fixture.width);
+        for (let row = 0; row < rows; row++) {
+          const sparse = fixture.x[row]!;
+          for (let k = 0; k < sparse.i.length; k++) {
+            matrix[row * fixture.width + sparse.i[k]!] = sparse.v[k]!;
+          }
+        }
+        const expected = new Float32Array(rows * head.numClass);
+        const scores = new Float32Array(head.numClass);
+        for (let row = 0; row < rows; row++) {
+          scoreRow(head, matrix.subarray(row * fixture.width, (row + 1) * fixture.width), scores);
+          expected.set(scores, row * head.numClass);
+        }
+        for (const size of [1, 7, 32, rows]) {
+          const out = new Float32Array(rows * head.numClass);
+          for (let start = 0; start < rows; start += size) {
+            const n = Math.min(size, rows - start);
+            scoreRows(
+              head,
+              matrix.subarray(start * fixture.width, (start + n) * fixture.width),
+              fixture.width,
+              n,
+              out.subarray(start * head.numClass, (start + n) * head.numClass),
+            );
+          }
+          expect(Buffer.from(out.buffer).equals(Buffer.from(expected.buffer))).toBe(true);
+        }
+      }
+    });
+
+    test("classifyPage answers the same with any scoringBatch", () => {
+      const { model } = tryLoadModel(artifactJson());
+      // 120 candidate blocks, so a batch of 32 spans several chunks.
+      const blocks = Array.from(
+        { length: 120 },
+        (_, i) =>
+          `<section class="block-${i % 7}"><h2>Part ${i}</h2><p>Text ${i} about crawling.</p><a href="https://other${i}.example/">x</a></section>`,
+      ).join("");
+      for (const html of [
+        PAGE,
+        `<!doctype html><html><body><main>${blocks}</main></body></html>`,
+      ]) {
+        const base = classifyPage(html, URL, { model, budgetMs: 1e9, scoringBatch: 1 });
+        for (const batch of [7, 32, 400]) {
+          const batched = classifyPage(html, URL, { model, budgetMs: 1e9, scoringBatch: batch });
+          expect(batched).toEqual(base);
+        }
+      }
+    });
+  },
+);
 
 describe.if(HAS_ARTIFACT && existsSync(PARITY_SECTION))("section head parity (#2307)", () => {
   test("holdout rows: identical argmax to the Python reference, probabilities within 1e-5", () => {
