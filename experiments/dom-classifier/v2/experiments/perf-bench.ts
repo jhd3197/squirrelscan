@@ -3,10 +3,11 @@
  * Per-stage runtime bench (#2307): where does a page's time go?
  *
  * For every page, R times (reps outer, pages inner, so no page is timed
- * back-to-back with itself): parse, then featurize alone, then the full
- * `classifyDocument` with no budget. Predict = classify - featurize on the same
- * parsed document. Each stage keeps its MIN over reps: the noise on a shared or
- * cloud box is one-sided, so the minimum is the stable estimate.
+ * back-to-back with itself): parse, then the full `classifyDocument` with no
+ * budget, which reports featurize, page type, region and section through
+ * `timingsOut`. Each stage keeps its MIN over reps: the noise on a shared or
+ * cloud box is one-sided, so the minimum is the stable estimate. `cli` is what
+ * the CLI pays: everything but the parse, which the audit has already done.
  *
  *   bun run experiments/perf-bench.ts --in name=<dir>[,name=<dir>...] \
  *     --artifact classifier-v2.json --out <dir> [--reps 3] [--limit N]
@@ -24,8 +25,7 @@ import { cpus, loadavg } from "node:os";
 import { gunzipSync } from "node:zlib";
 
 import { parseHTML } from "../../../../packages/parser/src/dom.ts";
-import { featurizeDocument } from "../featurize.ts";
-import { classifyDocument, tryLoadModel } from "../runtime/predict.ts";
+import { type ClassifyTimings, classifyDocument, tryLoadModel } from "../runtime/predict.ts";
 import { decode } from "./link-position.ts";
 
 interface Row {
@@ -42,9 +42,22 @@ interface PageTiming {
   nodes: number;
   parseMs: number;
   featurizeMs: number;
-  predictMs: number;
+  pageTypeMs: number;
+  regionMs: number;
+  sectionMs: number;
+  cliMs: number;
   totalMs: number;
 }
+
+const STAGES = [
+  "parseMs",
+  "featurizeMs",
+  "pageTypeMs",
+  "regionMs",
+  "sectionMs",
+  "cliMs",
+  "totalMs",
+] as const;
 
 const BUDGETS = [25, 50, 100, 200] as const;
 const SIZE_BUCKETS = [
@@ -104,25 +117,18 @@ function summarize(pages: PageTiming[]) {
         name,
         {
           pages: inBucket.length,
-          totalP50: quantile(
-            inBucket.map((p) => p.totalMs),
-            0.5,
+          ...Object.fromEntries(
+            STAGES.map((stage) => [
+              `${stage}P50`,
+              quantile(
+                inBucket.map((p) => p[stage]),
+                0.5,
+              ),
+            ]),
           ),
-          totalP95: quantile(
-            inBucket.map((p) => p.totalMs),
+          cliMsP95: quantile(
+            inBucket.map((p) => p.cliMs),
             0.95,
-          ),
-          parseP50: quantile(
-            inBucket.map((p) => p.parseMs),
-            0.5,
-          ),
-          featurizeP50: quantile(
-            inBucket.map((p) => p.featurizeMs),
-            0.5,
-          ),
-          predictP50: quantile(
-            inBucket.map((p) => p.predictMs),
-            0.5,
           ),
         },
       ];
@@ -132,22 +138,29 @@ function summarize(pages: PageTiming[]) {
     pages: pages.length,
     elements: stats(pages.map((p) => p.elements)),
     nodes: stats(pages.map((p) => p.nodes)),
-    parseMs: stats(pages.map((p) => p.parseMs)),
-    featurizeMs: stats(pages.map((p) => p.featurizeMs)),
-    predictMs: stats(pages.map((p) => p.predictMs)),
-    totalMs: stats(pages.map((p) => p.totalMs)),
-    timeShare: {
-      parse: round(sum("parseMs") / total),
-      featurize: round(sum("featurizeMs") / total),
-      predict: round(sum("predictMs") / total),
-    },
-    finishedWithin: Object.fromEntries(
+    ...Object.fromEntries(STAGES.map((stage) => [stage, stats(pages.map((p) => p[stage]))])),
+    timeShare: Object.fromEntries(
+      STAGES.filter((stage) => stage !== "cliMs" && stage !== "totalMs").map((stage) => [
+        stage.replace(/Ms$/, ""),
+        round(sum(stage) / total),
+      ]),
+    ),
+    // The runtime's budget clock starts inside classifyDocument: it sees cliMs.
+    cliFinishedWithin: Object.fromEntries(
       BUDGETS.map((b) => [
         b,
-        round(pages.filter((p) => p.totalMs <= b).length / Math.max(pages.length, 1)),
+        round(pages.filter((p) => p.cliMs <= b).length / Math.max(pages.length, 1)),
       ]),
     ),
     bySize,
+  } as Record<string, unknown> & {
+    pages: number;
+    cliMs: ReturnType<typeof stats>;
+    sectionMs: ReturnType<typeof stats>;
+    regionMs: ReturnType<typeof stats>;
+    featurizeMs: ReturnType<typeof stats>;
+    timeShare: Record<string, number>;
+    cliFinishedWithin: Record<number, number>;
   };
 }
 
@@ -191,46 +204,43 @@ async function main(): Promise<void> {
       const t0 = performance.now();
       const { document } = parseHTML(html);
       const t1 = performance.now();
-      const featurized = featurizeDocument(document as never, row.url);
+      const timings: ClassifyTimings = { featurizeMs: 0, pageTypeMs: 0, regionMs: 0, sectionMs: 0 };
+      const result = classifyDocument(document, row.url, {
+        model,
+        budgetMs: 1e9,
+        html,
+        timingsOut: timings,
+      });
       const t2 = performance.now();
-      const result = classifyDocument(document, row.url, { model, budgetMs: 1e9, html });
-      const t3 = performance.now();
+      const previous = best.get(i);
       const timing: PageTiming = {
         set,
         sha256: row.sha256,
         bytes: html.length,
-        elements: featurized.page.elementCount,
+        // Counted once, outside every timer.
+        elements:
+          previous?.elements ??
+          (
+            document as unknown as { querySelectorAll(s: string): ArrayLike<unknown> }
+          ).querySelectorAll("*").length,
         nodes: result.nodes.length,
         parseMs: t1 - t0,
-        featurizeMs: t2 - t1,
-        // classifyDocument featurizes again: what it adds on top is the prediction.
-        predictMs: Math.max(0, t3 - t2 - (t2 - t1)),
-        totalMs: t1 - t0 + (t3 - t2),
+        ...timings,
+        cliMs: t2 - t1,
+        totalMs: t2 - t0,
       };
-      const previous = best.get(i);
-      best.set(
-        i,
-        previous
-          ? {
-              ...timing,
-              parseMs: Math.min(previous.parseMs, timing.parseMs),
-              featurizeMs: Math.min(previous.featurizeMs, timing.featurizeMs),
-              predictMs: Math.min(previous.predictMs, timing.predictMs),
-              totalMs: Math.min(previous.totalMs, timing.totalMs),
-            }
-          : timing,
-      );
+      if (previous)
+        for (const stage of STAGES) timing[stage] = Math.min(previous[stage], timing[stage]);
+      best.set(i, timing);
     }
     console.log(`rep ${rep + 1}/${reps}: ${work.length} pages`);
   }
 
-  const pages = [...best.values()].map((p) => ({
-    ...p,
-    parseMs: round(p.parseMs),
-    featurizeMs: round(p.featurizeMs),
-    predictMs: round(p.predictMs),
-    totalMs: round(p.totalMs),
-  }));
+  const pages = [...best.values()].map((p) => {
+    const rounded = { ...p };
+    for (const stage of STAGES) rounded[stage] = round(p[stage]);
+    return rounded;
+  });
   writeFileSync(`${outDir}/pages.jsonl`, `${pages.map((p) => JSON.stringify(p)).join("\n")}\n`);
   const summary = {
     run: {
@@ -255,14 +265,15 @@ async function main(): Promise<void> {
   const lines = [
     `# perf bench ${started}`,
     "",
-    `cpu ${summary.run.cpu} x${summary.run.cpus}, bun ${summary.run.bun}, ${reps} reps (min per stage), artifact ${summary.run.artifactSha256.slice(0, 12)}, cold load ${coldLoadMs} ms`,
+    `cpu ${summary.run.cpu} x${summary.run.cpus}, bun ${summary.run.bun}, ${reps} reps (min per stage), artifact ${summary.run.artifactSha256.slice(0, 12)}, cold load ${coldLoadMs} ms. cli = featurize + page type + region + section (the parse is the audit's).`,
     "",
-    "| set | pages | total p50 / p95 / max | parse p95 | featurize p95 | predict p95 | share parse / feat / pred | within 25 / 50 / 100 / 200 ms |",
+    "| set | pages | cli p50 / p95 / max | featurize p95 | region p95 | section p95 | share parse / feat / pageType / region / section | cli within 25 / 50 / 100 / 200 ms |",
     "|---|---|---|---|---|---|---|---|",
   ];
   for (const [name, s] of Object.entries(summary.sets)) {
+    const share = s.timeShare;
     lines.push(
-      `| ${name} | ${s.pages} | ${s.totalMs.p50} / ${s.totalMs.p95} / ${s.totalMs.max} | ${s.parseMs.p95} | ${s.featurizeMs.p95} | ${s.predictMs.p95} | ${s.timeShare.parse} / ${s.timeShare.featurize} / ${s.timeShare.predict} | ${BUDGETS.map((b) => s.finishedWithin[b]).join(" / ")} |`,
+      `| ${name} | ${s.pages} | ${s.cliMs.p50} / ${s.cliMs.p95} / ${s.cliMs.max} | ${s.featurizeMs.p95} | ${s.regionMs.p95} | ${s.sectionMs.p95} | ${share.parse} / ${share.featurize} / ${share.pageType} / ${share.region} / ${share.section} | ${BUDGETS.map((b) => s.cliFinishedWithin[b]).join(" / ")} |`,
     );
   }
   writeFileSync(`${outDir}/summary.md`, `${lines.join("\n")}\n`);

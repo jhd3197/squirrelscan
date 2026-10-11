@@ -97,6 +97,16 @@ export interface ClassifyOptions {
    *  FeaturizeOptions.elementsOut), so a caller can map an element to the
    *  node that carries its label. */
   elementsOut?: unknown[];
+  /** Analysis only: receives wall-clock ms per stage, so a bench can time the
+   *  heads directly instead of subtracting a separate featurize run. */
+  timingsOut?: ClassifyTimings;
+}
+
+export interface ClassifyTimings {
+  featurizeMs: number;
+  pageTypeMs: number;
+  regionMs: number;
+  sectionMs: number;
 }
 
 const DEFAULT_BUDGET_MS = 25;
@@ -130,6 +140,14 @@ export function classifyDocument(
 ): PageClassification {
   const started = Date.now();
   const budget = options.budgetMs ?? DEFAULT_BUDGET_MS;
+  const timings = options.timingsOut;
+  let mark = timings ? performance.now() : 0;
+  const lap = (): number => {
+    const now = performance.now();
+    const elapsed = now - mark;
+    mark = now;
+    return elapsed;
+  };
   const featurized = featurizeDocument(
     document as never,
     url,
@@ -137,6 +155,7 @@ export function classifyDocument(
   );
   const byId = new Map<number, NodeFeatures>();
   for (const node of featurized.nodes) byId.set(node.nodeId, node);
+  if (timings) timings.featurizeMs = lap();
 
   const model = options.model ?? null;
   let degraded = "";
@@ -196,6 +215,7 @@ export function classifyDocument(
     pageType = { label: ruleType, confidence: ruleType === "unknown" ? 0 : 1, source: "rules" };
   }
 
+  if (timings) timings.pageTypeMs = lap();
   const nodes: NodePrediction[] = [];
   const scores = usable ? new Float32Array(usable.region.numClass) : null;
   const regionThresholds = usable ? thresholdsFor(usable.region, platform) : null;
@@ -260,6 +280,7 @@ export function classifyDocument(
     }
   }
 
+  if (timings) timings.regionMs = lap();
   // Section purpose: a separate head over the SAME candidate vectors, for every
   // node (a declared <nav> can still hold the site's breadcrumbs). One entry is
   // pushed per featurized node above, so the arrays line up by position.
@@ -291,6 +312,7 @@ export function classifyDocument(
     }
   }
 
+  if (timings) timings.sectionMs = lap();
   return { pageType, nodes, degraded, platform };
 }
 
