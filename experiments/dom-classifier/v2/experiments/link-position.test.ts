@@ -124,6 +124,27 @@ describe("section lookup", () => {
   });
 });
 
+describe("comments rule", () => {
+  test("marks a link inside comment markup, with its rel tokens, whatever the model says", () => {
+    const html = HTML.replace(
+      "</main>",
+      `<div id="comments" class="comments-area"><ol class="comment-list"><li id="comment-3" class="comment">
+        <div class="comment-author"><a rel="external nofollow ugc" href="https://spam.example.org/">Spammer</a></div>
+      </li></ol></div></main>`,
+    );
+    const { result, elements } = classify(html);
+    const rows = linkPositions(PAGE, result, elements);
+    const spam = rows.find((r) => r.href.includes("spam"))!;
+    expect(spam.commentsRule).toBe("comments");
+    expect(spam.commentsRuleToken).toBe("comment-author");
+    expect(spam.commentsRuleHops).toBe(1);
+    expect(spam.rel).toEqual(["ugc", "nofollow"]);
+    const story = rows.find((r) => r.href.includes("news"))!;
+    expect(story.commentsRule).toBeNull();
+    expect(story.rel).toEqual([]);
+  });
+});
+
 describe("helpers", () => {
   test("resolveHref and unwrapWayback", () => {
     expect(unwrapWayback("https://web.archive.org/web/2004id_/http://a.example.org/x")).toBe(
@@ -193,7 +214,11 @@ describe("helpers", () => {
       [
         link("a|2005|com|live", "footer", null),
         link("a|2005|com|live", "unknown", null),
-        link("a|2005|com|live", "content_block", "comments"),
+        {
+          ...link("a|2005|com|live", "content_block", "comments"),
+          commentsRule: "comments",
+          rel: ["ugc", "nofollow"],
+        },
         link("a|2005|com|live", "unknown", null, false),
       ],
     ) as Record<string, any>;
@@ -204,6 +229,8 @@ describe("helpers", () => {
     expect(a.regionAnswered).toBe(0.667);
     expect(a.regionGroups.chrome).toBe(0.333);
     expect(a.sections).toEqual({ comments: 1 });
+    expect(a.commentsRule).toBe(0.333);
+    expect(a.relUgc).toBe(0.333);
     expect(summary["a|*|*|*"].pages).toBe(2);
     expect(summary["*|*|*|*"].parseFailures).toBe(1);
     expect(summary["*|*|*|*"].msP50).toBe(10);
@@ -241,6 +268,29 @@ describe("link-check packets", () => {
     ]) {
       expect(packet).not.toContain(label);
     }
+  });
+
+  test("hide the id and class tokens a markup rule reads, and keep the rest", () => {
+    const html = HTML.replace(
+      "</main>",
+      `<div id="comments" class="comments-area wide"><ol class="comment-list"><li id="comment-3" class="comment odd">
+        <a rel="ugc" href="https://spam.example.org/">Spammer</a></li></ol></div></main>`,
+    );
+    const { result, elements } = classify(html);
+    const spam = linkPositions(PAGE, result, elements).find((r) => r.href.includes("spam"))!;
+    const row = {
+      itemId: "t",
+      sha256: "x",
+      url: PAGE,
+      anchorNodeId: spam.anchorNodeId!,
+      href: spam.href,
+      anchorText: spam.anchorText,
+    };
+    expect(buildPacket(html, row)!).toContain("#comments.comments-area.wide");
+    const blind = buildPacket(html, row, { hideTokens: /comment/i })!;
+    expect(blind).not.toMatch(/comment/i);
+    expect(blind).toContain("div.wide");
+    expect(blind).toContain("li.odd");
   });
 
   test("name an image link by its alt text, and refuse a nodeId that is not an anchor", () => {

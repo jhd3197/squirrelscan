@@ -37,6 +37,7 @@ import {
   type NodePrediction,
   type PageClassification,
 } from "../runtime/predict.ts";
+import { commentSectionOf } from "../runtime/comments-rule.ts";
 
 export interface ManifestLink {
   href: string;
@@ -87,11 +88,21 @@ export interface LinkPosition {
   sectionConfidence: number | null;
   sectionNodeId: number | null;
   sectionHops: number | null;
+  /** The markup comments rule (`runtime/comments-rule.ts`) on the anchor's
+   *  ancestors: `comments`, `reviews` or null. Independent of the model and of
+   *  the candidate cap. */
+  commentsRule: string | null;
+  commentsRuleHops: number | null;
+  /** The id/class token that matched, digits folded to N. */
+  commentsRuleToken: string | null;
+  /** rel tokens on the anchor that matter for a backlink: ugc, nofollow, sponsored. */
+  rel: string[];
   /** nodeId of the anchor itself, for building an outline around it. */
   anchorNodeId: number | null;
 }
 
 const CHROME = new Set(["site_header", "navigation", "footer", "sidebar"]);
+const BACKLINK_REL = ["ugc", "nofollow", "sponsored"];
 
 export function regionGroup(label: string): RegionGroup {
   if (CHROME.has(label)) return "chrome";
@@ -253,8 +264,22 @@ export function linkPositions(
       sectionConfidence: null,
       sectionNodeId: null,
       sectionHops: null,
+      commentsRule: null,
+      commentsRuleHops: null,
+      commentsRuleToken: null,
+      rel: [],
       anchorNodeId: entry ? (idOf.get(entry.el) ?? null) : null,
     };
+    if (entry) {
+      const match = commentSectionOf(entry.el as unknown as Element);
+      if (match) {
+        row.commentsRule = match.label;
+        row.commentsRuleHops = match.hops;
+        row.commentsRuleToken = match.token;
+      }
+      const rel = (entry.el.getAttribute("rel") ?? "").toLowerCase().split(/\s+/);
+      row.rel = BACKLINK_REL.filter((token) => rel.includes(token));
+    }
     let el: DomElement | null | undefined = entry?.el;
     let hops = 0;
     while (el && (row.regionNodeId === null || row.sectionNodeId === null)) {
@@ -393,7 +418,12 @@ export function summarise(pages: PageRecord[], links: LinkRecord[]): Record<stri
     const regionLabels: Record<string, number> = {};
     const sections: Record<string, number> = {};
     let withSection = 0;
+    let inComments = 0;
+    let ugc = 0;
     for (const link of located) {
+      if (link.commentsRule === "comments") inComments++;
+      // `rel` is absent on rows read back from runs before the field existed.
+      if (link.rel?.includes("ugc")) ugc++;
       regionCounts[link.regionGroup]++;
       regionLabels[link.region] = (regionLabels[link.region] ?? 0) + 1;
       if (link.section) {
@@ -428,6 +458,8 @@ export function summarise(pages: PageRecord[], links: LinkRecord[]): Record<stri
       regionLabels,
       sectionAny: share(withSection, located.length),
       sections,
+      commentsRule: share(inComments, located.length),
+      relUgc: share(ugc, located.length),
     };
   }
   return out;
@@ -435,8 +467,8 @@ export function summarise(pages: PageRecord[], links: LinkRecord[]): Record<stri
 
 export function summaryMarkdown(summary: Record<string, unknown>): string {
   const lines = [
-    "| source | year_bin | tld_group | state | pages | parse fail | budget fail | p50 / p95 ms | page type answered | links located | region answered | chrome | content_block | main_content | dialog | other | section any |",
-    "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+    "| source | year_bin | tld_group | state | pages | parse fail | budget fail | p50 / p95 ms | page type answered | links located | region answered | chrome | content_block | main_content | dialog | other | section any | comments rule | rel ugc |",
+    "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
   ];
   const fmt = (v: unknown) => (v === null || v === undefined ? "–" : String(v));
   for (const [key, raw] of Object.entries(summary)) {
@@ -447,7 +479,7 @@ export function summaryMarkdown(summary: Record<string, unknown>): string {
         `${fmt(s.msP50)} / ${fmt(s.msP95)} | ${fmt(s.pageTypeAnswered)} | ${s.linksLocated} / ${s.links} | ` +
         `${fmt(s.regionAnswered)} | ${fmt(s.regionGroups.chrome)} | ${fmt(s.regionGroups.content_block)} | ` +
         `${fmt(s.regionGroups.main_content)} | ${fmt(s.regionGroups.dialog)} | ${fmt(s.regionGroups.other)} | ` +
-        `${fmt(s.sectionAny)} |`,
+        `${fmt(s.sectionAny)} | ${fmt(s.commentsRule)} | ${fmt(s.relUgc)} |`,
     );
   }
   return `${lines.join("\n")}\n`;
