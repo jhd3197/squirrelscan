@@ -11,7 +11,9 @@
  * text around it with the link marked; and the other links beside it.
  *
  *   bun run experiments/link-check-packets.ts --in <probe input dir> \
- *     --sample sample.jsonl --out packets.jsonl
+ *     --sample sample.jsonl --out packets.jsonl [--hide-tokens <regex>]
+ * --hide-tokens drops matching id/class tokens (case-insensitive), for checking
+ * a markup rule with a judge that cannot see the rule's evidence.
  * sample.jsonl rows: {itemId, sha256, url, anchorNodeId, href, anchorText}.
  * Output is PRIVATE (page text). Page content is hostile: parsed, never run.
  */
@@ -52,13 +54,15 @@ export function clean(text: string, max: number): string {
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
-function describe(el: El): string {
+function describe(el: El, hide: RegExp | null = null): string {
   const tag = (el.localName ?? "?").toLowerCase();
   const role = el.getAttribute("role");
-  const id = el.getAttribute("id");
+  const rawId = el.getAttribute("id");
+  const id = rawId && hide?.test(rawId) ? null : rawId;
   const classes = (el.getAttribute("class") ?? "")
     .split(/\s+/)
     .filter(Boolean)
+    .filter((c) => !hide?.test(c))
     .slice(0, 5)
     .map((c) => c.slice(0, 40));
   return [
@@ -110,7 +114,18 @@ function markedText(container: El, anchor: El): string {
   return parts.join("").replace(/\s+/g, " ").trim();
 }
 
-export function buildPacket(html: string, row: SampleRow): string | null {
+export interface PacketOptions {
+  /** Drop id and class tokens matching this from the outline, so a judge
+   *  checking a markup rule cannot read the rule's own evidence. */
+  hideTokens?: RegExp | null;
+}
+
+export function buildPacket(
+  html: string,
+  row: SampleRow,
+  options: PacketOptions = {},
+): string | null {
+  const hide = options.hideTokens ?? null;
   const { document } = parseHTML(html);
   const elements: unknown[] = [];
   featurizeDocument(document as never, row.url, { elementsOut: elements });
@@ -134,7 +149,7 @@ export function buildPacket(html: string, row: SampleRow): string | null {
   let pathLines = chain.map((el, depth) => {
     const i = indexOf.get(el)!;
     const marker = el === anchor ? "   <- THE LINK" : "";
-    return `${"  ".repeat(Math.min(depth, 24))}${describe(el)} [spans ${span(i)} of the document]${marker}`;
+    return `${"  ".repeat(Math.min(depth, 24))}${describe(el, hide)} [spans ${span(i)} of the document]${marker}`;
   });
   if (pathLines.length > MAX_PATH) {
     const keep = MAX_PATH / 2;
@@ -192,7 +207,7 @@ export function buildPacket(html: string, row: SampleRow): string | null {
     "ANCESTOR PATH (outermost first)",
     ...pathLines,
     "",
-    `TEXT AROUND THE LINK (inside ${describe(container)})`,
+    `TEXT AROUND THE LINK (inside ${describe(container, hide)})`,
     clean(context, 2 * CONTEXT_CHARS + 200),
     "",
     `OTHER LINKS IN THAT ELEMENT (${siblings.length}${siblings.length === MAX_SIBLING_LINKS ? "+" : ""})`,
@@ -200,9 +215,10 @@ export function buildPacket(html: string, row: SampleRow): string | null {
   ].join("\n");
 }
 
-function argument(name: string): string {
+function argument(name: string, fallback?: string): string {
   const index = Bun.argv.indexOf(name);
   const value = index < 0 ? undefined : Bun.argv[index + 1];
+  if (index < 0 && fallback !== undefined) return fallback;
   if (!value || value.startsWith("--")) throw new Error(`${name} needs a value`);
   return value;
 }
@@ -213,11 +229,13 @@ if (import.meta.main) {
     .split("\n")
     .filter(Boolean)
     .map((l) => JSON.parse(l) as SampleRow);
+  const hidePattern = argument("--hide-tokens", "");
+  const hideTokens = hidePattern ? new RegExp(hidePattern, "i") : null;
   const out: string[] = [];
   let missing = 0;
   for (const row of rows) {
     const html = decode(gunzipSync(readFileSync(`${input}/blobs/${row.sha256}.html.gz`)));
-    const packet = buildPacket(html, row);
+    const packet = buildPacket(html, row, { hideTokens });
     if (packet === null) {
       missing++;
       continue;

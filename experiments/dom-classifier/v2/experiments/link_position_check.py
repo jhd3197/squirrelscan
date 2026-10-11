@@ -22,6 +22,11 @@ text modality only. The judge never sees our answer. Usage guard as the adjudica
 the first item probes the window and the run goes on only below --start-below; it
 stops at --stop-utilization, a non-allowed status or any limit error.
 
+`sample-rule` / `score-rule` check a deterministic rule instead (the comments rule:
+the probe's `commentsRule` field): links where it fires vs where it is silent, then
+its precision, the judge's label rate on the silent links, and a recall estimate
+weighted by the probe's own fire/silent counts.
+
 `score` compares on the answered links: region by group (chrome, content, dialog,
 other) and exactly, and section where we answered one. Output is PRIVATE.
 """
@@ -138,6 +143,61 @@ def valid(answer: object) -> bool:
 # --------------------------------------------------------------------------- sample
 
 
+def pick_by_year(pool: list[dict], want: int, used_pages: set[str], rng: random.Random) -> list[dict]:
+    """Up to `want` rows, round-robin over year bins, shuffled within a bin, at
+    most one link per page across everything already in `used_pages`."""
+    by_year: dict[str, list[dict]] = defaultdict(list)
+    for row in pool:
+        by_year[row["key"].split("|")[1]].append(row)
+    for rows in by_year.values():
+        rng.shuffle(rows)
+    years = sorted(by_year)
+    chosen: list[dict] = []
+    while len(chosen) < want and any(by_year.values()):
+        for year in years:
+            while by_year[year] and by_year[year][0]["sha256"] in used_pages:
+                by_year[year].pop(0)
+            if by_year[year] and len(chosen) < want:
+                row = by_year[year].pop(0)
+                used_pages.add(row["sha256"])
+                chosen.append(row)
+    return chosen
+
+
+def interleave(queues: list[list[dict]]) -> list[dict]:
+    """Merge so that every prefix holds each queue in proportion to its size."""
+    order: list[dict] = []
+    weights = [len(q) for q in queues]
+    taken = [0] * len(queues)
+    while any(taken[i] < weights[i] for i in range(len(queues))):
+        i = min(
+            (i for i in range(len(queues)) if taken[i] < weights[i]),
+            key=lambda i: (taken[i] + 1) / weights[i],
+        )
+        order.append(queues[i][taken[i]])
+        taken[i] += 1
+    return order
+
+
+def sample_item(row: dict, item_id: str, pilot: bool) -> dict:
+    source, year, tld, state = row["key"].split("|")
+    return {
+        "itemId": item_id,
+        "sampleKey": f"{row['sha256']}:{row['anchorNodeId']}",
+        "pilot": pilot,
+        "sha256": row["sha256"],
+        "url": row["url"],
+        "anchorNodeId": row["anchorNodeId"],
+        "href": row["href"],
+        "anchorText": row["anchorText"],
+        "source": source,
+        "year_bin": year,
+        "tld_group": tld,
+        "state": state,
+        "ours": {k: row[k] for k in ("region", "regionGroup", "regionSource", "regionHops", "section")},
+    }
+
+
 def sample(args) -> None:
     rng = random.Random(args.seed)
     links = [r for r in jsonl(args.links) if r.get("matched") and r.get("anchorNodeId") is not None]
@@ -154,55 +214,56 @@ def sample(args) -> None:
     for source in sources:
         for answered, want in ((True, answered_n), (False, per_source - answered_n)):
             pool = [r for r in by_source[source] if (r["region"] != "unknown") == answered]
-            by_year: dict[str, list[dict]] = defaultdict(list)
-            for row in pool:
-                by_year[row["key"].split("|")[1]].append(row)
-            for rows in by_year.values():
-                rng.shuffle(rows)
-            years = sorted(by_year)
-            chosen: list[dict] = []
-            while len(chosen) < want and any(by_year.values()):
-                for year in years:
-                    while by_year[year] and by_year[year][0]["sha256"] in used_pages:
-                        by_year[year].pop(0)
-                    if by_year[year] and len(chosen) < want:
-                        row = by_year[year].pop(0)
-                        used_pages.add(row["sha256"])
-                        chosen.append(row)
-            picked[(source, answered)] = chosen
+            picked[(source, answered)] = pick_by_year(pool, want, used_pages, rng)
     # Interleave so any prefix is balanced by source and answered status: the pilot is a prefix.
-    order: list[dict] = []
-    queues = [list(picked[(s, a)]) for a in (True, False) for s in sources]
-    weights = [len(q) for q in queues]
-    taken = [0] * len(queues)
-    while any(taken[i] < weights[i] for i in range(len(queues))):
-        i = min(
-            (i for i in range(len(queues)) if taken[i] < weights[i]),
-            key=lambda i: (taken[i] + 1) / weights[i],
-        )
-        order.append(queues[i][taken[i]])
-        taken[i] += 1
+    order = interleave([picked[(s, a)] for a in (True, False) for s in sources])
     with args.out.open("w") as handle:
         for n, row in enumerate(order):
-            source, year, tld, state = row["key"].split("|")
-            item = {
-                "itemId": f"lp-{n:03d}",
-                "sampleKey": f"{row['sha256']}:{row['anchorNodeId']}",
-                "pilot": n < args.pilot,
-                "sha256": row["sha256"],
-                "url": row["url"],
-                "anchorNodeId": row["anchorNodeId"],
-                "href": row["href"],
-                "anchorText": row["anchorText"],
-                "source": source,
-                "year_bin": year,
-                "tld_group": tld,
-                "state": state,
-                "ours": {k: row[k] for k in ("region", "regionGroup", "regionSource", "regionHops", "section")},
-            }
-            handle.write(json.dumps(item) + "\n")
+            handle.write(json.dumps(sample_item(row, f"lp-{n:03d}", n < args.pilot)) + "\n")
     counts = Counter((r["key"].split("|")[0], r["region"] != "unknown") for r in order)
     print(json.dumps({"items": len(order), "bySourceAnswered": {f"{s}|{a}": c for (s, a), c in counts.items()}}))
+
+
+def sample_rule(args) -> None:
+    """Links where a deterministic rule fires vs where it is silent, for a blind
+    check of that rule: `--fires` and `--silent` links, split evenly over sources
+    (a short source's remainder goes to the others), round-robin over year bins,
+    one link per page, and no page from an `--exclude` sample."""
+    rng = random.Random(args.seed)
+    excluded = {r["sha256"] for path in args.exclude for r in jsonl(path)}
+    links = [
+        r
+        for r in jsonl(args.links)
+        if r.get("matched") and r.get("anchorNodeId") is not None and r["sha256"] not in excluded
+    ]
+    sources = sorted({r["key"].split("|")[0] for r in links})
+    if not sources:
+        raise SystemExit("no located links to sample")
+    used_pages: set[str] = set()
+    queues: list[list[dict]] = []
+    for fires, n in ((True, args.fires), (False, args.silent)):
+        pool = [r for r in links if (r.get(args.field) is not None) == fires]
+        chosen = [
+            pick_by_year([r for r in pool if r["key"].startswith(f"{source}|")], n // len(sources), used_pages, rng)
+            for source in sources
+        ]
+        short = n - sum(len(c) for c in chosen)
+        if short > 0:
+            chosen.append(pick_by_year([r for r in pool if r["sha256"] not in used_pages], short, used_pages, rng))
+        queues += [[{**r, "_stratum": "fires" if fires else "silent"} for r in c] for c in chosen if c]
+    order = interleave(queues)
+    with args.out.open("w") as handle:
+        for n, row in enumerate(order):
+            item = sample_item(row, f"{args.prefix}-{n:03d}", n < args.pilot)
+            item["stratum"] = row["_stratum"]
+            item["rule"] = {
+                args.field: row.get(args.field),
+                "token": row.get(f"{args.field}Token"),
+                "rel": row.get("rel", []),
+            }
+            handle.write(json.dumps(item) + "\n")
+    counts = Counter((r["_stratum"], r["key"].split("|")[0]) for r in order)
+    print(json.dumps({"items": len(order), "byStratumSource": {f"{a}|{b}": c for (a, b), c in sorted(counts.items())}}))
 
 
 # --------------------------------------------------------------------------- run
@@ -392,6 +453,79 @@ def score(args) -> None:
     print(json.dumps(report["all"]))
 
 
+def wilson(hits: int, n: int, z: float = 1.96) -> list[float] | None:
+    if n == 0:
+        return None
+    p = hits / n
+    centre = (p + z * z / (2 * n)) / (1 + z * z / n)
+    half = z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5) / (1 + z * z / n)
+    return [round(centre - half, 3), round(centre + half, 3)]
+
+
+def score_rule(args) -> None:
+    """Precision of the rule where it fires, the judge's `--label` rate where it
+    is silent, and recall estimated by weighting both with the probe's own counts
+    of firing and silent links per source. Output is PRIVATE."""
+    items = {i["itemId"]: i for i in jsonl(args.sample)}
+    answers = {
+        a["itemId"]: a
+        for a in jsonl(args.answers)
+        if not a.get("error")
+        and a["itemId"] in items
+        and a.get("sampleKey") == items[a["itemId"]]["sampleKey"]
+        and a.get("promptRevision") == PROMPT_REVISION
+        and a["evidence_quality"] != "unusable"
+    }
+    population: Counter[tuple[str, bool]] = Counter(
+        (r["key"].split("|")[0], r.get(args.field) is not None)
+        for r in jsonl(args.links)
+        if r.get("matched") and r.get("anchorNodeId") is not None
+    )
+    report: dict = {"promptRevision": PROMPT_REVISION, "field": args.field, "label": args.label, "bySource": {}}
+    sources = sorted({i["source"] for i in items.values()}) + ["all"]
+    for source in sources:
+        fires, silent = (
+            [
+                (items[k], a)
+                for k, a in answers.items()
+                if items[k]["stratum"] == stratum and source in ("all", items[k]["source"])
+            ]
+            for stratum in ("fires", "silent")
+        )
+        hits = sum(1 for i, a in fires if a["section"] == i["rule"][args.field])
+        misses = sum(1 for _, a in silent if a["section"] == args.label)
+        precision = hits / len(fires) if fires else None
+        miss_rate = misses / len(silent) if silent else None
+        n_fire = sum(c for (s, f), c in population.items() if f and source in ("all", s))
+        n_silent = sum(c for (s, f), c in population.items() if not f and source in ("all", s))
+        recall = None
+        if precision is not None and miss_rate is not None and precision * n_fire + miss_rate * n_silent > 0:
+            recall = round(precision * n_fire / (precision * n_fire + miss_rate * n_silent), 3)
+        report["bySource"][source] = {
+            "fires": len(fires),
+            "precision": round(precision, 3) if precision is not None else None,
+            "precision95": wilson(hits, len(fires)),
+            "firesJudgedAs": dict(Counter(a["section"] for _, a in fires).most_common()),
+            "firesRegionJudgedAs": dict(Counter(a["region"] for _, a in fires).most_common()),
+            "silent": len(silent),
+            "silentJudgedLabel": misses,
+            "missRate95": wilson(misses, len(silent)),
+            "populationFires": n_fire,
+            "populationSilent": n_silent,
+            "recallEstimate": recall,
+            "modelSectionOnFires": dict(Counter(i["ours"]["section"] for i, _ in fires).most_common()),
+            "ugcOnFires": sum(1 for i, _ in fires if "ugc" in (i["rule"].get("rel") or [])),
+            "ugcOnSilentJudgedLabel": sum(
+                1 for i, a in silent if a["section"] == args.label and "ugc" in (i["rule"].get("rel") or [])
+            ),
+        }
+    errors = sum(1 for a in jsonl(args.answers) if a.get("error"))
+    report["errors"] = errors
+    report["usd"] = round(sum(a.get("usd", 0.0) for a in answers.values()), 4)
+    args.out.write_text(json.dumps(report, indent=2) + "\n")
+    print(json.dumps({k: v for k, v in report["bySource"]["all"].items() if not k.endswith("JudgedAs")}))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -419,8 +553,25 @@ def main() -> None:
     p.add_argument("--sample", type=Path, required=True)
     p.add_argument("--answers", type=Path, required=True)
     p.add_argument("--out", type=Path, required=True)
+    p = sub.add_parser("sample-rule")
+    p.add_argument("--links", type=Path, required=True)
+    p.add_argument("--out", type=Path, required=True)
+    p.add_argument("--field", default="commentsRule")
+    p.add_argument("--fires", type=int, default=50)
+    p.add_argument("--silent", type=int, default=50)
+    p.add_argument("--exclude", type=Path, action="append", default=[])
+    p.add_argument("--prefix", default="cr")
+    p.add_argument("--pilot", type=int, default=20)
+    p.add_argument("--seed", type=int, default=2307)
+    p = sub.add_parser("score-rule")
+    p.add_argument("--sample", type=Path, required=True)
+    p.add_argument("--answers", type=Path, required=True)
+    p.add_argument("--links", type=Path, required=True)
+    p.add_argument("--out", type=Path, required=True)
+    p.add_argument("--field", default="commentsRule")
+    p.add_argument("--label", default="comments")
     args = parser.parse_args()
-    {"sample": sample, "run": run, "score": score}[args.cmd](args)
+    {"sample": sample, "run": run, "score": score, "sample-rule": sample_rule, "score-rule": score_rule}[args.cmd](args)
 
 
 if __name__ == "__main__":
