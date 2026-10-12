@@ -11,8 +11,11 @@ Placement is the guard (page-corpus README):
                labels -> labels/treetop/link-section-v1/<name>/{links,pages}.jsonl
   holdout run  pages  -> holdout/treetop/<name>/{blobs, manifest.jsonl}
                labels -> holdout/treetop/link-section-v1/<name>/{links,pages}.jsonl
+With `--merge-headers [<backfill dir> ...]` it instead rewrites `headers.jsonl` beside
+each side's manifest from the staging dir and the headers-only backfill runs.
+
 A train-run capture whose page content (sha256) already sits anywhere under
-holdout/ or gold/ goes to the holdout side instead: the same bytes must never
+holdout/ or gold/ goes to the holdout side instead, as `<name>-held`: the same bytes must never
 be readable by training. Place the holdout run first, so its pages count.
 
 Never overwrites: a destination manifest or label file that exists stops the
@@ -58,7 +61,9 @@ def split_rows(staging: Path, route: str, protected: set[str]) -> dict[str, dict
     manifest = read_jsonl(staging / "manifest.jsonl")
     held = {r["capture"] for r in manifest if route == "holdout" or (r["page_sha256"] or "") in protected}
     sides: dict[str, dict[str, list[dict]]] = {"train": {}, "holdout": {}}
-    for name in ("manifest", "links", "pages"):
+    for name in ("manifest", "links", "pages", "headers"):
+        if not (staging / f"{name}.jsonl").exists():
+            continue
         for row in read_jsonl(staging / f"{name}.jsonl"):
             side = "holdout" if row["capture"] in held else "train"
             sides[side].setdefault(name, []).append(row)
@@ -78,11 +83,17 @@ def write_side(staging: Path, side: str, files: dict[str, list[dict]], name: str
         "manifest": pages_dir / "manifest.jsonl",
         "links": labels_dir / "links.jsonl",
         "pages": labels_dir / "pages.jsonl",
+        "headers": pages_dir / "headers.jsonl",
     }
     for key, path in targets.items():
         if files.get(key) and path.exists():
             raise SystemExit(f"refusing to overwrite {path.relative_to(CORPUS)}")
-    shas = {r["page_sha256"] for r in files.get("manifest", []) if r["page_sha256"]}
+    # A row can carry a hash with no stored page (a response that was not HTML).
+    shas = {
+        r["page_sha256"]
+        for r in files.get("manifest", [])
+        if r["page_sha256"] and (staging / "blobs" / f"{r['page_sha256']}.html.gz").exists()
+    }
     counts = Counter({f"{side}:{key}": len(files.get(key, [])) for key in targets})
     counts[f"{side}:blobs"] = len(shas)
     if dry_run:
@@ -107,7 +118,40 @@ def place(staging: Path, name: str, dry_run: bool) -> Counter:
     counts: Counter = Counter()
     for side, files in split_rows(staging, route, protected_shas()).items():
         if files:
-            counts += write_side(staging, side, files, name, dry_run)
+            # Held-over captures of a train run get their own folder, so a holdout
+            # run of the same name never collides with them.
+            side_name = f"{name}-held" if side == "holdout" and route == "train" else name
+            counts += write_side(staging, side, files, side_name, dry_run)
+    return counts
+
+
+def merge_headers(staging: Path, extra: list[Path], name: str, dry_run: bool) -> Counter:
+    """(Re)write `headers.jsonl` beside each side's manifest from `staging` and the
+    headers-only backfill dirs in `extra`. It is derived data, so it may be rewritten."""
+    route = (staging / "route").read_text().strip()
+    sides = split_rows(staging, route, protected_shas())
+    side_of = {r["capture"]: side for side, files in sides.items() for r in files.get("manifest", [])}
+    held_name = f"{name}-held" if route == "train" else name
+    rows: dict[str, dict] = {}
+    for directory in [staging, *extra]:
+        path = directory / "headers.jsonl"
+        for row in read_jsonl(path) if path.exists() else []:
+            rows[row["capture"]] = row
+    counts: Counter = Counter()
+    out: dict[str, list[dict]] = {"train": [], "holdout": []}
+    for capture, row in rows.items():
+        if capture in side_of:
+            out[side_of[capture]].append(row)
+        else:
+            counts["headers_for_unknown_capture"] += 1
+    for side, side_rows in out.items():
+        counts[f"{side}:headers"] = len(side_rows)
+        counts[f"{side}:captures_without_headers"] = sum(1 for c, sd in side_of.items() if sd == side and c not in rows)
+        if side_rows and not dry_run:
+            pages_dir, _ = destinations(side, held_name if side == "holdout" else name)
+            if not pages_dir.exists():
+                raise SystemExit(f"{pages_dir.relative_to(CORPUS)} is not placed yet")
+            (pages_dir / "headers.jsonl").write_text("".join(json.dumps(r) + "\n" for r in side_rows))
     return counts
 
 
@@ -116,8 +160,18 @@ def main() -> None:
     parser.add_argument("--staging", type=Path, required=True)
     parser.add_argument("--name", required=True)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--merge-headers",
+        nargs="*",
+        type=Path,
+        default=None,
+        help="instead of placing, rewrite headers.jsonl from --staging and these headers-only backfill dirs",
+    )
     args = parser.parse_args()
-    print(json.dumps(dict(place(args.staging, args.name, args.dry_run))))
+    if args.merge_headers is not None:
+        print(json.dumps(dict(merge_headers(args.staging, args.merge_headers, args.name, args.dry_run))))
+    else:
+        print(json.dumps(dict(place(args.staging, args.name, args.dry_run))))
 
 
 if __name__ == "__main__":
