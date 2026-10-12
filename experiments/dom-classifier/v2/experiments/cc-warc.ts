@@ -139,10 +139,17 @@ export interface FetchOptions {
   /** First backoff in ms; doubles per retry, capped at 60 s, and each wait is
    *  drawn from its upper half (jitter that still waits). */
   backoffMs?: number;
-  /** Called on every throttle answer (503/429), for the run's circuit breaker. */
+  /** Called on every throttle answer, for the run's circuit breaker. */
   onThrottle?: (status: number) => void;
+  /** Awaited before every attempt, retries included: the run's rate limit. */
+  beforeAttempt?: () => Promise<void>;
   fetchImpl?: typeof fetch;
 }
+
+/** Answers that mean "slow down", not "no such record". CC documents 503
+ *  SlowDown; its CloudFront front also blocks an IP with 403 for minutes after
+ *  ~2k range requests in a few minutes (2026-10-09, ~13 requests/s). */
+export const THROTTLE_STATUSES: ReadonlySet<number> = new Set([403, 429, 503]);
 
 /** Fetch one record's bytes by HTTP range, backing off on throttling. */
 export async function fetchWarcRange(
@@ -157,6 +164,7 @@ export async function fetchWarcRange(
   let wait = options.backoffMs ?? 1000;
   let last = "";
   for (let attempt = 1; attempt <= tries; attempt++) {
+    await options.beforeAttempt?.();
     try {
       const response = await doFetch(url, {
         headers: { Range: `bytes=${offset}-${offset + length - 1}` },
@@ -168,7 +176,7 @@ export async function fetchWarcRange(
       }
       last = `HTTP ${response.status}`;
       await response.body?.cancel();
-      if (response.status === 503 || response.status === 429) options.onThrottle?.(response.status);
+      if (THROTTLE_STATUSES.has(response.status)) options.onThrottle?.(response.status);
       else if (response.status < 500) throw new WarcError(last);
     } catch (error) {
       if (error instanceof WarcError) throw error;

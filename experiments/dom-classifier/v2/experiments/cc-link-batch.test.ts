@@ -11,6 +11,7 @@ import {
   captureKey,
   domainHashOf,
   groupCaptures,
+  rateLimiter,
   routeRefusal,
   type Guard,
   type LocatorRow,
@@ -94,6 +95,27 @@ describe("fetchWarcRange", () => {
     expect(throttled).toBe(1);
   });
 
+  test("a CloudFront 403 is throttling: retried, reported, and spaced by beforeAttempt", async () => {
+    let calls = 0;
+    const seen: number[] = [];
+    let waits = 0;
+    const fake = (async () =>
+      ++calls < 3
+        ? new Response("blocked", { status: 403 })
+        : ok(new Uint8Array(4))) as unknown as typeof fetch;
+    const bytes = await fetchWarcRange("f", 0, 4, {
+      fetchImpl: fake,
+      backoffMs: 1,
+      onThrottle: (status) => seen.push(status),
+      beforeAttempt: async () => {
+        waits++;
+      },
+    });
+    expect(bytes.length).toBe(4);
+    expect(seen).toEqual([403, 403]);
+    expect(waits).toBe(3);
+  });
+
   test("a 404 or a short read fails at once; endless 503s give up", async () => {
     const answer = (status: number, size = 0) =>
       (async () =>
@@ -129,6 +151,15 @@ const row = (over: Partial<LocatorRow> = {}): LocatorRow => {
     ...over,
   };
 };
+
+describe("rateLimiter", () => {
+  test("spaces waiting callers by the gap", async () => {
+    const wait = rateLimiter(50); // 20 ms apart
+    const started = Date.now();
+    await Promise.all([wait(), wait(), wait(), wait()]);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(55);
+  });
+});
 
 describe("groupCaptures", () => {
   test("one capture per byte range; rows naming it merge links and ids", () => {

@@ -5,7 +5,7 @@
  *
  *   bun run experiments/cc-link-batch.ts --locators <a.jsonl[,b.jsonl]> \
  *     --artifact classifier-v2.json --guard guard.json --out <dir> \
- *     [--corpus /corpus] [--concurrency 8] [--budget-ms 500] [--limit N]
+ *     [--corpus /corpus] [--concurrency 8] [--rate 4] [--budget-ms 500] [--limit N]
  *
  * Locator rows (DG): {locator_id, crawl, warc_filename, offset, length,
  *   source_url, domain_hash, bucket, sealed, links: [{href, anchor_text}],
@@ -19,9 +19,11 @@
  *   The caller writes the output dir to the folder for that route, so the
  *   placement rule holds by construction.
  *
- * Politeness: at most `--concurrency` requests in flight (default 8), backoff
- * with jitter on 503/429 (cc-warc.ts), and a circuit breaker that stops
- * starting fetches once throttling dominates; the rest are reported unfetched.
+ * Politeness: at most `--concurrency` requests in flight (default 8), at most
+ * `--rate` attempts per second across them (default 4: CC's CloudFront
+ * blocked an IP at ~13/s), backoff with jitter on 403/429/503 (cc-warc.ts),
+ * and a circuit breaker that stops starting fetches once throttling
+ * dominates; the rest are reported unfetched.
  *
  * Output (PRIVATE: URLs, HTML):
  *   blobs/<sha256>.html.gz  the HTTP body as CC stores it (DG's convention)
@@ -123,6 +125,18 @@ export function groupCaptures(rows: readonly LocatorRow[]): Capture[] {
   return [...byKey.values()];
 }
 
+/** Spaces calls `1000 / perSecond` ms apart, however many callers wait. */
+export function rateLimiter(perSecond: number): () => Promise<void> {
+  const gap = 1000 / perSecond;
+  let next = 0;
+  return async () => {
+    const now = Date.now();
+    const at = Math.max(now, next);
+    next = at + gap;
+    if (at > now) await Bun.sleep(at - now);
+  };
+}
+
 /** Why a capture must not be fetched into this route's folder, or null. */
 export function routeRefusal(
   row: LocatorRow,
@@ -189,6 +203,8 @@ async function main(): Promise<void> {
   const outDir = argument("--out");
   const corpus = argument("--corpus", "/corpus");
   const concurrency = Math.max(1, Math.min(8, Number(argument("--concurrency", "8"))));
+  const rate = Math.max(0.1, Math.min(8, Number(argument("--rate", "4"))));
+  const limit_ = rateLimiter(rate);
   const budgetMs = Number(argument("--budget-ms", "500"));
   const limit = Number(argument("--limit", "0"));
   const guard = JSON.parse(readFileSync(argument("--guard"), "utf8")) as Guard;
@@ -218,7 +234,7 @@ async function main(): Promise<void> {
 
   // Circuit breaker: the last 200 fetch attempts, 1 = throttled.
   const recent: number[] = [];
-  let throttles = 0;
+  const throttles: Record<string, number> = {};
   let tripped = false;
   const note = (throttled: boolean) => {
     recent.push(throttled ? 1 : 0);
@@ -265,10 +281,11 @@ async function main(): Promise<void> {
     const t = performance.now();
     try {
       const member = await fetchWarcRange(row.warc_filename, row.offset, row.length, {
-        onThrottle: () => {
-          throttles++;
+        onThrottle: (status) => {
+          throttles[status] = (throttles[status] ?? 0) + 1;
           note(true);
         },
+        beforeAttempt: limit_,
       });
       note(false);
       const record = parseWarcRecord(member);
@@ -445,6 +462,7 @@ async function main(): Promise<void> {
     rows: rows.length,
     captures: captures.length,
     concurrency,
+    rate,
     budgetMs,
     statuses,
     throttles,

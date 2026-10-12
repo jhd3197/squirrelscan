@@ -2,10 +2,10 @@
 
 DomainGenius's linking pages exist only as Common Crawl WARC locators. One
 Modal container at a time fetches them from data.commoncrawl.org (the batch
-holds at most 8 requests in flight and backs off on 503), reads pages DG
-already stored from the page-corpus volume mounted read-only, places the
-backlinks with the runtime, and returns each chunk as a tarball. Nothing is
-written to any volume.
+holds at most 8 requests in flight, about 4 attempts a second, and backs off
+on 403/429/503), reads pages DG already stored from the page-corpus volume
+mounted read-only, places the backlinks with the runtime, and returns each
+chunk as a tarball. Nothing is written to any volume.
 
 One run is one route. The entrypoint refuses locator rows whose recomputed
 bucket, sealed flag or gold domain does not fit `--route`, the batch re-checks
@@ -72,7 +72,7 @@ def preflight(rows: list[dict], route: str, sealed: set[str], gold: set[str]) ->
 
 
 @app.function(cpu=2, memory=8192, timeout=3 * 3600, volumes={"/corpus": corpus}, max_containers=1)
-def run_chunk(bundle: bytes, artifact: bytes, guard: bytes, locators: bytes, concurrency: int) -> dict:
+def run_chunk(bundle: bytes, artifact: bytes, guard: bytes, locators: bytes, concurrency: int, rate: float) -> dict:
     import subprocess
 
     job = Path("/root/job")
@@ -104,6 +104,8 @@ def run_chunk(bundle: bytes, artifact: bytes, guard: bytes, locators: bytes, con
             "/corpus",
             "--concurrency",
             str(concurrency),
+            "--rate",
+            str(rate),
         ],
         cwd="/root",
         capture_output=True,
@@ -181,6 +183,7 @@ def main(
     chunk: int = 2000,
     seed: int = 2307,
     concurrency: int = 8,
+    rate: float = 4.0,
 ) -> None:
     if route not in ("train", "holdout"):
         raise SystemExit("--route must be train or holdout")
@@ -211,7 +214,7 @@ def main(
     for start in range(0, len(todo), chunk):
         keys = todo[start : start + chunk]
         payload = "".join(json.dumps(row) + "\n" for key in keys for row in by_capture[key]).encode()
-        result = run_chunk.remote(bundle_bytes, artifact_bytes, guard, payload, concurrency)
+        result = run_chunk.remote(bundle_bytes, artifact_bytes, guard, payload, concurrency, rate)
         if result["returncode"] != 0:
             print(result["stdout"], result["stderr"])
             raise SystemExit(f"chunk at {start} failed: returncode {result['returncode']}")
