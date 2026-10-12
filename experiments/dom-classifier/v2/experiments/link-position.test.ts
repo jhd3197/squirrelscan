@@ -110,6 +110,30 @@ describe("linkPositions with manifest links", () => {
   });
 });
 
+describe("anchors outside the walk", () => {
+  test("a link in a second <body> or after </body> is located, with no region", () => {
+    const html = `<!doctype html><html><head><title>t</title></head><body>
+      <main><p>Text <a href="https://in.example.org/">in</a></p></main></body>
+      <body><div class="footer-links"><a href="https://second.example.org/">second</a></div></body>
+      <a href="https://after.example.org/">after</a></html>`;
+    const { result, elements } = classify(html);
+    const rows = linkPositions(PAGE, result, elements, [
+      { href: "https://in.example.org/" },
+      { href: "https://second.example.org/" },
+      { href: "https://after.example.org/" },
+    ]);
+    expect(rows.map((r) => [r.matched, r.inWalk])).toEqual([
+      [true, true],
+      [true, false],
+      [true, false],
+    ]);
+    expect(rows[1]!.region).toBe("unknown");
+    expect(rows[1]!.anchorNodeId).toBeNull();
+    const all = linkPositions(PAGE, result, elements).map((r) => r.href);
+    expect(all).toContain("https://after.example.org/");
+  });
+});
+
 describe("section lookup", () => {
   test("is independent of the region lookup", () => {
     const { result, elements } = classify();

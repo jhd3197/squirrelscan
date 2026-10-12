@@ -32,6 +32,7 @@ import { gunzipSync } from "node:zlib";
 import { parse as parseDomain } from "tldts";
 
 import { parseHTML } from "../../../../packages/parser/src/dom.ts";
+import { SKIP_SUBTREE } from "../featurize.ts";
 import { elementPlacer } from "../runtime/placement.ts";
 import { classifyDocument, tryLoadModel, type PageClassification } from "../runtime/predict.ts";
 
@@ -101,6 +102,9 @@ export interface LinkPosition {
   rel: string[];
   /** nodeId of the anchor itself, for building an outline around it. */
   anchorNodeId: number | null;
+  /** False when the anchor sits outside the featurizer's walk (a second
+   *  <body>, or content after </body>): located, but no region can answer. */
+  inWalk: boolean;
 }
 
 const CHROME = new Set(["site_header", "navigation", "footer", "sidebar"]);
@@ -193,6 +197,14 @@ function normaliseText(text: string): string {
   return text.replace(/\s+/g, " ").trim().toLowerCase();
 }
 
+/** Inside <svg>, <template>, <noscript> or another subtree the featurizer
+ *  skips on purpose: not a link a reader follows. */
+function inSkippedSubtree(el: DomElement): boolean {
+  for (let up: DomElement | null | undefined = el; up; up = up.parentElement)
+    if (SKIP_SUBTREE.has((up.localName ?? "").toLowerCase())) return true;
+  return false;
+}
+
 interface DomElement {
   localName?: string;
   parentElement?: DomElement | null;
@@ -218,10 +230,25 @@ export function linkPositions(
   for (let i = 0; i < elements.length; i++) idOf.set(elements[i], i);
   const place = elementPlacer(result, elements);
 
-  // Every walked anchor with an http(s) target, keyed by resolved href.
+  // Every anchor with an http(s) target, keyed by resolved href: the walked
+  // ones first, then those the walk never reached. linkedom keeps a second
+  // <body>, and content after </body>, outside document.body, where the
+  // featurizer starts (4% of DomainGenius's links on the 2026-10-12 CC pilot).
+  // Such a link is on the page, so it is located, but no labelled node sits
+  // above it: its region is unknown, and only the comments rule can place it.
   const anchors = new Map<string, Array<{ el: DomElement; href: string; text: string }>>();
   const order: Array<{ el: DomElement; href: string; text: string }> = [];
-  for (const raw of elements) {
+  const document = (
+    elements[0] as
+      | { ownerDocument?: { querySelectorAll(s: string): ArrayLike<unknown> } }
+      | undefined
+  )?.ownerDocument;
+  const stray = document
+    ? Array.from(document.querySelectorAll("a[href]")).filter(
+        (el) => !idOf.has(el) && !inSkippedSubtree(el as DomElement),
+      )
+    : [];
+  for (const raw of [...elements, ...stray]) {
     const el = raw as DomElement;
     if ((el.localName ?? "").toLowerCase() !== "a") continue;
     const attr = el.getAttribute("href");
@@ -271,6 +298,7 @@ export function linkPositions(
       commentsRuleToken: null,
       rel: [],
       anchorNodeId: entry ? (idOf.get(entry.el) ?? null) : null,
+      inWalk: entry ? idOf.has(entry.el) : false,
     };
     if (entry) {
       const rel = (entry.el.getAttribute("rel") ?? "").toLowerCase().split(/\s+/);
