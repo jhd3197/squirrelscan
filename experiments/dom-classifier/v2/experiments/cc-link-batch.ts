@@ -46,13 +46,10 @@ import { parseHTML } from "../../../../packages/parser/src/dom.ts";
 import type { Model } from "../runtime/model-format.ts";
 import { classifyDocument, tryLoadModel } from "../runtime/predict.ts";
 import { fetchWarcRange, parseWarcRecord, redact, WarcError } from "./cc-warc.ts";
-import {
-  decode,
-  linkPositions,
-  percentile,
-  type LinkPosition,
-  type ManifestLink,
-} from "./link-position.ts";
+import { a16Row } from "./link-sections.ts";
+
+export { a16Row };
+import { decode, linkPositions, percentile, type ManifestLink } from "./link-position.ts";
 
 export interface LocatorRow {
   locator_id: string;
@@ -158,32 +155,6 @@ export function routeRefusal(
   if (route !== guard.route) return "route_mismatch";
   if (guard.route === "train" && gold.has(hash)) return "gold_domain";
   return null;
-}
-
-/** DG's A16 link row: the comments rule, else the section, else the region. */
-export function a16Row(p: LinkPosition): Record<string, unknown> {
-  let section = "unknown";
-  let conf: number | null = null;
-  let evidence: string | null = null;
-  let source: string | null = null;
-  if (p.commentsRule) {
-    [section, conf, evidence, source] = [p.commentsRule, 1, p.commentsRuleToken, "rule"];
-  } else if (p.section) {
-    [section, conf, source] = [p.section, p.sectionConfidence, p.sectionSource ?? "model"];
-  } else if (p.region !== "unknown") {
-    [section, conf, source] = [p.region, p.regionConfidence, p.regionSource];
-  }
-  return {
-    i: p.i,
-    href: p.href,
-    section,
-    region: p.region,
-    rel: p.rel,
-    conf: conf === null ? null : Math.round(conf * 10_000) / 10_000,
-    evidence,
-    // Markup answers (the comments rule, a <footer>) are deterministic.
-    source: source === "rules" ? "rule" : source,
-  };
 }
 
 const HTML_TYPES = /^(?:text\/html|application\/xhtml\+xml)\b/i;
