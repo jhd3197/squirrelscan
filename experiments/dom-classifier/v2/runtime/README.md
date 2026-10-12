@@ -125,6 +125,22 @@ the rules path encodes that.
 *Decided by the coordinating agent on 2026-09-20, pending the user's
 confirmation.*
 
+### `site_chrome`: the grouped fallback
+
+The strict class thresholds answer 44% of nodes (precision 0.957) and leave 56% `unknown`. For nodes
+the thresholds leave unknown, the runtime answers `site_chrome` when the SUM of the header, footer,
+navigation and sidebar probabilities is at least 0.8 (`region-groups.ts`): the model is often sure a
+node is furniture when it is not sure which of the four. Measured on the region head's 5-fold
+out-of-fold probabilities (5.4M nodes, silver labels): precision 0.965 (worst fold 0.961), answering
+29% more nodes, 73% in all. At 0.70 every major platform is at 0.94 or better. Two sibling groups
+were measured and rejected: content (never reaches 0.95) and form/search/dialog (0.87 on custom sites).
+
+- `source` is `model`, `confidence` is the group's summed probability.
+- A chrome class the platform guard abstains does not count towards the group.
+- `groupFallback: false`, or any `threshold` override, turns it off (a per-class evaluation).
+- It never fires without a model. On the 1,000 CC link-context probe pages, links with a region
+  answer went from 69.8% to 73.1%; most unanswered links sit in page content, which this does not claim.
+
 ### Comment threads: the comments rule
 
 `comments-rule.ts` reads comment threads from the markup: an id or class token

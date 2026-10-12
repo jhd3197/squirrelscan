@@ -107,7 +107,7 @@ export interface LinkPosition {
   inWalk: boolean;
 }
 
-const CHROME = new Set(["site_header", "navigation", "footer", "sidebar"]);
+const CHROME = new Set(["site_header", "navigation", "footer", "sidebar", "site_chrome"]);
 const BACKLINK_REL = ["ugc", "nofollow", "sponsored"];
 
 export function regionGroup(label: string): RegionGroup {

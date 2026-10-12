@@ -27,6 +27,9 @@ export type RegionLabel =
   | "form"
   | "search"
   | "dialog"
+  /** Header, footer, navigation or sidebar, when the model is sure of the group but not of which
+   *  (runtime/region-groups.ts). Never produced by the rules path. */
+  | "site_chrome"
   | "unknown";
 
 /** The 11 classes the model head emits, plus "unknown" for the rules path.

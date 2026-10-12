@@ -34,6 +34,7 @@ import {
 } from "./model-format.ts";
 import { commentRule, type CommentSection } from "./comments-rule.ts";
 import { platformBucket, platformOf } from "./platform.ts";
+import { chromeIndices, chromeMass, SITE_CHROME_THRESHOLD } from "./region-groups.ts";
 import {
   declaresOwnRegion,
   isRootPath,
@@ -133,6 +134,10 @@ export interface ClassifyOptions {
   /** Analysis only: receives wall-clock ms per stage, so a bench can time the
    *  heads directly instead of subtracting a separate featurize run. */
   timingsOut?: ClassifyTimings;
+  /** Answer `site_chrome` for nodes the class thresholds leave unknown when the chrome classes'
+   *  summed probability reaches the CV-calibrated threshold (runtime/region-groups.ts). Default
+   *  true; off whenever `threshold` is overridden, since that is a per-class evaluation. */
+  groupFallback?: boolean;
   /** Rows scored per tree pass (see `scoreRows`); 1 is the row-at-a-time walk.
    *  Scores are identical either way; only the speed differs. */
   scoringBatch?: number;
@@ -265,6 +270,10 @@ export function classifyDocument(
   const nodes: NodePrediction[] = [];
   const scores = usable ? new Float32Array(usable.region.numClass) : null;
   const regionThresholds = usable ? thresholdsFor(usable.region, platform) : null;
+  const chrome =
+    usable && (options.groupFallback ?? true) && options.threshold === undefined
+      ? chromeIndices(usable.region.classes, regionThresholds!)
+      : [];
   let values: Float32Array | null = null;
   let previousTokens: number[] | null = null;
   let budgetSpent = false;
@@ -305,6 +314,8 @@ export function classifyDocument(
         row++;
         const { index, probability } = softmax(rowScores);
         const threshold = options.threshold ?? regionThresholds![index]!;
+        const mass =
+          probability >= threshold || chrome.length === 0 ? 0 : chromeMass(rowScores, chrome);
         nodes.push(
           probability >= threshold
             ? {
@@ -313,14 +324,16 @@ export function classifyDocument(
                 confidence: probability,
                 source: "model",
               }
-            : {
-                nodeRef,
-                label: "unknown",
-                confidence: 0,
-                source: "model",
-                rawLabel: usable.region.classes[index],
-                rawConfidence: probability,
-              },
+            : mass >= SITE_CHROME_THRESHOLD
+              ? { nodeRef, label: "site_chrome", confidence: mass, source: "model" }
+              : {
+                  nodeRef,
+                  label: "unknown",
+                  confidence: 0,
+                  source: "model",
+                  rawLabel: usable.region.classes[index],
+                  rawConfidence: probability,
+                },
         );
       }
     }
@@ -366,6 +379,7 @@ export function classifyDocument(
       // precision curves differ by 40 points, and the single value the old rule
       // selected (0.95) left two thirds of nodes unnamed.
       const threshold = options.threshold ?? regionThresholds![index]!;
+      const mass = probability >= threshold || chrome.length === 0 ? 0 : chromeMass(scores, chrome);
       if (probability >= threshold) {
         nodes.push({
           nodeRef,
@@ -373,6 +387,8 @@ export function classifyDocument(
           confidence: probability,
           source: "model",
         });
+      } else if (mass >= SITE_CHROME_THRESHOLD) {
+        nodes.push({ nodeRef, label: "site_chrome", confidence: mass, source: "model" });
       } else {
         // The model was asked and declined. That is a MODEL answer of "unknown",
         // not a rules answer: saying `source: "rules"` here would claim the
