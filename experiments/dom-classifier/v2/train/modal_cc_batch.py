@@ -73,7 +73,16 @@ def preflight(rows: list[dict], route: str, sealed: set[str], gold: set[str]) ->
         raise SystemExit(f"preflight refused {sum(bad.values())} rows for route {route}: {bad}")
 
 
-@app.function(cpu=2, memory=8192, timeout=3 * 3600, volumes={"/corpus": corpus}, max_containers=1)
+@app.function(
+    cpu=2,
+    memory=8192,
+    timeout=3 * 3600,
+    volumes={"/corpus": corpus},
+    max_containers=1,
+    # HTTPS_PROXY_URL for the batch's outbound CC requests (cc-warc.ts reads it).
+    # Created once: modal secret create treetop-cc-proxy HTTPS_PROXY_URL=<url> (never commit the URL)
+    secrets=[modal.Secret.from_name("treetop-cc-proxy")],
+)
 def run_chunk(bundle: bytes, artifact: bytes, guard: bytes, locators: bytes, concurrency: int, rate: float) -> dict:
     import subprocess
 

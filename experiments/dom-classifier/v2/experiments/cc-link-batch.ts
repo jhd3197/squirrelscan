@@ -41,7 +41,7 @@ import { parse as parseDomain } from "tldts";
 import { parseHTML } from "../../../../packages/parser/src/dom.ts";
 import type { Model } from "../runtime/model-format.ts";
 import { classifyDocument, tryLoadModel } from "../runtime/predict.ts";
-import { fetchWarcRange, parseWarcRecord, WarcError } from "./cc-warc.ts";
+import { fetchWarcRange, parseWarcRecord, redact, WarcError } from "./cc-warc.ts";
 import {
   decode,
   linkPositions,
@@ -208,6 +208,8 @@ async function main(): Promise<void> {
   const concurrency = Math.max(1, Math.min(8, Number(argument("--concurrency", "8"))));
   const rate = Math.max(0.1, Math.min(8, Number(argument("--rate", "4"))));
   const limit_ = rateLimiter(rate);
+  // Optional egress proxy from the environment (a Modal secret on Modal).
+  const proxy = process.env.HTTPS_PROXY_URL || null;
   const budgetMs = Number(argument("--budget-ms", "500"));
   const limit = Number(argument("--limit", "0"));
   const guard = JSON.parse(readFileSync(argument("--guard"), "utf8")) as Guard;
@@ -289,6 +291,7 @@ async function main(): Promise<void> {
           note(true);
         },
         beforeAttempt: limit_,
+        proxy,
       });
       note(false);
       const record = parseWarcRecord(member);
@@ -316,8 +319,8 @@ async function main(): Promise<void> {
     } catch (error) {
       const status =
         error instanceof WarcError
-          ? `warc_error: ${error.message}`
-          : `error: ${String(error).slice(0, 120)}`;
+          ? `warc_error: ${redact(error.message, proxy)}`
+          : `error: ${redact(String(error), proxy).slice(0, 120)}`;
       return {
         outcome: {
           status: status.slice(0, 160),
@@ -466,6 +469,7 @@ async function main(): Promise<void> {
     captures: captures.length,
     concurrency,
     rate,
+    proxy: proxy !== null,
     budgetMs,
     statuses,
     throttles,

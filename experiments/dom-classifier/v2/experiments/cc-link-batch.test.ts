@@ -16,7 +16,7 @@ import {
   type Guard,
   type LocatorRow,
 } from "./cc-link-batch.ts";
-import { dechunk, fetchWarcRange, parseWarcRecord, WarcError } from "./cc-warc.ts";
+import { dechunk, fetchWarcRange, parseWarcRecord, redact, WarcError } from "./cc-warc.ts";
 import type { LinkPosition } from "./link-position.ts";
 
 const enc = new TextEncoder();
@@ -71,6 +71,42 @@ describe("parseWarcRecord", () => {
     );
     expect(() => parseWarcRecord(gzipSync(enc.encode("not a warc")))).toThrow(WarcError);
     expect(() => dechunk(enc.encode("zz\r\n"))).toThrow(WarcError);
+  });
+});
+
+describe("proxy", () => {
+  const proxy = "https://user_x:p%40ss+w0rd@proxy.example.org:8000";
+
+  test("is passed to fetch when set, and omitted when not", async () => {
+    const seen: Array<unknown> = [];
+    const fake = (async (_url: string, init?: RequestInit & { proxy?: string }) => {
+      seen.push(init?.proxy);
+      return new Response(Buffer.alloc(4), { status: 206 });
+    }) as unknown as typeof fetch;
+    await fetchWarcRange("f", 0, 4, { fetchImpl: fake, proxy });
+    await fetchWarcRange("f", 0, 4, { fetchImpl: fake });
+    expect(seen).toEqual([proxy, undefined]);
+  });
+
+  test("redact removes the URL, the user and the password in either form", () => {
+    const text = `connect failed via ${proxy} as user_x with p%40ss+w0rd (p@ss+w0rd)`;
+    const out = redact(text, proxy);
+    for (const secret of ["user_x", "p%40ss+w0rd", "p@ss+w0rd", "proxy.example.org:8000"])
+      expect(out.includes(secret) && secret !== "proxy.example.org:8000").toBe(false);
+    expect(redact("nothing here", null)).toBe("nothing here");
+  });
+
+  test("a failing fetch's message never carries the proxy credentials", async () => {
+    const fake = (async () => {
+      throw new Error(`ProxyConnectionRefused ${proxy}`);
+    }) as unknown as typeof fetch;
+    await expect(fetchWarcRange("f", 0, 4, { fetchImpl: fake, proxy, tries: 1 })).rejects.toThrow(
+      /gave up after 1 tries/,
+    );
+    await fetchWarcRange("f", 0, 4, { fetchImpl: fake, proxy, tries: 1 }).catch((e) => {
+      expect(String(e.message)).not.toContain("user_x");
+      expect(String(e.message)).not.toContain("w0rd");
+    });
   });
 });
 

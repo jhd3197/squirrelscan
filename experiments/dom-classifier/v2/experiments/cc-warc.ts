@@ -143,7 +143,25 @@ export interface FetchOptions {
   onThrottle?: (status: number) => void;
   /** Awaited before every attempt, retries included: the run's rate limit. */
   beforeAttempt?: () => Promise<void>;
+  /** An HTTP(S) proxy URL (credentials included) for every request, or none.
+   *  Read from `HTTPS_PROXY_URL` by the batch; never logged: failure text is
+   *  scrubbed of it (`redact`). */
+  proxy?: string | null;
   fetchImpl?: typeof fetch;
+}
+
+/** `text` with every part of the proxy URL that could carry a credential removed. */
+export function redact(text: string, proxy: string | null | undefined): string {
+  if (!proxy) return text;
+  let out = text.split(proxy).join("[proxy]");
+  try {
+    const url = new URL(proxy);
+    for (const secret of [url.password, decodeURIComponent(url.password), url.username])
+      if (secret) out = out.split(secret).join("[redacted]");
+  } catch {
+    // Not a URL: the whole-string replacement above is all there is.
+  }
+  return out;
 }
 
 /** Answers that mean "slow down", not "no such record". CC documents 503
@@ -168,6 +186,7 @@ export async function fetchWarcRange(
     try {
       const response = await doFetch(url, {
         headers: { Range: `bytes=${offset}-${offset + length - 1}` },
+        ...(options.proxy ? { proxy: options.proxy } : {}),
       });
       if (response.status === 206) {
         const bytes = new Uint8Array(await response.arrayBuffer());
@@ -180,7 +199,7 @@ export async function fetchWarcRange(
       else if (response.status < 500) throw new WarcError(last);
     } catch (error) {
       if (error instanceof WarcError) throw error;
-      last = String(error).slice(0, 200);
+      last = redact(String(error), options.proxy).slice(0, 200);
     }
     if (attempt < tries) {
       const cap = Math.min(wait, 60_000);
