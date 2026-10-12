@@ -28,6 +28,10 @@
  * Output (PRIVATE: URLs, HTML):
  *   blobs/<sha256>.html.gz  the HTTP body as CC stores it (DG's convention)
  *   manifest.jsonl          one row per capture, with fetch status
+ *   headers.jsonl           per capture: warc_date, WARC record headers and HTTP
+ *                           response headers (cookie values dropped). With
+ *                           `--headers-only`, only manifest.jsonl and this are
+ *                           written (a backfill: no blobs, no labels).
  *   links.jsonl             DG's A16 shape plus locator_id and capture
  *   pages.jsonl             per-capture section counts
  *   stats.json
@@ -193,6 +197,11 @@ interface Outcome {
   fetched: "cc_warc" | "store" | null;
   fetchMs: number | null;
   truncated?: string | null;
+  headers?: {
+    warc_date: string | null;
+    warc_headers: Record<string, string>;
+    http_headers: Record<string, string>;
+  };
 }
 
 function argument(name: string, fallback?: string): string {
@@ -232,6 +241,9 @@ async function main(): Promise<void> {
   const manifest = Bun.file(`${outDir}/manifest.jsonl`).writer();
   const linksOut = Bun.file(`${outDir}/links.jsonl`).writer();
   const pagesOut = Bun.file(`${outDir}/pages.jsonl`).writer();
+  const headersOut = Bun.file(`${outDir}/headers.jsonl`).writer();
+  // Backfill: fetch for the WARC and HTTP headers only, no blobs, no labels.
+  const headersOnly = Bun.argv.includes("--headers-only");
   const statuses: Record<string, number> = {};
   const fetchMs: number[] = [];
   const classifyMs: number[] = [];
@@ -253,7 +265,7 @@ async function main(): Promise<void> {
   ): Promise<{ outcome: Outcome; body: Uint8Array | null }> => {
     const row = capture.row;
     const have = row.have_sha256;
-    if (have && existsSync(`${corpus}/pages/blobs/${have}.html.gz`)) {
+    if (!headersOnly && have && existsSync(`${corpus}/pages/blobs/${have}.html.gz`)) {
       const body = gunzipSync(readFileSync(`${corpus}/pages/blobs/${have}.html.gz`));
       const sha = createHash("sha256").update(body).digest("hex");
       if (sha === have)
@@ -304,6 +316,11 @@ async function main(): Promise<void> {
         fetched: "cc_warc" as const,
         fetchMs: ms,
         truncated: record.truncated,
+        headers: {
+          warc_date: record.warcDate,
+          warc_headers: record.warcHeaders,
+          http_headers: record.httpHeaders,
+        },
       };
       if (record.httpStatus !== 200)
         return { outcome: { ...base, status: `http_${record.httpStatus}` }, body: null };
@@ -396,7 +413,12 @@ async function main(): Promise<void> {
     refusal: string | null,
   ) => {
     let status = refusal ?? outcome.status;
-    if (body && outcome.sha256) {
+    if (outcome.headers) {
+      headersOut.write(
+        `${JSON.stringify({ capture: capture.key, page_sha256: outcome.sha256, ...outcome.headers })}\n`,
+      );
+    }
+    if (body && outcome.sha256 && !headersOnly) {
       const blob = `${outDir}/blobs/${outcome.sha256}.html.gz`;
       if (!existsSync(blob)) writeFileSync(blob, gzipSync(body));
       try {
@@ -458,7 +480,7 @@ async function main(): Promise<void> {
     }
   };
   await Promise.all(Array.from({ length: concurrency }, worker));
-  await Promise.all([manifest.end(), linksOut.end(), pagesOut.end()]);
+  await Promise.all([manifest.end(), linksOut.end(), pagesOut.end(), headersOut.end()]);
 
   const round = (v: number | null) => (v === null ? null : Math.round(v));
   const stats = {

@@ -16,7 +16,14 @@ import {
   type Guard,
   type LocatorRow,
 } from "./cc-link-batch.ts";
-import { dechunk, fetchWarcRange, parseWarcRecord, redact, WarcError } from "./cc-warc.ts";
+import {
+  dechunk,
+  fetchWarcRange,
+  headerObject,
+  parseWarcRecord,
+  redact,
+  WarcError,
+} from "./cc-warc.ts";
 import type { LinkPosition } from "./link-position.ts";
 
 const enc = new TextEncoder();
@@ -71,6 +78,37 @@ describe("parseWarcRecord", () => {
     );
     expect(() => parseWarcRecord(gzipSync(enc.encode("not a warc")))).toThrow(WarcError);
     expect(() => dechunk(enc.encode("zz\r\n"))).toThrow(WarcError);
+  });
+});
+
+describe("headers", () => {
+  test("headerObject drops cookie values and cuts long ones", () => {
+    const out = headerObject(
+      new Map([
+        ["set-cookie", "sid=secret"],
+        ["x-long", "a".repeat(5000)],
+        ["server", "nginx"],
+      ]),
+    );
+    expect(out["set-cookie"]).toBe("[dropped]");
+    expect(out["x-long"]!.length).toBe(1000);
+    expect(out.server).toBe("nginx");
+  });
+
+  test("a parsed record carries the WARC date and both header sets", () => {
+    const rec = parseWarcRecord(
+      record(
+        "HTTP/1.1 200 OK\r\nServer: nginx\r\nSet-Cookie: sid=secret",
+        enc.encode("<p>x</p>"),
+        "response",
+        "WARC-Date: 2025-03-01T10:00:00Z\r\n",
+      ),
+    );
+    expect(rec.warcDate).toBe("2025-03-01T10:00:00Z");
+    expect(rec.warcHeaders["warc-type"]).toBe("response");
+    expect(rec.httpHeaders.server).toBe("nginx");
+    expect(rec.httpHeaders["set-cookie"]).toBe("[dropped]");
+    expect(JSON.stringify(rec.httpHeaders)).not.toContain("secret");
   });
 });
 

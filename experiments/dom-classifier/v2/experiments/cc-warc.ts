@@ -29,6 +29,11 @@ export interface WarcResponse {
   undone: string[];
   /** CC's WARC-Truncated reason (it caps stored payloads), or null. */
   truncated: string | null;
+  /** WARC-Date: when Common Crawl fetched the page, or null. */
+  warcDate: string | null;
+  /** The WARC record's headers and the HTTP response's, lower-cased names. */
+  warcHeaders: Record<string, string>;
+  httpHeaders: Record<string, string>;
 }
 
 export class WarcError extends Error {}
@@ -52,6 +57,19 @@ function headerBlock(text: string): { first: string; headers: Map<string, string
       headers.set(line.slice(0, colon).trim().toLowerCase(), line.slice(colon + 1).trim());
   }
   return { first: lines[0] ?? "", headers };
+}
+
+const HEADER_VALUE_CAP = 1000;
+const DROPPED_HEADERS = new Set(["set-cookie", "set-cookie2"]);
+
+/** Headers as a plain object for a manifest: long values cut, cookie values
+ *  dropped (a session token is not page metadata). A repeated name keeps the
+ *  last value. */
+export function headerObject(headers: ReadonlyMap<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [name, value] of headers)
+    out[name] = DROPPED_HEADERS.has(name) ? "[dropped]" : value.slice(0, HEADER_VALUE_CAP);
+  return out;
 }
 
 /** Undo `Transfer-Encoding: chunked`. */
@@ -130,6 +148,9 @@ export function parseWarcRecord(member: Uint8Array): WarcResponse {
     sha256: createHash("sha256").update(body).digest("hex"),
     undone,
     truncated: warc.headers.get("warc-truncated") ?? null,
+    warcDate: warc.headers.get("warc-date") ?? null,
+    warcHeaders: headerObject(warc.headers),
+    httpHeaders: headerObject(http.headers),
   };
 }
 

@@ -83,7 +83,9 @@ def preflight(rows: list[dict], route: str, sealed: set[str], gold: set[str]) ->
     # Created once: modal secret create treetop-cc-proxy HTTPS_PROXY_URL=<url> (never commit the URL)
     secrets=[modal.Secret.from_name("treetop-cc-proxy")],
 )
-def run_chunk(bundle: bytes, artifact: bytes, guard: bytes, locators: bytes, concurrency: int, rate: float) -> dict:
+def run_chunk(
+    bundle: bytes, artifact: bytes, guard: bytes, locators: bytes, concurrency: int, rate: float, headers_only: bool
+) -> dict:
     import subprocess
 
     job = Path("/root/job")
@@ -117,6 +119,7 @@ def run_chunk(bundle: bytes, artifact: bytes, guard: bytes, locators: bytes, con
             str(concurrency),
             "--rate",
             str(rate),
+            *(["--headers-only"] if headers_only else []),
         ],
         cwd="/root",
         capture_output=True,
@@ -147,7 +150,7 @@ def merge_chunk(tar_bytes: bytes, out: Path) -> dict:
         target = out / "blobs" / blob.name
         if not target.exists():
             shutil.move(blob, target)
-    for name in ("manifest.jsonl", "links.jsonl", "pages.jsonl"):
+    for name in ("manifest.jsonl", "links.jsonl", "pages.jsonl", "headers.jsonl"):
         with (out / name).open("a") as handle:
             handle.write((chunk / name).read_text())
     stats = json.loads((chunk / "stats.json").read_text())
@@ -195,6 +198,8 @@ def main(
     seed: int = 2307,
     concurrency: int = 8,
     rate: float = 4.0,
+    only: str = "",
+    headers_only: bool = False,
 ) -> None:
     if route not in ("train", "holdout"):
         raise SystemExit("--route must be train or holdout")
@@ -214,6 +219,10 @@ def main(
     for row in rows:
         by_capture.setdefault(capture_key(row), []).append(row)
     todo = sorted(key for key in by_capture if key not in done)
+    if only:
+        # A backfill: only the captures an earlier run's manifest lists.
+        listed = {json.loads(line)["capture"] for line in Path(only).read_text().splitlines() if line.strip()}
+        todo = [key for key in todo if key in listed]
     if sample:
         random.Random(seed).shuffle(todo)
         todo = sorted(todo[:sample])
@@ -225,7 +234,7 @@ def main(
     for start in range(0, len(todo), chunk):
         keys = todo[start : start + chunk]
         payload = "".join(json.dumps(row) + "\n" for key in keys for row in by_capture[key]).encode()
-        result = run_chunk.remote(bundle_bytes, artifact_bytes, guard, payload, concurrency, rate)
+        result = run_chunk.remote(bundle_bytes, artifact_bytes, guard, payload, concurrency, rate, headers_only)
         if result["returncode"] != 0:
             print(result["stdout"], result["stderr"])
             raise SystemExit(f"chunk at {start} failed: returncode {result['returncode']}")
