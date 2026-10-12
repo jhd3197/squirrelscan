@@ -114,9 +114,10 @@ describe("section lookup", () => {
   test("is independent of the region lookup", () => {
     const { result, elements } = classify();
     const footer = result.nodes.find((n) => n.nodeRef.elementId === "foot")!;
-    footer.section = { label: "newsletter_signup", confidence: 0.97 };
+    footer.section = { label: "newsletter_signup", confidence: 0.97, source: "model" };
     const shop = linkPositions(PAGE, result, elements).find((r) => r.href.includes("shop"))!;
     expect(shop.section).toBe("newsletter_signup");
+    expect(shop.sectionSource).toBe("model");
     expect(shop.sectionNodeId).toBe(footer.nodeRef.nodeId);
     expect(shop.sectionHops).toBe(shop.regionHops);
     const partner = linkPositions(PAGE, result, elements).find((r) => r.href.includes("partner"))!;
@@ -139,6 +140,8 @@ describe("comments rule", () => {
     expect(spam.commentsRuleToken).toBe("comment-author");
     expect(spam.commentsRuleHops).toBe(1);
     expect(spam.rel).toEqual(["ugc", "nofollow"]);
+    expect(spam.section).toBe("comments");
+    expect(spam.sectionSource).toBe("rules");
     const story = rows.find((r) => r.href.includes("news"))!;
     expect(story.commentsRule).toBeNull();
     expect(story.rel).toEqual([]);

@@ -501,6 +501,21 @@ export interface FeaturizeOptions {
    * second walk that could drift. Not a feature: the schema is unchanged.
    */
   elementsOut?: unknown[];
+  /**
+   * When given, receives the raw `class` and `id` values the walk read and
+   * each element's subtree size, in nodeId order. A markup rule can then scan
+   * the whole page without reading every attribute again, and jump past a
+   * subtree it has settled (runtime/comments-rule.ts). Not a feature.
+   */
+  attributesOut?: WalkAttributes;
+}
+
+export interface WalkAttributes {
+  classAttr: ReadonlyArray<string | null>;
+  idAttr: ReadonlyArray<string | null>;
+  /** Walked elements in each one's subtree, itself included: its descendants
+   *  are the next `subtreeSize[i] - 1` nodeIds. */
+  subtreeSize: ArrayLike<number>;
 }
 
 export interface NodeFeatures {
@@ -1766,6 +1781,11 @@ export function featurizeDocument(
   options: FeaturizeOptions = {},
 ): FeaturizedPage {
   if (options.elementsOut) options.elementsOut.length = 0;
+  if (options.attributesOut) {
+    options.attributesOut.classAttr = [];
+    options.attributesOut.idAttr = [];
+    options.attributesOut.subtreeSize = [];
+  }
   const root = safeRoot(document);
   const host = hostOf(url);
   const empty: FeaturizedPage = {
@@ -1784,6 +1804,12 @@ export function featurizeDocument(
   if (walk.count === 0) return empty;
   flagPatterns(walk);
   foldSubtrees(walk);
+  if (options.attributesOut) {
+    options.attributesOut.classAttr = walk.classAttr;
+    options.attributesOut.idAttr = walk.idAttr;
+    // Folded: `elements` now counts each subtree (see subtreeEnd below).
+    options.attributesOut.subtreeSize = walk.elements;
+  }
 
   // Child-derived shape features, and the subtree end index used for endPos.
   const childCounts = new Int32Array(walk.count);

@@ -33,7 +33,13 @@ def link_row(r: dict) -> dict:
     if r.get("commentsRule"):
         section, conf, evidence, source = r["commentsRule"], 1.0, r.get("commentsRuleToken"), "rule"
     elif r.get("section"):
-        section, conf, evidence, source = r["section"], r.get("sectionConfidence"), None, "model"
+        # `sectionSource` is absent on probe runs from before the placer (all model).
+        section, conf, evidence, source = (
+            r["section"],
+            r.get("sectionConfidence"),
+            None,
+            r.get("sectionSource", "model"),
+        )
     elif r.get("region") and r["region"] != "unknown":
         section, conf, evidence, source = r["region"], r.get("regionConfidence"), None, r.get("regionSource")
     else:

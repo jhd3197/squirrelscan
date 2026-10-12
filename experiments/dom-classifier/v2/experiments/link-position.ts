@@ -3,10 +3,11 @@
  * Link-position probe (#2307): where on the page does each outbound link sit?
  *
  * For every page it runs the runtime (`classifyDocument`, the same contract the
- * CLI would get) and maps each link to
+ * CLI would get) and places each link with the runtime's `elementPlacer`:
  *   - its nearest ancestor (or itself) with a confident REGION: a markup answer
  *     or a model answer over its class threshold; `unknown` when none is;
- *   - separately, its nearest ancestor with a SECTION purpose.
+ *   - separately, its SECTION: the comments rule's thread when the link sits in
+ *     one, else its nearest ancestor with a section purpose.
  * The element-to-nodeId map comes from the featurizer's own walk
  * (`elementsOut`), so it cannot drift from the ids the labels carry.
  *
@@ -31,13 +32,8 @@ import { gunzipSync } from "node:zlib";
 import { parse as parseDomain } from "tldts";
 
 import { parseHTML } from "../../../../packages/parser/src/dom.ts";
-import {
-  classifyDocument,
-  tryLoadModel,
-  type NodePrediction,
-  type PageClassification,
-} from "../runtime/predict.ts";
-import { commentSectionOf } from "../runtime/comments-rule.ts";
+import { elementPlacer } from "../runtime/placement.ts";
+import { classifyDocument, tryLoadModel, type PageClassification } from "../runtime/predict.ts";
 
 export interface ManifestLink {
   href: string;
@@ -84,8 +80,14 @@ export interface LinkPosition {
   regionTag: string | null;
   /** Element steps from the anchor up to the region node (0 = the anchor). */
   regionHops: number | null;
+  /** The placer's section: the comments rule's label when it fired, else the
+   *  section head's nearest answer. */
   section: string | null;
+  /** "rules" (the comments rule) or "model" (the section head), null with no section. */
+  sectionSource: string | null;
   sectionConfidence: number | null;
+  /** The answering node; for the comments rule, its matched container (null
+   *  when that is outside the walk). */
   sectionNodeId: number | null;
   sectionHops: number | null;
   /** The markup comments rule (`runtime/comments-rule.ts`) on the anchor's
@@ -214,8 +216,7 @@ export function linkPositions(
   const base = baseUrlOf(pageUrl, baseHref);
   const idOf = new Map<unknown, number>();
   for (let i = 0; i < elements.length; i++) idOf.set(elements[i], i);
-  const byId = new Map<number, NodePrediction>();
-  for (const node of result.nodes) byId.set(node.nodeRef.nodeId, node);
+  const place = elementPlacer(result, elements);
 
   // Every walked anchor with an http(s) target, keyed by resolved href.
   const anchors = new Map<string, Array<{ el: DomElement; href: string; text: string }>>();
@@ -261,6 +262,7 @@ export function linkPositions(
       regionTag: null,
       regionHops: null,
       section: null,
+      sectionSource: null,
       sectionConfidence: null,
       sectionNodeId: null,
       sectionHops: null,
@@ -271,39 +273,31 @@ export function linkPositions(
       anchorNodeId: entry ? (idOf.get(entry.el) ?? null) : null,
     };
     if (entry) {
-      const match = commentSectionOf(entry.el as unknown as Element);
-      if (match) {
-        row.commentsRule = match.label;
-        row.commentsRuleHops = match.hops;
-        row.commentsRuleToken = match.token;
-      }
       const rel = (entry.el.getAttribute("rel") ?? "").toLowerCase().split(/\s+/);
       row.rel = BACKLINK_REL.filter((token) => rel.includes(token));
-    }
-    let el: DomElement | null | undefined = entry?.el;
-    let hops = 0;
-    while (el && (row.regionNodeId === null || row.sectionNodeId === null)) {
-      const id = idOf.get(el);
-      const node = id === undefined ? undefined : byId.get(id);
-      if (node) {
-        if (row.regionNodeId === null && node.label !== "unknown") {
-          row.region = node.label;
-          row.regionGroup = regionGroup(node.label);
-          row.regionSource = node.source;
-          row.regionConfidence = node.confidence;
-          row.regionNodeId = id!;
-          row.regionTag = node.nodeRef.tag;
-          row.regionHops = hops;
-        }
-        if (row.sectionNodeId === null && node.section) {
-          row.section = node.section.label;
-          row.sectionConfidence = node.section.confidence;
-          row.sectionNodeId = id!;
-          row.sectionHops = hops;
+      const { region, section } = place(entry.el);
+      if (region) {
+        row.region = region.label;
+        row.regionGroup = regionGroup(region.label);
+        row.regionSource = region.source;
+        row.regionConfidence = region.confidence;
+        row.regionNodeId = region.nodeId;
+        row.regionTag = region.tag;
+        row.regionHops = region.hops;
+      }
+      if (section) {
+        row.section = section.label;
+        row.sectionSource = section.source;
+        row.sectionConfidence = section.confidence;
+        row.sectionNodeId = section.nodeId;
+        row.sectionHops = section.hops;
+        // A rules section is always the comments rule's match on this anchor.
+        if (section.source === "rules") {
+          row.commentsRule = section.label;
+          row.commentsRuleHops = section.hops;
+          row.commentsRuleToken = section.evidence ?? null;
         }
       }
-      el = el.parentElement;
-      hops++;
     }
     out.push(row);
   };

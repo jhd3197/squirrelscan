@@ -9,6 +9,7 @@ import {
   findCommentSections,
   hasUgcRel,
   isCommentToken,
+  outermostCommentSections,
 } from "./comments-rule.ts";
 
 const page = (inner: string) =>
@@ -142,5 +143,56 @@ describe("hasUgcRel and findCommentSections", () => {
     );
     expect(found.map((el) => el.getAttribute("id"))).toEqual(["comments"]);
     expect(findCommentSections(page(`<footer><a href="x">x</a></footer>`))).toEqual([]);
+  });
+});
+
+describe("passes and memos", () => {
+  test("an <h1> that is itself the match is not a wrapper holding one", () => {
+    const match = linkIn(
+      `<div><h1 class="comments-title"><a class="target" href="#respond">3 comments</a></h1></div>`,
+    );
+    expect(match?.token).toBe("comments-title");
+  });
+
+  test("a new pass sees edits made after an earlier one", () => {
+    const doc = parseHTML(
+      `<html><body><div id="wrap"><div id="comments"><a class="target" href="x">x</a></div></div></body></html>`,
+    ).document;
+    const link = doc.querySelector("a.target")!;
+    expect(commentSectionOf(link)?.label).toBe("comments");
+    doc.querySelector("#wrap")!.setAttribute("class", "reviews");
+    expect(commentSectionOf(link)?.label).toBe("reviews");
+    const thread = doc.querySelector("#comments")!;
+    expect(findCommentSections(doc)).toEqual([thread]);
+    thread.insertAdjacentHTML("afterbegin", "<h1>Title</h1>");
+    expect(findCommentSections(doc)).toEqual([]);
+  });
+
+  test("a detached subtree finds its own <h1>", () => {
+    const doc = page("");
+    const wrapper = doc.createElement("div");
+    wrapper.innerHTML = `<div class="comments"><h2><h1>t</h1></h2><a class="target" href="x">x</a></div>`;
+    expect(commentSectionOf(wrapper.querySelector("a.target")!)).toBeNull();
+  });
+});
+
+describe("outermostCommentSections", () => {
+  test("two separate threads both count; a refused wrapper gives way to the thread inside it", () => {
+    const doc = parseHTML(
+      `<html><body><div class="site comments"><h1>Title</h1>
+        <div id="comments"><ol class="commentlist"><li class="comment">a</li></ol></div>
+        <div id="respond"><form>f</form></div></div></body></html>`,
+    ).document;
+    const elements = Array.from(doc.body.querySelectorAll("*"));
+    const found = outermostCommentSections(elements);
+    expect(found.map(({ match }) => match.container.getAttribute("id"))).toEqual([
+      "comments",
+      "respond",
+    ]);
+    expect(found.map(({ index }) => elements[index]!.getAttribute("id"))).toEqual([
+      "comments",
+      "respond",
+    ]);
+    expect(found[0]!.match.token).toBe("comments");
   });
 });

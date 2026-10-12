@@ -20,16 +20,38 @@ const result = classifyPage(html, url, { model });
       label: RegionLabel,
       confidence: number,
       source: "model" | "rules",
-      section?: { label: string, confidence: number }, // section purpose
+      section?: {                                       // section purpose
+        label: string, confidence: number, source: "model" | "rules",
+        evidence?: string,  // rules: the id/class token matched, digits folded to N
+      },
     },
   ],
   degraded: string,         // "" when nothing fell back
   platform: string | null,  // the platform bucket the thresholds were chosen for
+  commentSections: [        // the page's comment threads, outermost, in document order
+    { nodeId: number, label: "comments" | "reviews", evidence: string },
+  ],
 }
 ```
 
 `classifyDocument(document, url, opts)` takes a document the caller already
 parsed, which is what the CLI holds by the time it would ask.
+
+**Placing one element** (which part of the page is this link, or this finding,
+in?) is `elementPlacer` in `placement.ts`:
+
+```ts
+const elements: unknown[] = [];
+const result = classifyDocument(document, url, { model, elementsOut: elements });
+const place = elementPlacer(result, elements);
+place(anchor);
+// { region:  { label, confidence, source, nodeId, tag, hops } | null,
+//   section: { label, confidence, source, evidence?, nodeId, hops } | null }
+```
+
+`region` is the nearest ancestor-or-self node with a region answer. `section` is
+the comments rule's thread when the element sits in one, else the nearest node
+with a section answer. `hops` counts element steps up from the element.
 
 Options, all optional:
 
@@ -42,7 +64,7 @@ Options, all optional:
 | `siteFeatures` | the page-type head's cross-page block, when the caller holds the site's link graph (see "Missing values and the cross-page block") |
 | `html` | raw HTML, read only for the platform fingerprint; `classifyPage` passes its own |
 | `platform` | a platform the caller already knows; wins over `html` |
-| `elementsOut` | analysis only: an array that receives the walked elements in nodeId order, so a caller can map a DOM element to the node carrying its label (`experiments/link-position.ts`) |
+| `elementsOut` | an array that receives the walked elements in nodeId order, so a caller can map a DOM element to the node carrying its label; `elementPlacer` takes it |
 
 ### Three heads, one featurizer
 
@@ -63,7 +85,8 @@ The section head scores every candidate node, declared landmarks included (a
 declared `<nav>` can still hold the site's breadcrumbs). `section` is present
 only when the artifact has a section head and the class clears its threshold.
 Absent means `none`, abstained, or not scored because the time budget ran out.
-It has no rules path: the rules fallback answers region and page type only.
+Its one rules path is the comments rule (below); otherwise the rules fallback
+answers region and page type only.
 
 `table_of_contents` abstains in the model (see the threshold table).
 `toc-rule.ts` is a deterministic detector tried in its place. It is not wired
@@ -101,6 +124,31 @@ the rules path encodes that.
 
 *Decided by the coordinating agent on 2026-09-20, pending the user's
 confirmation.*
+
+### Comment threads: the comments rule
+
+`comments-rule.ts` reads comment threads from the markup: an id or class token
+built on `comment`/`comments` (`comment-list`, `commentlist`, `comments-area`,
+`li-comment-12`), or the ids `respond` and `disqus_thread`, minus the stop words
+that mark links *to* comments, widgets and flags (`comments-link`,
+`comment-count`, `recent-comments`), and never a wrapper that holds the page's
+`<h1>`. A thread inside a reviews container is `reviews`.
+
+It runs on every page, model or not, and whatever the budget did. Its answer
+wins over the section head on every node inside a thread, as markup wins for
+regions, and the page's threads are listed in `commentSections`. The reasons are
+measured (2026-10-12, blind Opus check on 100 fresh linking-page links, the
+rule's tokens hidden from the judge):
+
+- the rule fired on 50: 50 were comments (precision 1.0, 95% CI 0.929 to 1.0);
+- it stayed silent on 50: 0 were comments (miss rate at most 0.071);
+- the section head found 5 of those 50 comment links. Big threads sit past the
+  400-candidate cap, and the comment list it does rank rarely clears 0.96.
+
+Cost, on the 1,000 link-heavy probe pages (featurize p95 ~250 ms there, load
+average ~7): scan p50 0.04 ms, p95 ~7 ms; marking the nodes inside threads
+p95 ~3 ms. The scan reads the id/class values the walk already holds
+(`FeaturizeOptions.attributesOut`) and jumps past each thread it accepts.
 
 ### `source` means provenance, not quality
 
@@ -276,7 +324,8 @@ frozen by registrable domain in `split-manifest.json` and are never recomputed.
 The first four are page-wide: every node comes back from rules. The budget is
 checked every 32 nodes and hands the remainder over mid-page rather than
 returning a partial answer. The section head runs after region and page type
-under the same budget; once it is spent, the remaining nodes get no `section`.
+under the same budget; once it is spent, the remaining nodes get no `section`
+from the head. The comments rule still marks the nodes inside a thread.
 
 ## Versioning
 

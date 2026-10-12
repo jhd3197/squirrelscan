@@ -10,6 +10,10 @@
 //   - the time budget ran out partway through a page.
 //
 // A missing model therefore degrades attribution, never detection.
+//
+// Comment threads are the exception to "the model answers sections": the
+// deterministic comments rule (comments-rule.ts) reads them from the markup on
+// every page, with or without an artifact, and wins over the section head.
 
 import { parseHTML } from "../../../../packages/parser/src/dom.ts";
 import {
@@ -17,6 +21,7 @@ import {
   FEATURIZER_VERSION,
   TOKEN_BUCKETS,
   type NodeFeatures,
+  type WalkAttributes,
 } from "../featurize.ts";
 import {
   ArtifactError,
@@ -27,6 +32,7 @@ import {
   thresholdsFor,
   type Model,
 } from "./model-format.ts";
+import { commentRule, type CommentSection } from "./comments-rule.ts";
 import { platformBucket, platformOf } from "./platform.ts";
 import {
   declaresOwnRegion,
@@ -53,14 +59,36 @@ export interface Prediction<T extends string> {
   rawConfidence?: number;
 }
 
+export interface SectionPrediction {
+  label: string;
+  confidence: number;
+  /** "model" for the section head, "rules" for the comments rule. */
+  source: Source;
+  /** Rules only: the id or class token the comments rule matched, lowercased,
+   *  digits folded to N. Markup, never page text. */
+  evidence?: string;
+}
+
 export interface NodePrediction extends Prediction<RegionLabel> {
   /** Stable reference to the node within this page: its preorder element
    *  index, the tag, and the id attribute when the page provided one. */
   nodeRef: { nodeId: number; tag: string; elementId: string };
-  /** The node's section purpose (ad, cookie_consent, faq_block, ...), present
-   *  only when the artifact has a section head AND the class clears its
-   *  per-class threshold. Absent means `none` or abstained. */
-  section?: { label: string; confidence: number };
+  /** The node's section purpose (ad, cookie_consent, faq_block, ...): the
+   *  comments rule's `comments` or `reviews` when the node sits in a declared
+   *  comment thread, else the section head's class when the artifact has the
+   *  head AND the class clears its per-class threshold. Absent means `none`,
+   *  abstained, or not scored. */
+  section?: SectionPrediction;
+}
+
+/** A comment thread the page's markup declares (comments-rule.ts). */
+export interface CommentSectionRef {
+  /** The thread's outermost container. Not necessarily a candidate node: big
+   *  threads often sit past the candidate cap. */
+  nodeId: number;
+  label: CommentSection;
+  /** The id or class token that matched, lowercased, digits folded to N. */
+  evidence: string;
 }
 
 export interface PageClassification {
@@ -70,6 +98,10 @@ export interface PageClassification {
   degraded: string;
   /** The platform bucket the thresholds were chosen for, or null when unknown. */
   platform: string | null;
+  /** The page's comment threads, outermost containers in document order;
+   *  empty when it declares none. From the rules, so present without a model
+   *  and whatever the budget did. */
+  commentSections: CommentSectionRef[];
 }
 
 export interface ClassifyOptions {
@@ -94,9 +126,9 @@ export interface ClassifyOptions {
   /** A platform the caller already knows (bucket or platform name); wins over
    *  `html`. Neither given: the artifact's global thresholds apply. */
   platform?: string | null;
-  /** Analysis only: receives the walked elements in nodeId order (see
-   *  FeaturizeOptions.elementsOut), so a caller can map an element to the
-   *  node that carries its label. */
+  /** Receives the walked elements in nodeId order (see
+   *  FeaturizeOptions.elementsOut). Pass it to place elements on the page
+   *  with `elementPlacer` (placement.ts). */
   elementsOut?: unknown[];
   /** Analysis only: receives wall-clock ms per stage, so a bench can time the
    *  heads directly instead of subtracting a separate featurize run. */
@@ -161,11 +193,12 @@ export function classifyDocument(
     mark = now;
     return elapsed;
   };
-  const featurized = featurizeDocument(
-    document as never,
-    url,
-    options.elementsOut ? { elementsOut: options.elementsOut } : {},
-  );
+  const elements = options.elementsOut ?? [];
+  const attributes: WalkAttributes = { classAttr: [], idAttr: [], subtreeSize: [] };
+  const featurized = featurizeDocument(document as never, url, {
+    elementsOut: elements,
+    attributesOut: attributes,
+  });
   const byId = new Map<number, NodeFeatures>();
   for (const node of featurized.nodes) byId.set(node.nodeId, node);
   if (timings) timings.featurizeMs = lap();
@@ -384,7 +417,7 @@ export function classifyDocument(
           );
           const label = section.classes[index]!;
           if (label !== "none" && probability >= sectionThresholds[index]!)
-            nodes[i]!.section = { label, confidence: probability };
+            nodes[i]!.section = { label, confidence: probability, source: "model" };
         }
       }
     } else {
@@ -408,13 +441,49 @@ export function classifyDocument(
         const { index, probability } = softmax(sectionScores);
         const label = section.classes[index]!;
         if (label !== "none" && probability >= sectionThresholds[index]!)
-          nodes[i]!.section = { label, confidence: probability };
+          nodes[i]!.section = { label, confidence: probability, source: "model" };
       }
     }
   }
 
+  // Comment threads, from the markup. MARKUP WINS here as it does for regions:
+  // on linking pages the head found 5 of 50 comment links the rule found, and
+  // the rule held precision 1.0 on those 50 (2026-10-12 blind Opus check). It
+  // runs whatever the budget did: it is a scan of the walk, not a model pass.
+  const rule = commentRule();
+  const commentSections = rule.outermost(elements, attributes).map(
+    ({ index, match }): CommentSectionRef => ({
+      nodeId: index,
+      label: match.label,
+      evidence: match.token,
+    }),
+  );
+  // Only a node inside a thread can match. Finding those is a pointer walk;
+  // reading markup for all 400 nodes is what costs.
+  if (commentSections.length > 0) {
+    const threads = new Set(commentSections.map((thread) => elements[thread.nodeId]));
+    for (const node of nodes) {
+      const element = elements[node.nodeRef.nodeId] as Element;
+      if (!insideAny(element, threads)) continue;
+      const match = rule.sectionOf(element);
+      if (match)
+        node.section = {
+          label: match.label,
+          confidence: 1,
+          source: "rules",
+          evidence: match.token,
+        };
+    }
+  }
+
   if (timings) timings.sectionMs = lap();
-  return { pageType, nodes, degraded, platform };
+  return { pageType, nodes, degraded, platform, commentSections };
+}
+
+function insideAny(element: Element, containers: ReadonlySet<unknown>): boolean {
+  for (let el: Element | null = element; el; el = el.parentElement)
+    if (containers.has(el)) return true;
+  return false;
 }
 
 function withRules(

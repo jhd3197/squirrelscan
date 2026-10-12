@@ -93,6 +93,39 @@ describe("the rules path, with no model at all", () => {
   });
 });
 
+// A WordPress thread under the article, as the comments rule reads it.
+const WITH_COMMENTS = PAGE.replace(
+  "</article></main>",
+  `</article>
+  <div id="comments" class="comments-area"><h2>2 responses</h2><ol class="comment-list">
+    <li id="comment-4" class="comment"><article id="div-comment-4" class="comment-body">
+      <div class="comment-author"><a rel="external nofollow ugc" href="https://spam.example.org/">Pills</a></div>
+      <div class="comment-content"><p>Great post, thanks for sharing it with us.</p></div>
+    </article></li></ol></div></main>`,
+);
+
+describe("the comments rule in the output (#2307)", () => {
+  test("lists the thread and labels every node inside it, with no model", () => {
+    const elements: unknown[] = [];
+    const out = classifyPage(WITH_COMMENTS, URL, { elementsOut: elements });
+    expect(out.commentSections).toEqual([
+      { nodeId: expect.any(Number), label: "comments", evidence: "comments" },
+    ]);
+    const thread = elements[out.commentSections[0]!.nodeId] as Element;
+    expect(thread.getAttribute("id")).toBe("comments");
+    const inside = out.nodes.filter((n) => thread.contains(elements[n.nodeRef.nodeId] as Element));
+    expect(inside.length).toBeGreaterThan(0);
+    for (const node of inside) {
+      expect(node.section).toMatchObject({ label: "comments", confidence: 1, source: "rules" });
+    }
+    for (const node of out.nodes) if (!inside.includes(node)) expect(node.section).toBeUndefined();
+  });
+
+  test("a page without a thread lists none", () => {
+    expect(classifyPage(PAGE, URL).commentSections).toEqual([]);
+  });
+});
+
 describe("artifact validation", () => {
   test("a non-artifact is refused without throwing", () => {
     expect(tryLoadModel({ hello: "world" }).model).toBeNull();
@@ -496,13 +529,23 @@ describe.if(HAS_ARTIFACT && existsSync(PARITY_SECTION))("section head parity (#2
     const { model } = tryLoadModel(artifactJson());
     const out = classifyPage(PAGE, URL, { model });
     for (const node of out.nodes) {
-      if (!node.section) continue;
+      if (node.section?.source !== "model") continue;
       expect(node.section.label).not.toBe("none");
       const index = model!.section!.classes.indexOf(node.section.label);
       expect(node.section.confidence).toBeGreaterThanOrEqual(
         model!.section!.classThresholds[index]!,
       );
     }
+  });
+
+  test("the comments rule wins over the head inside a thread", () => {
+    const { model } = tryLoadModel(artifactJson());
+    const elements: unknown[] = [];
+    const out = classifyPage(WITH_COMMENTS, URL, { model, elementsOut: elements });
+    const thread = elements[out.commentSections[0]!.nodeId] as Element;
+    const inside = out.nodes.filter((n) => thread.contains(elements[n.nodeRef.nodeId] as Element));
+    expect(inside.length).toBeGreaterThan(0);
+    for (const node of inside) expect(node.section?.source).toBe("rules");
   });
 });
 
