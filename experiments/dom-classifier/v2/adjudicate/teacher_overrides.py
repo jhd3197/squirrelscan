@@ -85,16 +85,24 @@ def decide(gpt: dict | None, opus: dict | None) -> tuple[str | None, float | Non
     return None, None, "unanswered"
 
 
-def main() -> None:
+def main() -> None:  # noqa: C901
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--items", type=Path, action="append", required=True)
     parser.add_argument("--gpt", type=Path, action="append", default=[])
     parser.add_argument("--opus", type=Path, action="append", default=[])
     parser.add_argument("--sealed", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--eval-out",
+        type=Path,
+        help="also write the accepted teacher labels on CALIBRATION-role sealed domains here "
+        "(an evaluation set training never sees)",
+    )
     args = parser.parse_args()
 
-    sealed = {json.loads(line)["d"] for line in args.sealed.read_text().splitlines() if line.strip()}
+    sealed_rows = [json.loads(line) for line in args.sealed.read_text().splitlines() if line.strip()]
+    sealed = {r["d"] for r in sealed_rows}
+    roles = {r["d"]: r["role"] for r in sealed_rows}
     if len(sealed) < 1000:
         raise SystemExit(f"{len(sealed)} sealed hashes, expected ~1069 (key `d`)")
     gpt = answers(args.gpt)
@@ -108,6 +116,7 @@ def main() -> None:
     page_rows: list[dict] = []
     section_rows: list[dict] = []
     drops: set[str] = set()
+    eval_rows: list[dict] = []
     counts: Counter = Counter()
     flips: Counter = Counter()
     for item_id, item in sorted(items.items()):
@@ -117,6 +126,23 @@ def main() -> None:
             # Labelled, but never a training label: a sealed domain (calibration or test) can sit in
             # the train bucket, and a holdout page is evaluation data.
             counts[(axis, "excluded:sealed" if digest in sealed else "excluded:holdout")] += 1
+            if digest in sealed and roles[digest] == "calibration" and args.eval_out:
+                label, confidence, source = decide(gpt.get(item_id), opus.get(item_id))
+                if label is not None:
+                    eval_rows.append(
+                        {
+                            "itemId": item_id,
+                            "axis": axis,
+                            "pageId": item["pageId"],
+                            "nodeId": item.get("nodeId"),
+                            "label": label,
+                            "confidence": round(confidence, 4),
+                            "given": item["given"],
+                            "platform": item.get("platform"),
+                            "url": item["url"],
+                            "source": f"teacher:{source}",
+                        }
+                    )
             continue
         label, confidence, source = decide(gpt.get(item_id), opus.get(item_id))
         counts[(axis, source)] += 1
@@ -136,6 +162,8 @@ def main() -> None:
 
     (args.out / "pagetype-teacher.jsonl").write_text("".join(json.dumps(r) + "\n" for r in page_rows))
     (args.out / "section-teacher.jsonl").write_text("".join(json.dumps(r) + "\n" for r in section_rows))
+    if args.eval_out:
+        args.eval_out.write_text("".join(json.dumps(r) + "\n" for r in eval_rows))
     (args.out / "drop-pages-teacher.txt").write_text("".join(f"{p}\n" for p in sorted(drops)))
     report = {
         "items": len(items),
