@@ -62,6 +62,8 @@ export interface LocatorRow {
   sealed: boolean;
   links?: ManifestLink[] | null;
   have_sha256?: string | null;
+  /** DG's copy of `captureKey`, when the export carries it. */
+  capture?: string | null;
 }
 
 export interface Guard {
@@ -144,6 +146,7 @@ export function routeRefusal(
   sealed: ReadonlySet<string>,
   gold: ReadonlySet<string>,
 ): string | null {
+  if (row.capture && row.capture !== captureKey(row)) return "capture_mismatch";
   const hash = domainHashOf(row.source_url);
   if (!hash) return "no_domain";
   if (hash !== row.domain_hash) return "domain_hash_mismatch";

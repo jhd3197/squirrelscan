@@ -238,6 +238,16 @@ describe("routeRefusal", () => {
         new Set(),
       ),
     ).toBe("domain_hash_mismatch");
+    const withCapture = { ...sealedRow, capture: captureKey(sealedRow) };
+    expect(routeRefusal(withCapture, guard("holdout"), new Set([hash]), new Set())).toBeNull();
+    expect(
+      routeRefusal(
+        { ...withCapture, capture: "f".repeat(16) },
+        guard("holdout"),
+        new Set([hash]),
+        new Set(),
+      ),
+    ).toBe("capture_mismatch");
   });
 });
 

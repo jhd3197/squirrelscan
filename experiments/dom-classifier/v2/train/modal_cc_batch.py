@@ -57,7 +57,9 @@ def preflight(rows: list[dict], route: str, sealed: set[str], gold: set[str]) ->
     bad: dict[str, int] = {}
     for row in rows:
         problem = None
-        if int(row["domain_hash"][:8], 16) % 100 != row["bucket"]:
+        if row.get("capture") is not None and row["capture"] != capture_key(row):
+            problem = "capture_mismatch"
+        elif int(row["domain_hash"][:8], 16) % 100 != row["bucket"]:
             problem = "bucket_mismatch"
         elif bool(row.get("sealed")) != (row["domain_hash"] in sealed):
             problem = "sealed_flag_mismatch"
