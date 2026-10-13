@@ -45,6 +45,7 @@ MERGE = {
 }  # fmt: skip
 BASE_FEATURES = 54  # the first feature set (before wp/comment/date features)
 BARS = [round(0.5 + 0.05 * i, 2) for i in range(10)]
+BARS_LOW = [round(0.2 + 0.05 * i, 2) for i in range(14)]
 
 
 TOKEN_BUCKETS = 256
@@ -110,6 +111,12 @@ def main() -> None:  # noqa: C901
     parser.add_argument("--goal-precision", type=float, default=0.90)
     parser.add_argument("--goal-recall", type=float, default=0.50)
     parser.add_argument("--min-teacher-conf", type=float, default=0.0)
+    parser.add_argument("--any-rank", action="store_true",
+                        help="a class fires when ITS probability clears the bar, whether or not it is the top class (a finding is per class); bars start at 0.2")
+    parser.add_argument("--seeds", type=int, default=1, help="average this many boosters (different seeds) for the held-out predictions")
+    parser.add_argument("--consensus", action="store_true",
+                        help="drop every row where Haiku and Opus both answered and disagree (after merging article/blog, listing/product_listing): "
+                        "scores the model on pages the teachers agree about; optimistic by design")
     parser.add_argument("--extra-fraction", type=float, default=1.0, help="learning curve: keep this random share of the train-only teacher rows")
     parser.add_argument("--save-model", type=Path, help="train on every labelled row and write model.txt + meta.json (classes, feature names, per-class thresholds) here")
     parser.add_argument("--pool-out", type=Path, help="train on every labelled row and write probabilities for the unlabelled schema-less pool here (active learning)")
@@ -136,13 +143,20 @@ def main() -> None:  # noqa: C901
                 kind_of[row["p"]] = row["kind"]
     def read_teacher(specs: list[str]) -> dict[str, tuple[str, float]]:
         found: dict[str, tuple[str, float]] = {}
+        by_name: dict[str, dict[str, str]] = {}
         for spec in specs:
-            _, _, path = spec.partition("=")
+            name, _, path = spec.partition("=")
             for line in Path(path).read_text().splitlines():
                 if line.strip():
                     row = json.loads(line)
                     if "error" not in row and row["confidence"] >= args.min_teacher_conf:
-                        found[row["itemId"]] = (MERGE.get(row["label"], row["label"]), row["confidence"])
+                        merged = MERGE.get(row["label"], row["label"])
+                        found[row["itemId"]] = (merged, row["confidence"])
+                        by_name.setdefault(name, {})[row["itemId"]] = merged
+        if args.consensus and "haiku" in by_name and "opus" in by_name:
+            for item, label in by_name["opus"].items():
+                if by_name["haiku"].get(item, label) != label:
+                    found.pop(item, None)
         return found
 
     teacher = read_teacher(args.teacher)
@@ -219,9 +233,10 @@ def main() -> None:  # noqa: C901
         else:
             teacher_w = np.ones(len(y_teacher))
         w_train = np.concatenate([np.full(len(yw), args.weak_weight), teacher_w])
-        booster = lgb.train(params, lgb.Dataset(x_train, label=y_train, weight=w_train), num_boost_round=args.rounds)
-        oof[test] = booster.predict(xt[test])
-        importance += booster.feature_importance("gain")
+        for seed in range(args.seeds):
+            booster = lgb.train({**params, "seed": params["seed"] + 101 * seed}, lgb.Dataset(x_train, label=y_train, weight=w_train), num_boost_round=args.rounds)
+            oof[test] += booster.predict(xt[test]) / args.seeds
+            importance += booster.feature_importance("gain") / args.seeds
 
     pred, conf = oof.argmax(axis=1), oof.max(axis=1)
     report: dict = {
@@ -235,8 +250,8 @@ def main() -> None:  # noqa: C901
         support_w = float(eval_w[yt == i].sum())
         best = None
         curve = []
-        for bar in BARS:
-            said = (pred == i) & (conf >= bar)
+        for bar in (BARS_LOW if args.any_rank else BARS):
+            said = (oof[:, i] >= bar) if args.any_rank else ((pred == i) & (conf >= bar))
             n = int(said.sum())
             if n == 0:
                 continue
