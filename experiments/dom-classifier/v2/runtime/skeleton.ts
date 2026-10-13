@@ -194,6 +194,12 @@ interface PageStats {
   dateClass: number;
   readMore: number;
   h1EqTitle: number;
+  kwContact: number;
+  kwLegal: number;
+  kwAbout: number;
+  kwPricing: number;
+  kwFaq: number;
+  kwDocs: number;
   titleLen: number;
 }
 type Context = Required<SkeletonOptions> & { stats: PageStats };
@@ -226,6 +232,34 @@ const BODY_PAGE = /(?:^|\s)(?:page-template\S*|page-id-\d+|type-page)(?:\s|$)/;
 const BODY_ATTACHMENT = /(?:^|\s)(?:attachment|attachmentid-\d+|single-attachment)(?:\s|$)/;
 const BODY_ARCHIVE = /(?:^|\s)(?:archive|category-\S+|tag-\S+)(?:\s|$)/;
 const BODY_PRODUCT = /(?:^|\s)(?:single-product|woocommerce-page|product-template-default)(?:\s|$)/;
+
+/** Words that name a page's purpose in its title or first heading, across the common site languages. */
+const KEYWORDS: [keyof PageStats, RegExp][] = [
+  [
+    "kwContact",
+    /contact|kontakt|contato|contacto|contatt|nous contacter|kontakta|联系|聯絡|お問い合わせ|問合せ|контакт|iletişim|연락/,
+  ],
+  [
+    "kwLegal",
+    /privacy|terms|cookie|legal|impressum|datenschutz|agb\b|conditions|policy|disclaimer|mentions l[ée]gales|politique|aviso legal|privacidad|t[ée]rminos|termos|termini|integritet|隐私|隱私|条款|プライバシー|利用規約|политик|gizlilik|licen[cs]e|accessibility statement|dmca/,
+  ],
+  [
+    "kwAbout",
+    /\babout\b|über uns|ueber uns|[àa] propos|qui sommes|sobre nosotros|sobre n[óo]s|quienes somos|chi siamo|om oss|over ons|o nas|关于|關於|会社概要|私たちについて|о нас|hakkımızda|our story|our team|meet the team|who we are/,
+  ],
+  [
+    "kwPricing",
+    /pricing|\bprices?\b|\bplans\b|tarif|preise|precios|prezzi|prijzen|priser|价格|價格|料金|цены|fiyat/,
+  ],
+  [
+    "kwFaq",
+    /\bfaqs?\b|frequently asked|questions fr[ée]quentes|häufige fragen|preguntas frecuentes|domande frequenti|常见问题|よくある質問/,
+  ],
+  [
+    "kwDocs",
+    /documentation|\bdocs\b|\bapi\b|reference|tutorial|handbook|user guide|manual|getting started|installation|wiki|dokumentation|documentaci[óo]n/,
+  ],
+];
 
 function scanElement(name: string, element: DomNode, ownTrim: string, stats: PageStats): void {
   if (name === "a") {
@@ -517,6 +551,12 @@ export function buildSkeleton(document: unknown, options: SkeletonOptions = {}):
     dateClass: 0,
     readMore: 0,
     h1EqTitle: 0,
+    kwContact: 0,
+    kwLegal: 0,
+    kwAbout: 0,
+    kwPricing: 0,
+    kwFaq: 0,
+    kwDocs: 0,
     titleLen: 0,
   };
   const opts: Context = {
@@ -546,6 +586,8 @@ export function buildSkeleton(document: unknown, options: SkeletonOptions = {}):
     stats.titleLen = bucket(title.length);
     if (title && h1 && (title.includes(h1.slice(0, 40)) || h1.includes(title.slice(0, 40))))
       stats.h1EqTitle = 1;
+    const heading = `${title} ${h1}`;
+    for (const [key, pattern] of KEYWORDS) if (pattern.test(heading)) stats[key] = 1;
   }
   const kids = trim(runLength(result.nodes), budget);
   if (budget.dropped) kids.push({ tag: "more", attrs: [["n", budget.dropped]], kids: [], n: 1 });
@@ -687,6 +729,12 @@ export const SKELETON_FEATURES = [
   "dateClass",
   "readMore",
   "h1EqTitle",
+  "kwContact",
+  "kwLegal",
+  "kwAbout",
+  "kwPricing",
+  "kwFaq",
+  "kwDocs",
   "titleLen",
 ] as const;
 
@@ -804,6 +852,12 @@ export function skeletonFeatures(
     "dateClass",
     "readMore",
     "h1EqTitle",
+    "kwContact",
+    "kwLegal",
+    "kwAbout",
+    "kwPricing",
+    "kwFaq",
+    "kwDocs",
     "titleLen",
   ] as const)
     f[key] = attr(root, key);

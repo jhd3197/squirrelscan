@@ -273,4 +273,32 @@ describe("skeleton", () => {
     const other = skeletonTokens(buildSkeleton(doc(page("<main><h1>Zebra quartz</h1></main>"))));
     expect(other).not.toEqual(tokens);
   });
+
+  test("keyword flags from the title and first heading, across languages, never from body text", () => {
+    const f = (title: string, h1: string, body = "") =>
+      skeletonFeatures(
+        buildSkeleton(
+          parseHTML(
+            `<!doctype html><html><head><title>${title}</title></head><body><main><h1>${h1}</h1><p>${body}</p></main></body></html>`,
+          ).document,
+        ),
+      );
+    expect(f("Contact us | Acme", "Contact us").kwContact).toBe(1);
+    expect(f("Kontakt - Firma", "Kontakt").kwContact).toBe(1);
+    expect(f("Privacy Policy", "Privacy Policy").kwLegal).toBe(1);
+    expect(f("Datenschutzerklärung", "Datenschutz").kwLegal).toBe(1);
+    expect(f("About us", "Our story").kwAbout).toBe(1);
+    expect(f("Pricing", "Plans and pricing").kwPricing).toBe(1);
+    expect(f("FAQ", "Frequently asked questions").kwFaq).toBe(1);
+    expect(f("Documentation", "Getting started").kwDocs).toBe(1);
+    const none = f("Best shoes", "Best running shoes", "contact privacy about pricing faq docs");
+    expect([
+      none.kwContact,
+      none.kwLegal,
+      none.kwAbout,
+      none.kwPricing,
+      none.kwFaq,
+      none.kwDocs,
+    ]).toEqual([0, 0, 0, 0, 0, 0]);
+  });
 });

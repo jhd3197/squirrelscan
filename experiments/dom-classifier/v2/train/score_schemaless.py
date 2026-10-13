@@ -57,6 +57,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=13)
     parser.add_argument("--n-random", type=int, default=0,
                         help="also write random.jsonl: this many schema-less pages, equal per article-score decile, <= 2 per domain")
+    parser.add_argument("--uniform-n", type=int, default=0,
+                        help="also write uniform.jsonl: this many pages drawn uniformly from the pool (<= 2 per domain), tagged random-dN by decile")
     parser.add_argument("--exclude", type=Path, action="append", default=[],
                         help="sample files whose pages are already judged (never drawn again)")
     args = parser.parse_args()
@@ -164,7 +166,22 @@ def main() -> None:
     (args.out / "sample.jsonl").write_text("".join(json.dumps(r) + "\n" for r in sample))
     flagged_art = int(sum(1 for _, pr in scored if pr[art] >= 0.9))
     flagged_prod = int(sum(1 for _, pr in scored if pr[prod] >= 0.9))
-    summary = {"trainedOn": len(ids), "classes": classes, "schemalessPool": len(pool), "flaggedArticle": flagged_art,
+    if args.uniform_n:
+        excluded_u = {json.loads(line)["p"] for f in args.exclude for line in f.read_text().splitlines() if line.strip()}
+        used_u: Counter = Counter()
+        uniform: list[dict] = []
+        for p, pr in scored:  # `scored` is already shuffled
+            if len(uniform) >= args.uniform_n:
+                break
+            if p in excluded_u or used_u[schemaless[p]] >= 2:
+                continue
+            used_u[schemaless[p]] += 1
+            uniform.append({"p": p, "kind": f"random-d{min(int(pr[art] * 10), 9)}", "pArticle": round(float(pr[art]), 3),
+                            "pProduct": round(float(pr[prod]), 3), "top": classes[int(pr.argmax())], "d": schemaless[p]})
+        (args.out / "uniform.jsonl").write_text("".join(json.dumps(r) + "\n" for r in uniform))
+        print(f"uniform sample {len(uniform)}: by decile {dict(sorted(Counter(r['kind'] for r in uniform).items()))}")
+    decile_pool = Counter(min(int(pr[art] * 10), 9) for _, pr in scored)
+    summary = {"decilePool": {str(d): decile_pool[d] for d in range(10)}, "trainedOn": len(ids), "classes": classes, "schemalessPool": len(pool), "flaggedArticle": flagged_art,
                "flaggedProduct": flagged_prod, "sample": dict(Counter(r["kind"] for r in sample)), "features": len(names)}
     (args.out / "summary.json").write_text(json.dumps(summary, indent=1) + "\n")
     print(json.dumps(summary))
