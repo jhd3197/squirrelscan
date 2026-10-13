@@ -33,7 +33,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-CONFIG_DIR = Path.home() / ".claude-squirrelscan"
+#: Labelling runs on Nik'S MAX login: the default config dir (~/.claude + keychain), reached by NOT setting
+#: CLAUDE_CONFIG_DIR and by running from a scratch cwd outside the squirrelscan repo. The session's own
+#: CLAUDE_CONFIG_DIR (the squirrelscan Team login) is dropped from the child's env. Override only with
+#: TREETOP_CLAUDE_CONFIG_DIR.
+CONFIG_DIR = os.environ.get("TREETOP_CLAUDE_CONFIG_DIR")
 LIMIT_WORDS = ("usage limit", "rate limit", "rate_limit", "limit reached", "overloaded", "quota")
 
 CLASSES = [
@@ -128,7 +132,9 @@ def run_item(item: dict, model: str, effort: str, guard: Guard, cwd: Path) -> di
     if guard.stopped:
         return None
     line = json.dumps({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": item["packet"]}]}})
-    env = {**os.environ, "CLAUDE_CONFIG_DIR": str(CONFIG_DIR)}
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"}
+    if CONFIG_DIR:
+        env["CLAUDE_CONFIG_DIR"] = CONFIG_DIR
     base = {"itemId": item["itemId"]}
     started = time.time()
     try:

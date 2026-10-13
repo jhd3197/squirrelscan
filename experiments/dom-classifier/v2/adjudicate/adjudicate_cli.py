@@ -51,7 +51,11 @@ from adjudicate import (
     systems,
 )
 
-CONFIG_DIR = Path.home() / ".claude-squirrelscan"
+#: Labelling runs on Nik'S MAX login: the default config dir (~/.claude + keychain), reached by NOT setting
+#: CLAUDE_CONFIG_DIR and by running from a scratch cwd outside the squirrelscan repo. The session's own
+#: CLAUDE_CONFIG_DIR (the squirrelscan Team login) is dropped from the child's env. Override only with
+#: TREETOP_CLAUDE_CONFIG_DIR.
+CONFIG_DIR = os.environ.get("TREETOP_CLAUDE_CONFIG_DIR")
 LIMIT_WORDS = ("usage limit", "rate limit", "rate_limit", "limit reached", "overloaded", "quota")
 
 
@@ -120,7 +124,9 @@ def run_item(
     classes = PAGE_CLASSES_V81 if item["axis"] == "page" else SECTION_CLASSES_V3
     cmd = command(args.model, args.effort, params["system"][0]["text"], params["output_config"]["format"]["schema"])
     line = json.dumps({"type": "user", "message": {"role": "user", "content": params["messages"][0]["content"]}})
-    env = {**os.environ, "CLAUDE_CONFIG_DIR": str(CONFIG_DIR)}
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"}
+    if CONFIG_DIR:
+        env["CLAUDE_CONFIG_DIR"] = CONFIG_DIR
     started = time.time()
     base = {
         "itemId": item["itemId"],
