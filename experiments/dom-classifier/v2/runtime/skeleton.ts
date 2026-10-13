@@ -811,3 +811,37 @@ export function skeletonFeatures(
   f.linkRatio = f.nodes ? Math.round((f.listLinks / f.nodes) * 100) / 100 : 0;
   return f;
 }
+
+/** Hashed word buckets for the title and headings: the text channel of the skeleton. */
+export const TOKEN_BUCKETS = 256;
+const MAX_TOKENS = 60;
+
+function fnv1a(text: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash >>> 0;
+}
+
+/**
+ * Sorted unique bucket ids of the words in the page title and headings (lowercased letter/number
+ * runs of 2-24 characters, first 60 distinct). Empty for a `text: "none"` skeleton: no words, no tokens.
+ */
+export function skeletonTokens(root: SkeletonNode): number[] {
+  const words = new Set<string>();
+  const take = (text: string | undefined): void => {
+    if (!text) return;
+    for (const match of text.toLowerCase().matchAll(/[\p{L}\p{N}]{2,24}/gu)) {
+      if (words.size >= MAX_TOKENS) return;
+      words.add(match[0]);
+    }
+  };
+  const visit = (node: SkeletonNode): void => {
+    if (node.tag === "page" || /^h[1-6]$/.test(node.tag)) take(node.text);
+    for (const kid of node.kids) visit(kid);
+  };
+  visit(root);
+  return [...new Set([...words].map((w) => fnv1a(w) % TOKEN_BUCKETS))].sort((a, b) => a - b);
+}

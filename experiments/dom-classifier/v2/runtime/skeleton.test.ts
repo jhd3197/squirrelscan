@@ -12,6 +12,8 @@ import {
   SKELETON_FEATURES,
   skeleton,
   skeletonFeatures,
+  skeletonTokens,
+  TOKEN_BUCKETS,
 } from "./skeleton.ts";
 
 const doc = (html: string) => parseHTML(html).document;
@@ -256,5 +258,19 @@ describe("skeleton", () => {
       f("<main><h1>Best shoes of 2026</h1></main>", "", "Best shoes of 2026 | My Blog").h1EqTitle,
     ).toBe(1);
     expect(f("<main><h1>Something else</h1></main>", "", "Best shoes").h1EqTitle).toBe(0);
+  });
+
+  test("tokens: hashed title and heading words, deterministic, none without words", () => {
+    const html = page(
+      "<main><h1>Buy running shoes online</h1><h2>Free delivery</h2><p>body words are not tokens</p></main>",
+    );
+    const tokens = skeletonTokens(buildSkeleton(doc(html)));
+    expect(tokens.length).toBeGreaterThan(5);
+    expect(tokens.every((t) => t >= 0 && t < TOKEN_BUCKETS)).toBe(true);
+    expect(tokens).toEqual([...tokens].sort((a, b) => a - b));
+    expect(skeletonTokens(buildSkeleton(doc(html)))).toEqual(tokens);
+    expect(skeletonTokens(buildSkeleton(doc(html), { text: "none" }))).toEqual([]);
+    const other = skeletonTokens(buildSkeleton(doc(page("<main><h1>Zebra quartz</h1></main>"))));
+    expect(other).not.toEqual(tokens);
   });
 });

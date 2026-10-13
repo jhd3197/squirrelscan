@@ -94,6 +94,7 @@ function emit(p: string, src: string, domainHash: string, split: string, html: s
         d: domainHash,
         s: split,
         f: SKELETON_FEATURES.map((k) => f[k]),
+        k: skeletonTokens(tree),
         c: renderCompact(tree),
       }),
     );
