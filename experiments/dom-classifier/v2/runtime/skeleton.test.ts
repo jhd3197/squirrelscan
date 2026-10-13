@@ -4,7 +4,15 @@
 import { describe, expect, test } from "bun:test";
 
 import { parseHTML } from "../../../../packages/parser/src/dom.ts";
-import { bucket, buildSkeleton, renderCompact, renderXml, skeleton } from "./skeleton.ts";
+import {
+  bucket,
+  buildSkeleton,
+  renderCompact,
+  renderXml,
+  SKELETON_FEATURES,
+  skeleton,
+  skeletonFeatures,
+} from "./skeleton.ts";
 
 const doc = (html: string) => parseHTML(html).document;
 const page = (body: string, head = "") =>
@@ -151,5 +159,69 @@ describe("skeleton", () => {
     expect([0, 5, 30, 80, 150, 400, 900, 1500, 4000, 9000].map(bucket)).toEqual([
       0, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000,
     ]);
+  });
+
+  test("features: fixed keys, counts runs and flags", () => {
+    const card =
+      '<div><img src="a"><h2>N</h2><p class="price">$5</p><button>Add to cart</button></div>';
+    const f = skeletonFeatures(
+      buildSkeleton(
+        doc(page(`<main><h1>Shop</h1>${card.repeat(6)}<form><input type="text"></form></main>`)),
+      ),
+    );
+    expect(Object.keys(f)).toEqual([...SKELETON_FEATURES]);
+    expect(f.h1).toBe(1);
+    expect(f.group).toBe(6);
+    expect(f.maxRun).toBe(6);
+    expect(f.buy).toBeGreaterThan(0);
+    expect(f.price).toBeGreaterThan(0);
+    expect(f.field).toBe(1);
+    expect(f.main).toBe(1);
+  });
+
+  test("contact signals: tel and mailto links, email and phone text, map embed, form", () => {
+    const out = skeleton(
+      doc(
+        page(
+          '<main><h1>Contact us</h1><address>1 Main St</address><a href="tel:+61400000000">Call</a><a href="mailto:hi@example.com">Email</a>' +
+            '<p>Write to hello@example.com or call +61 2 9000 0000</p><iframe src="https://www.google.com/maps/embed?pb=1"></iframe>' +
+            '<form><input type="text"><input type="email"><textarea></textarea><button>Send</button></form></main>',
+        ),
+      ),
+    );
+    for (const flag of ['tel="1"', 'mailto="1"', 'emailText="1"', 'phoneText="1"', 'map="1"'])
+      expect(out).toContain(flag);
+    const f = skeletonFeatures(
+      buildSkeleton(
+        doc(page('<main><a href="tel:1">x</a><form><input type="text"></form></main>')),
+      ),
+    );
+    expect(f.tel).toBe(1);
+    expect(f.form).toBe(1);
+  });
+
+  test("other page-kind signals: social links, code blocks, pricing terms, updated line", () => {
+    const f = skeletonFeatures(
+      buildSkeleton(
+        doc(
+          page(
+            '<main><a href="https://twitter.com/x">t</a><pre>code</pre><p>$9 per month, billed annually</p><p>Last updated 1 June 2026</p></main>',
+          ),
+        ),
+      ),
+    );
+    expect(f.social).toBe(1);
+    expect(f.code).toBe(1);
+    expect(f.priceTerms).toBe(1);
+    expect(f.updated).toBe(1);
+  });
+
+  test("a date or a price is not a phone number", () => {
+    const f = skeletonFeatures(
+      buildSkeleton(
+        doc(page("<main><p>Posted 2026-06-01 and 12/06/2026</p><p>$1,299.00 in stock</p></main>")),
+      ),
+    );
+    expect(f.phoneText).toBe(0);
   });
 });

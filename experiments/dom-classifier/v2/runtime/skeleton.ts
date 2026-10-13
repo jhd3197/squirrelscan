@@ -174,6 +174,58 @@ export function bucket(length: number): number {
   return 5000;
 }
 
+/** Page-level counters for signals that say what a page is but have no node of their own. */
+interface PageStats {
+  tel: number;
+  mailto: number;
+  emailText: number;
+  phoneText: number;
+  social: number;
+  map: number;
+  code: number;
+  priceTerms: number;
+  updated: number;
+}
+type Context = Required<SkeletonOptions> & { stats: PageStats };
+
+const SOCIAL_HOST =
+  /^https?:\/\/(?:[a-z0-9-]+\.)*(?:facebook|instagram|twitter|x|linkedin|youtube|tiktok|pinterest|github)\.com\//i;
+const MAP_SRC =
+  /(?:google\.[a-z.]+\/maps|maps\.google|openstreetmap|mapbox|maps\.apple|goo\.gl\/maps)/i;
+const EMAIL_TEXT = /[\w.+-]{1,64}@[\w-]{1,63}(?:\.[\w-]{1,63}){1,4}/;
+const PHONE_TEXT = /(?:\+\d{1,3}[\s.-]?)?\(?\d{1,4}\)?(?:[\s.-]\d{1,4}){2,4}/;
+const DATES = /\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}[/.]\d{1,2}[/.]\d{2,4}\b/g;
+
+/** A phone-number-shaped run of at least 8 digits, once dates are blanked out. */
+function hasPhone(text: string): boolean {
+  const match = PHONE_TEXT.exec(text.replace(DATES, " "));
+  return match !== null && match[0].replace(/\D/g, "").length >= 8;
+}
+const PRICE_TERMS =
+  /\b(?:per (?:month|year|user|seat)|\/(?:mo|month|yr|year)|monthly|annually|billed (?:monthly|annually|yearly)|free trial|most popular)\b/i;
+const UPDATED =
+  /\b(?:last (?:updated|modified|revised)|effective (?:date|as of)|revised|date of last update)\b/i;
+
+function scanElement(name: string, element: DomNode, ownTrim: string, stats: PageStats): void {
+  if (name === "a") {
+    const href = (element.getAttribute?.("href") ?? "").slice(0, 200);
+    if (/^tel:/i.test(href)) stats.tel++;
+    else if (/^mailto:/i.test(href)) stats.mailto++;
+    else if (SOCIAL_HOST.test(href)) stats.social++;
+  } else if (name === "iframe") {
+    if (MAP_SRC.test((element.getAttribute?.("src") ?? "").slice(0, 300))) stats.map++;
+  } else if (name === "pre") {
+    stats.code++;
+  }
+  if (ownTrim.length > 4) {
+    const head = ownTrim.slice(0, 300);
+    if (head.includes("@") && EMAIL_TEXT.test(head)) stats.emailText++;
+    if (/\d{3}/.test(head) && hasPhone(head)) stats.phoneText++;
+    if (PRICE_TERMS.test(head)) stats.priceTerms++;
+    if (UPDATED.test(head)) stats.updated++;
+  }
+}
+
 interface Folded {
   nodes: SkeletonNode[];
   textLen: number;
@@ -253,7 +305,7 @@ function ownText(element: DomNode): string {
   return out;
 }
 
-function fold(element: DomNode, depth: number, options: Required<SkeletonOptions>): Folded {
+function fold(element: DomNode, depth: number, options: Context): Folded {
   const empty: Folded = { nodes: [], textLen: 0, links: 0, price: false, buy: false };
   const name = (element.localName ?? "").toLowerCase();
   if (
@@ -266,6 +318,7 @@ function fold(element: DomNode, depth: number, options: Required<SkeletonOptions
   const folded: Folded = { nodes: [], textLen: 0, links: 0, price: false, buy: false };
   const own = ownText(element);
   const ownTrim = own.replace(/\s+/g, " ").trim();
+  scanElement(name, element, ownTrim, options.stats);
   folded.textLen += ownTrim.length;
   if (ownTrim && PRICE.test(ownTrim.slice(0, 200))) folded.price = true;
 
@@ -412,10 +465,22 @@ function trim(nodes: SkeletonNode[], budget: Budget): SkeletonNode[] {
 
 /** Build the skeleton tree of a parsed document. */
 export function buildSkeleton(document: unknown, options: SkeletonOptions = {}): SkeletonNode {
-  const opts: Required<SkeletonOptions> = {
+  const stats: PageStats = {
+    tel: 0,
+    mailto: 0,
+    emailText: 0,
+    phoneText: 0,
+    social: 0,
+    map: 0,
+    code: 0,
+    priceTerms: 0,
+    updated: 0,
+  };
+  const opts: Context = {
     text: options.text ?? "headings",
     maxNodes: options.maxNodes ?? DEFAULT_MAX_NODES,
     maxDepth: options.maxDepth ?? DEFAULT_MAX_DEPTH,
+    stats,
   };
   const doc = document as DomNode & {
     documentElement?: DomNode;
@@ -432,6 +497,8 @@ export function buildSkeleton(document: unknown, options: SkeletonOptions = {}):
   const lang = (root.getAttribute?.("lang") ?? "").toLowerCase().slice(0, 8);
   if (lang) attrs.push(["lang", lang]);
   attrs.push(["len", bucket(result.textLen)]);
+  for (const [key, value] of Object.entries(stats))
+    if (value > 0) attrs.push([key, Math.min(value, 99)]);
   const node: SkeletonNode = { tag: "page", attrs, kids, n: 1 };
   if (opts.text === "headings") {
     const title = doc.querySelector?.("title");
@@ -497,4 +564,174 @@ export function skeleton(
 ): string {
   const tree = buildSkeleton(document, options);
   return format === "xml" ? renderXml(tree) : renderCompact(tree);
+}
+
+/** Fixed order and fixed set: this is the tree-model input derived from a skeleton. */
+export const SKELETON_FEATURES = [
+  "nodes",
+  "depth",
+  "lenBucket",
+  "h1",
+  "h2",
+  "h3",
+  "h4plus",
+  "p",
+  "pLong",
+  "pShort",
+  "img",
+  "list",
+  "listItems",
+  "listLinks",
+  "table",
+  "form",
+  "field",
+  "button",
+  "time",
+  "media",
+  "group",
+  "groupRuns",
+  "maxRun",
+  "header",
+  "nav",
+  "main",
+  "article",
+  "section",
+  "aside",
+  "footer",
+  "kindComments",
+  "kindBreadcrumb",
+  "kindPagination",
+  "kindPrice",
+  "kindCart",
+  "kindByline",
+  "kindShare",
+  "kindRelated",
+  "kindCookie",
+  "kindSearch",
+  "kindProduct",
+  "price",
+  "buy",
+  "linkRatio",
+  "more",
+  "tel",
+  "mailto",
+  "emailText",
+  "phoneText",
+  "social",
+  "map",
+  "code",
+  "priceTerms",
+  "updated",
+] as const;
+
+/** Page-level numbers from a skeleton tree, for models that do not read text. */
+export function skeletonFeatures(
+  root: SkeletonNode,
+): Record<(typeof SKELETON_FEATURES)[number], number> {
+  const f = Object.fromEntries(SKELETON_FEATURES.map((k) => [k, 0])) as Record<
+    (typeof SKELETON_FEATURES)[number],
+    number
+  >;
+  const lenOf = (node: SkeletonNode): number =>
+    Number(node.attrs.find(([k]) => k === "len")?.[1] ?? 0);
+  const attr = (node: SkeletonNode, key: string): number =>
+    Number(node.attrs.find(([k]) => k === key)?.[1] ?? 0);
+  const visit = (node: SkeletonNode, depth: number): void => {
+    f.nodes += node.n;
+    f.depth = Math.max(f.depth, depth);
+    f.maxRun = Math.max(f.maxRun, node.n);
+    const times = node.n;
+    switch (node.tag) {
+      case "h1":
+        f.h1 += times;
+        break;
+      case "h2":
+        f.h2 += times;
+        break;
+      case "h3":
+        f.h3 += times;
+        break;
+      case "h4":
+      case "h5":
+      case "h6":
+        f.h4plus += times;
+        break;
+      case "p":
+      case "li": {
+        if (node.tag === "p") {
+          f.p += times;
+          if (lenOf(node) >= 200) f.pLong += times;
+          else f.pShort += times;
+        }
+        break;
+      }
+      case "img":
+        f.img += times;
+        break;
+      case "list":
+        f.list += times;
+        f.listItems += attr(node, "items") * times;
+        f.listLinks += attr(node, "links") * times;
+        break;
+      case "table":
+        f.table += times;
+        break;
+      case "form":
+        f.form += times;
+        break;
+      case "field":
+        f.field += times;
+        break;
+      case "button":
+        f.button += times;
+        break;
+      case "time":
+        f.time += times;
+        break;
+      case "media":
+        f.media += times;
+        break;
+      case "g":
+        f.group += times;
+        f.groupRuns += 1;
+        break;
+      case "header":
+      case "nav":
+      case "main":
+      case "article":
+      case "section":
+      case "aside":
+      case "footer":
+        f[node.tag] += times;
+        break;
+      case "more":
+        f.more += attr(node, "n");
+        break;
+    }
+    const kind = node.attrs.find(([k]) => k === "kind")?.[1];
+    if (typeof kind === "string") {
+      const key =
+        `kind${kind[0]!.toUpperCase()}${kind.slice(1)}` as (typeof SKELETON_FEATURES)[number];
+      if (key in f) f[key] += times;
+    }
+    if (attr(node, "price")) f.price += times;
+    if (attr(node, "buy")) f.buy += times;
+    for (const kid of node.kids) visit(kid, depth + 1);
+  };
+  visit(root, 0);
+  for (const key of [
+    "tel",
+    "mailto",
+    "emailText",
+    "phoneText",
+    "social",
+    "map",
+    "code",
+    "priceTerms",
+    "updated",
+  ] as const)
+    f[key] = attr(root, key);
+  f.lenBucket = lenOf(root);
+  f.linkRatio = f.nodes ? Math.round((f.listLinks / f.nodes) * 100) / 100 : 0;
+  return f;
 }
