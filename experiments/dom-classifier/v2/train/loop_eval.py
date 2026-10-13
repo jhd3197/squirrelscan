@@ -114,6 +114,9 @@ def main() -> None:  # noqa: C901
     parser.add_argument("--any-rank", action="store_true",
                         help="a class fires when ITS probability clears the bar, whether or not it is the top class (a finding is per class); bars start at 0.2")
     parser.add_argument("--seeds", type=int, default=1, help="average this many boosters (different seeds) for the held-out predictions")
+    parser.add_argument("--majority", action="store_true",
+                        help="label = majority vote of haiku, opus and sonnet where all three answered (a three-way tie goes to opus); "
+                        "needs a sonnet=... teacher spec; items with fewer answers keep the usual opus-over-haiku label")
     parser.add_argument("--consensus", action="store_true",
                         help="drop every row where Haiku and Opus both answered and disagree (after merging article/blog, listing/product_listing): "
                         "scores the model on pages the teachers agree about; optimistic by design")
@@ -162,8 +165,18 @@ def main() -> None:  # noqa: C901
                     row = json.loads(line)
                     if "error" not in row and row["confidence"] >= args.min_teacher_conf:
                         merged = MERGE.get(row["label"], row["label"])
-                        found[row["itemId"]] = (merged, row["confidence"])
                         by_name.setdefault(name, {})[row["itemId"]] = merged
+                        if name != "sonnet":  # sonnet only votes (--majority); it never replaces the opus-over-haiku label
+                            found[row["itemId"]] = (merged, row["confidence"])
+        if args.majority and {"haiku", "opus", "sonnet"} <= set(by_name):
+            for item, sonnet_label in by_name["sonnet"].items():
+                haiku_label, opus_label = by_name["haiku"].get(item), by_name["opus"].get(item)
+                if haiku_label is None or opus_label is None:
+                    continue
+                votes = Counter([haiku_label, opus_label, sonnet_label])
+                top, count = votes.most_common(1)[0]
+                chosen = top if count >= 2 else opus_label
+                found[item] = (chosen, found[item][1] if item in found else 0.7)
         if args.consensus and "haiku" in by_name and "opus" in by_name:
             for item, label in by_name["opus"].items():
                 if by_name["haiku"].get(item, label) != label:
