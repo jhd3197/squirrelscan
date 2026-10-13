@@ -55,6 +55,10 @@ def main() -> None:
     parser.add_argument("--n-product", type=int, default=100)
     parser.add_argument("--n-negative", type=int, default=100)
     parser.add_argument("--seed", type=int, default=13)
+    parser.add_argument("--n-random", type=int, default=0,
+                        help="also write random.jsonl: this many schema-less pages, equal per article-score decile, <= 2 per domain")
+    parser.add_argument("--exclude", type=Path, action="append", default=[],
+                        help="sample files whose pages are already judged (never drawn again)")
     args = parser.parse_args()
     sealed = {json.loads(line)["d"] for line in args.sealed.read_text().splitlines() if line.strip()}
     source = {}
@@ -135,6 +139,28 @@ def main() -> None:
         + take(lambda pr: pr[art] < 0.1 and pr[prod] < 0.1, args.n_negative, "negative")
     )
     args.out.mkdir(parents=True, exist_ok=True)
+    if args.n_random:
+        excluded = {json.loads(line)["p"] for f in args.exclude for line in f.read_text().splitlines() if line.strip()}
+        deciles: dict[int, list] = defaultdict(list)
+        for p, pr in scored:
+            if p not in excluded:
+                deciles[min(int(pr[art] * 10), 9)].append((p, pr))
+        per = args.n_random // 10
+        drawn: list[dict] = []
+        used: Counter = Counter()
+        for d in range(10):
+            got = 0
+            for p, pr in deciles[d]:
+                if got >= per:
+                    break
+                if used[schemaless[p]] >= 2:
+                    continue
+                used[schemaless[p]] += 1
+                got += 1
+                drawn.append({"p": p, "kind": f"random-d{d}", "pArticle": round(float(pr[art]), 3),
+                              "pProduct": round(float(pr[prod]), 3), "top": classes[int(pr.argmax())], "d": schemaless[p]})
+        (args.out / "random.jsonl").write_text("".join(json.dumps(r) + "\n" for r in drawn))
+        print(f"random sample {len(drawn)}: per decile {Counter(r['kind'] for r in drawn)}")
     (args.out / "sample.jsonl").write_text("".join(json.dumps(r) + "\n" for r in sample))
     flagged_art = int(sum(1 for _, pr in scored if pr[art] >= 0.9))
     flagged_prod = int(sum(1 for _, pr in scored if pr[prod] >= 0.9))

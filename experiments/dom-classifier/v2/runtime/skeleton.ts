@@ -185,6 +185,16 @@ interface PageStats {
   code: number;
   priceTerms: number;
   updated: number;
+  wpPost: number;
+  wpPage: number;
+  wpAttachment: number;
+  wpArchive: number;
+  wpProduct: number;
+  commentItems: number;
+  dateClass: number;
+  readMore: number;
+  h1EqTitle: number;
+  titleLen: number;
 }
 type Context = Required<SkeletonOptions> & { stats: PageStats };
 
@@ -206,6 +216,17 @@ const PRICE_TERMS =
 const UPDATED =
   /\b(?:last (?:updated|modified|revised)|effective (?:date|as of)|revised|date of last update)\b/i;
 
+const COMMENT_ITEM = /(?:^|\s)comment(?:-\d+)?(?:\s|$)/;
+const COMMENT_ID = /^comment-\d+$/;
+const DATE_CLASS =
+  /(?:^|[\s_-])(?:entry-date|post-date|posted-on|published|pubdate|post-meta-date)(?:$|[\s_-])/;
+const READ_MORE = /^(?:read more|continue reading|read the full|view more|learn more)\b/i;
+const BODY_POST = /(?:^|\s)(?:single-post|postid-\d+|type-post)(?:\s|$)/;
+const BODY_PAGE = /(?:^|\s)(?:page-template\S*|page-id-\d+|type-page)(?:\s|$)/;
+const BODY_ATTACHMENT = /(?:^|\s)(?:attachment|attachmentid-\d+|single-attachment)(?:\s|$)/;
+const BODY_ARCHIVE = /(?:^|\s)(?:archive|category-\S+|tag-\S+)(?:\s|$)/;
+const BODY_PRODUCT = /(?:^|\s)(?:single-product|woocommerce-page|product-template-default)(?:\s|$)/;
+
 function scanElement(name: string, element: DomNode, ownTrim: string, stats: PageStats): void {
   if (name === "a") {
     const href = (element.getAttribute?.("href") ?? "").slice(0, 200);
@@ -217,6 +238,18 @@ function scanElement(name: string, element: DomNode, ownTrim: string, stats: Pag
   } else if (name === "pre") {
     stats.code++;
   }
+  if (name === "li" || name === "div" || name === "article" || name === "section") {
+    const cls = (element.getAttribute?.("class") ?? "").toLowerCase().slice(0, 200);
+    if (cls && COMMENT_ITEM.test(cls)) stats.commentItems++;
+    else if (COMMENT_ID.test((element.getAttribute?.("id") ?? "").toLowerCase()))
+      stats.commentItems++;
+  }
+  {
+    const cls = (element.getAttribute?.("class") ?? "").toLowerCase().slice(0, 200);
+    if (cls && DATE_CLASS.test(cls)) stats.dateClass++;
+  }
+  if (name === "a" && ownTrim.length > 0 && ownTrim.length < 30 && READ_MORE.test(ownTrim))
+    stats.readMore++;
   if (ownTrim.length > 4) {
     const head = ownTrim.slice(0, 300);
     if (head.includes("@") && EMAIL_TEXT.test(head)) stats.emailText++;
@@ -475,6 +508,16 @@ export function buildSkeleton(document: unknown, options: SkeletonOptions = {}):
     code: 0,
     priceTerms: 0,
     updated: 0,
+    wpPost: 0,
+    wpPage: 0,
+    wpAttachment: 0,
+    wpArchive: 0,
+    wpProduct: 0,
+    commentItems: 0,
+    dateClass: 0,
+    readMore: 0,
+    h1EqTitle: 0,
+    titleLen: 0,
   };
   const opts: Context = {
     text: options.text ?? "headings",
@@ -491,6 +534,19 @@ export function buildSkeleton(document: unknown, options: SkeletonOptions = {}):
   const body = doc.body ?? root;
   const budget = new Budget(opts.maxNodes);
   const result = fold(body, 0, opts);
+  const bodyClass = (body.getAttribute?.("class") ?? "").toLowerCase().slice(0, 600);
+  if (BODY_POST.test(bodyClass)) stats.wpPost = 1;
+  if (BODY_PAGE.test(bodyClass)) stats.wpPage = 1;
+  if (BODY_ATTACHMENT.test(bodyClass)) stats.wpAttachment = 1;
+  if (BODY_ARCHIVE.test(bodyClass)) stats.wpArchive = 1;
+  if (BODY_PRODUCT.test(bodyClass)) stats.wpProduct = 1;
+  {
+    const title = clean(doc.querySelector?.("title")?.textContent ?? "", 200).toLowerCase();
+    const h1 = clean(doc.querySelector?.("h1")?.textContent ?? "", 200).toLowerCase();
+    stats.titleLen = bucket(title.length);
+    if (title && h1 && (title.includes(h1.slice(0, 40)) || h1.includes(title.slice(0, 40))))
+      stats.h1EqTitle = 1;
+  }
   const kids = trim(runLength(result.nodes), budget);
   if (budget.dropped) kids.push({ tag: "more", attrs: [["n", budget.dropped]], kids: [], n: 1 });
   const attrs: [string, string | number][] = [];
@@ -498,7 +554,7 @@ export function buildSkeleton(document: unknown, options: SkeletonOptions = {}):
   if (lang) attrs.push(["lang", lang]);
   attrs.push(["len", bucket(result.textLen)]);
   for (const [key, value] of Object.entries(stats))
-    if (value > 0) attrs.push([key, Math.min(value, 99)]);
+    if (value > 0) attrs.push([key, Math.min(value, 999)]);
   const node: SkeletonNode = { tag: "page", attrs, kids, n: 1 };
   if (opts.text === "headings") {
     const title = doc.querySelector?.("title");
@@ -622,6 +678,16 @@ export const SKELETON_FEATURES = [
   "code",
   "priceTerms",
   "updated",
+  "wpPost",
+  "wpPage",
+  "wpAttachment",
+  "wpArchive",
+  "wpProduct",
+  "commentItems",
+  "dateClass",
+  "readMore",
+  "h1EqTitle",
+  "titleLen",
 ] as const;
 
 /** Page-level numbers from a skeleton tree, for models that do not read text. */
@@ -729,6 +795,16 @@ export function skeletonFeatures(
     "code",
     "priceTerms",
     "updated",
+    "wpPost",
+    "wpPage",
+    "wpAttachment",
+    "wpArchive",
+    "wpProduct",
+    "commentItems",
+    "dateClass",
+    "readMore",
+    "h1EqTitle",
+    "titleLen",
   ] as const)
     f[key] = attr(root, key);
   f.lenBucket = lenOf(root);

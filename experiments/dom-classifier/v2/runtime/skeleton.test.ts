@@ -224,4 +224,37 @@ describe("skeleton", () => {
     );
     expect(f.phoneText).toBe(0);
   });
+
+  test("post vs page vs attachment, comment volume, dates, read-more and h1 = title", () => {
+    const comments = Array.from(
+      { length: 5 },
+      (_, i) => `<li class="comment even" id="comment-${i}"><p>spam</p></li>`,
+    ).join("");
+    const f = (body: string, bodyClass: string, title = "T") =>
+      skeletonFeatures(
+        buildSkeleton(
+          parseHTML(
+            `<!doctype html><html><head><title>${title}</title></head><body class="${bodyClass}">${body}</body></html>`,
+          ).document,
+        ),
+      );
+    expect(f("<main><p>x</p></main>", "single single-post postid-12 type-post").wpPost).toBe(1);
+    expect(f("<main><p>x</p></main>", "page page-id-4 page-template-default").wpPage).toBe(1);
+    expect(f("<main><p>x</p></main>", "attachment attachmentid-7").wpAttachment).toBe(1);
+    expect(f("<main><p>x</p></main>", "archive category-news").wpArchive).toBe(1);
+    expect(f("<main><p>x</p></main>", "single-product woocommerce-page").wpProduct).toBe(1);
+    expect(f(`<main><p>x</p><ol>${comments}</ol></main>`, "").commentItems).toBe(5);
+    expect(
+      f('<main><span class="entry-date">1 June</span><a href="/a">Read more</a></main>', "")
+        .dateClass,
+    ).toBe(1);
+    expect(
+      f('<main><span class="entry-date">1 June</span><a href="/a">Read more</a></main>', "")
+        .readMore,
+    ).toBe(1);
+    expect(
+      f("<main><h1>Best shoes of 2026</h1></main>", "", "Best shoes of 2026 | My Blog").h1EqTitle,
+    ).toBe(1);
+    expect(f("<main><h1>Something else</h1></main>", "", "Best shoes").h1EqTitle).toBe(0);
+  });
 });
