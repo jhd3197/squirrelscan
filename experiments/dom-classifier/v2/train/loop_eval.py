@@ -110,6 +110,7 @@ def main() -> None:  # noqa: C901
     parser.add_argument("--goal-precision", type=float, default=0.90)
     parser.add_argument("--goal-recall", type=float, default=0.50)
     parser.add_argument("--min-teacher-conf", type=float, default=0.0)
+    parser.add_argument("--extra-fraction", type=float, default=1.0, help="learning curve: keep this random share of the train-only teacher rows")
     parser.add_argument("--save-model", type=Path, help="train on every labelled row and write model.txt + meta.json (classes, feature names, per-class thresholds) here")
     parser.add_argument("--pool-out", type=Path, help="train on every labelled row and write probabilities for the unlabelled schema-less pool here (active learning)")
     parser.add_argument("--pool-exclude", type=Path, action="append", default=[], help="sample files already judged: left out of the pool file")
@@ -175,6 +176,11 @@ def main() -> None:  # noqa: C901
     fold_label = {p: (v[0] if v[0] in classes else "other") for p, v in teacher.items()}
     weak_rows = {p: v for p, v in weak.items() if p in features and p not in teacher and p not in extra and v[0] in classes}
     extra_rows = {p: (v[0] if v[0] in classes else "other") for p, v in extra.items()}
+    if args.extra_fraction < 1.0:
+        import random as _random
+
+        keep = _random.Random(11).sample(sorted(extra_rows), int(len(extra_rows) * args.extra_fraction))
+        extra_rows = {p: extra_rows[p] for p in keep}
     print(f"teacher rows {len(fold_label)} {dict(Counter(fold_label.values()))}; weak rows {len(weak_rows)} {dict(Counter(v[0] for v in weak_rows.values()))}", flush=True)
 
     t_ids = sorted(fold_label)
