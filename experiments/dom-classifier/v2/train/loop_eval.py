@@ -271,10 +271,15 @@ def main() -> None:  # noqa: C901
         final = lgb.train(params, lgb.Dataset(x_all, label=y_all, weight=w_all), num_boost_round=args.rounds)
         final.save_model(str(args.save_model / "model.txt"))
         # a class that misses the goal at every bar abstains (threshold above 1): it never fires
-        thresholds = [(report["perClass"][c]["bestAtGoalPrecision"] or {}).get("bar", 1.01) for c in classes]
+        # ... and so does a class whose threshold rests on fewer than 10 held-out answers: that is not evidence
+        def bar_for(name: str) -> float:
+            best = report["perClass"][name]["bestAtGoalPrecision"]
+            return best["bar"] if best and best["answered"] >= 10 else 1.01
+
+        thresholds = [bar_for(c) for c in classes]
         (args.save_model / "meta.json").write_text(json.dumps({
             "classes": classes, "featureNames": names[:width], "classThresholds": thresholds,
-            "goalPrecision": args.goal_precision, "evaluation": {c: report["perClass"][c]["bestAtGoalPrecision"] for c in classes},
+            "goalPrecision": args.goal_precision, "evaluation": {c: (report["perClass"][c]["bestAtGoalPrecision"] if bar_for(c) <= 1 else None) for c in classes},
             "trainedOn": {"teacherRows": len(t_ids), "trainOnlyRows": len(e_ids), "weakRows": len(w_ids)},
             "tokens": args.tokens, "featureSet": args.feature_set}, indent=1) + "\n")
         print(f"saved model to {args.save_model}: thresholds {dict(zip(classes, thresholds))}", flush=True)
