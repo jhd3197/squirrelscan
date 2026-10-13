@@ -29,6 +29,7 @@ import {
   renderCompact,
   SKELETON_FEATURES,
   skeletonFeatures,
+  skeletonTokens,
 } from "../runtime/skeleton.ts";
 import { decode } from "./link-position.ts";
 
@@ -175,6 +176,11 @@ if (dataset && storePath) {
 }
 
 flush();
+if (stats.failed > 0.2 * (written + stats.failed)) {
+  throw new Error(
+    `${stats.failed} of ${written + stats.failed} pages failed to emit: refusing to write a mostly-empty shard`,
+  );
+}
 writeFileSync(
   `${out}/features.json`,
   JSON.stringify({ order: SKELETON_FEATURES, stats, rows: written }, null, 1) + "\n",
