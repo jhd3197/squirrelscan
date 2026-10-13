@@ -110,6 +110,9 @@ def main() -> None:  # noqa: C901
     parser.add_argument("--goal-precision", type=float, default=0.90)
     parser.add_argument("--goal-recall", type=float, default=0.50)
     parser.add_argument("--min-teacher-conf", type=float, default=0.0)
+    parser.add_argument("--save-model", type=Path, help="train on every labelled row and write model.txt + meta.json (classes, feature names, per-class thresholds) here")
+    parser.add_argument("--pool-out", type=Path, help="train on every labelled row and write probabilities for the unlabelled schema-less pool here (active learning)")
+    parser.add_argument("--pool-exclude", type=Path, action="append", default=[], help="sample files already judged: left out of the pool file")
     parser.add_argument("--decile-pool", type=Path, help="summary.json with decilePool: weights random-dN eval rows to the natural pool")
     parser.add_argument("--manifest", type=Path, default=Path("/Volumes/BACKUP/page-corpus/pages/manifest.jsonl"))
     parser.add_argument("--keep-homepage", action="store_true",
@@ -241,6 +244,40 @@ def main() -> None:  # noqa: C901
             report["goalsMet"].append(name)
     top = np.argsort(-importance)[:12]
     report["topFeatures"] = {names[i]: round(float(importance[i] / importance.sum()), 3) for i in top}
+    if args.pool_out:
+        watched = {t for t, c in V8.TYPE_TO_V8.items() if c in ("article", "blog_post", "product_detail")}
+        skip = set(fold_label) | set(extra_rows) | {json.loads(line)["p"] for f in args.pool_exclude for line in f.read_text().splitlines() if line.strip()}
+        pool_ids = []
+        for line in args.schema.read_text().splitlines():
+            row = json.loads(line)
+            if row.get("ok") and row["d"] not in sealed and not (set(row["ld"]) | set(row["ldNested"]) | set(row["md"])) & watched:
+                p = row["sha"][:16]
+                if p in features and p not in skip and p not in root:
+                    pool_ids.append((p, row["d"]))
+        x_all = np.vstack([xw, xe, xt])
+        y_all = np.concatenate([yw, ye, yt])
+        w_all = np.concatenate([np.full(len(yw), args.weak_weight), np.ones(len(ye) + len(yt))])
+        final = lgb.train(params, lgb.Dataset(x_all, label=y_all, weight=w_all), num_boost_round=args.rounds)
+        probs = final.predict(np.vstack([features[p][:width] for p, _ in pool_ids]))
+        args.pool_out.write_text("".join(json.dumps({"p": p, "d": d, "probs": [round(float(v), 3) for v in probs[i]]}) + "\n"
+                                         for i, (p, d) in enumerate(pool_ids)))
+        (args.pool_out.parent / "pool_classes.json").write_text(json.dumps(classes))
+        print(f"pool scored: {len(pool_ids)} pages", flush=True)
+    if args.save_model:
+        args.save_model.mkdir(parents=True, exist_ok=True)
+        x_all = np.vstack([xw, xe, xt])
+        y_all = np.concatenate([yw, ye, yt])
+        w_all = np.concatenate([np.full(len(yw), args.weak_weight), np.ones(len(ye) + len(yt))])
+        final = lgb.train(params, lgb.Dataset(x_all, label=y_all, weight=w_all), num_boost_round=args.rounds)
+        final.save_model(str(args.save_model / "model.txt"))
+        # a class that misses the goal at every bar abstains (threshold above 1): it never fires
+        thresholds = [(report["perClass"][c]["bestAtGoalPrecision"] or {}).get("bar", 1.01) for c in classes]
+        (args.save_model / "meta.json").write_text(json.dumps({
+            "classes": classes, "featureNames": names[:width], "classThresholds": thresholds,
+            "goalPrecision": args.goal_precision, "evaluation": {c: report["perClass"][c]["bestAtGoalPrecision"] for c in classes},
+            "trainedOn": {"teacherRows": len(t_ids), "trainOnlyRows": len(e_ids), "weakRows": len(w_ids)},
+            "tokens": args.tokens, "featureSet": args.feature_set}, indent=1) + "\n")
+        print(f"saved model to {args.save_model}: thresholds {dict(zip(classes, thresholds))}", flush=True)
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "oof.jsonl").write_text("".join(
         json.dumps({"p": t_ids[i], "true": classes[int(yt[i])], "pred": classes[int(pred[i])], "conf": round(float(conf[i]), 3),

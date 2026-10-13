@@ -116,7 +116,7 @@ function decodeBase64(value: string): ArrayBuffer {
   return bytes.buffer;
 }
 
-function decodeHead(json: HeadJson): Head {
+export function decodeHead(json: HeadJson): Head {
   const buffer = decodeBase64(json.trees);
   const view = new DataView(buffer);
   if (view.getUint32(0, true) !== MAGIC) throw new ArtifactError("bad tree-block magic");
