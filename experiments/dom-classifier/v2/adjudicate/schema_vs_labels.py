@@ -22,6 +22,7 @@ noise filters (site-wide types, template-prone types per domain, listings) apply
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 from collections import Counter, defaultdict
@@ -64,12 +65,23 @@ def main() -> None:
     parser.add_argument("--labels", action="append", required=True, help="name=path (jsonl with pageId|contentHash + pageType)")
     parser.add_argument("--sealed", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--plain-domains",
+        action="store_true",
+        help="schema rows come from corpus/schema-types.ts (plain domain in `d`, page id in `p`); "
+        "default is extract_schema.py rows (domain hash in `d`, content sha in `sha`)",
+    )
     args = parser.parse_args()
     sealed = {r["d"] for r in load(args.sealed)}
     if len(sealed) < 1000:
         raise SystemExit("sealed list too small")
 
-    rows = [r for r in load(args.schema) if r.get("ok") and r["d"] not in sealed]
+    def domain_hash(row: dict) -> str:
+        return hashlib.sha256(row["d"].encode()).hexdigest()[:16] if args.plain_domains else row["d"]
+
+    rows = [r for r in load(args.schema) if r.get("ok", True) and domain_hash(r) not in sealed]
+    if args.plain_domains:
+        rows = [r for r in rows if int(hashlib.sha256(r["d"].encode()).hexdigest()[:8], 16) % 100 < 90]
     by_domain: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
         by_domain[row["d"]].append(row)
@@ -85,7 +97,7 @@ def main() -> None:
     for row in rows:
         label, reason = V8.page_label(row, site_wide[row["d"]])
         reasons[reason] += 1
-        schema_of[row["sha"][:16]] = (label, reason, {"og": row.get("og"), "ld": sorted(row["ld"])[:6]})
+        schema_of[(row["p"] if args.plain_domains else row["sha"])[:16]] = (label, reason, {"og": row.get("og"), "ld": sorted(row["ld"])[:6]})
 
     args.out.mkdir(parents=True, exist_ok=True)
     report: dict = {"schemaPages": len(rows), "schemaReasons": dict(reasons)}
