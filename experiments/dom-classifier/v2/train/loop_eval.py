@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["numpy", "lightgbm"]
+# dependencies = ["numpy", "lightgbm", "scikit-learn"]
 # ///
 """One iteration of the page-type loop: train on weak + teacher labels, score on teacher folds (#2307).
 
@@ -117,6 +117,9 @@ def main() -> None:  # noqa: C901
     parser.add_argument("--consensus", action="store_true",
                         help="drop every row where Haiku and Opus both answered and disagree (after merging article/blog, listing/product_listing): "
                         "scores the model on pages the teachers agree about; optimistic by design")
+    parser.add_argument("--embeddings", type=Path, help="npz from modal_embed.py: appended to every page's features (upper-bound probe of a text channel; zeros for pages without text)")
+    parser.add_argument("--linear", type=float, default=0.0,
+                        help="C: fit a multinomial logistic regression on the embedding block ONLY instead of boosted trees (needs --embeddings)")
     parser.add_argument("--extra-fraction", type=float, default=1.0, help="learning curve: keep this random share of the train-only teacher rows")
     parser.add_argument("--save-model", type=Path, help="train on every labelled row and write model.txt + meta.json (classes, feature names, per-class thresholds) here")
     parser.add_argument("--pool-out", type=Path, help="train on every labelled row and write probabilities for the unlabelled schema-less pool here (active learning)")
@@ -130,6 +133,14 @@ def main() -> None:  # noqa: C901
     sealed = {json.loads(line)["d"] for line in args.sealed.read_text().splitlines() if line.strip()}
 
     features, names = load_features(args.skeletons, args.tokens)
+    if args.embeddings:
+        npz = np.load(args.embeddings, allow_pickle=False)
+        emb = {str(i): v.astype(np.float32) for i, v in zip(npz["ids"], npz["x"])}
+        dim = next(iter(emb.values())).shape[0]
+        zero = np.zeros(dim, dtype=np.float32)
+        features = {p: np.concatenate([v, emb.get(p, zero)]) for p, v in features.items()}
+        names = names + [f"emb{i}" for i in range(dim)]
+        print(f"embeddings appended: {dim} dims for {len(emb)} pages", flush=True)
     width = BASE_FEATURES if args.feature_set == "base" else len(names)
     weak = weak_labels(args.schema, sealed)
 
@@ -233,6 +244,16 @@ def main() -> None:  # noqa: C901
         else:
             teacher_w = np.ones(len(y_teacher))
         w_train = np.concatenate([np.full(len(yw), args.weak_weight), teacher_w])
+        if args.linear:
+            from sklearn.linear_model import LogisticRegression
+
+            emb_cols = slice(width - 384, width)
+            lr = LogisticRegression(C=args.linear, max_iter=2000)
+            lr.fit(x_train[:, emb_cols], y_train, sample_weight=w_train)
+            part = np.zeros((int(test.sum()), len(classes)))
+            part[:, lr.classes_] = lr.predict_proba(xt[test][:, emb_cols])
+            oof[test] += part
+            continue
         for seed in range(args.seeds):
             booster = lgb.train({**params, "seed": params["seed"] + 101 * seed}, lgb.Dataset(x_train, label=y_train, weight=w_train), num_boost_round=args.rounds)
             oof[test] += booster.predict(xt[test]) / args.seeds
