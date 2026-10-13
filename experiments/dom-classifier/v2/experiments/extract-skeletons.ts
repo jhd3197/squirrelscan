@@ -4,7 +4,8 @@
  *
  *   bun run experiments/extract-skeletons.ts --out <dir> \
  *       --corpus /Volumes/BACKUP/page-corpus \
- *       --dataset <silver-cc dir> --store <content-store.db>
+ *       --dataset <silver-cc dir> --store <content-store.db> [--shard i/n]
+ * With `--shard i/n` a process takes the pages whose id hashes to shard i of n (run n of them, one --out each).
  *
  * Two sources, one id space: `p` is the first 16 hex of the page's content sha256 (the
  * corpus `raw.sha256`, and the `pageId` of the silver datasets and their label files).
@@ -35,6 +36,10 @@ function arg(name: string): string | undefined {
   const i = Bun.argv.indexOf(name);
   return i < 0 ? undefined : Bun.argv[i + 1];
 }
+const shardSpec = (arg("--shard") ?? "0/1").split("/").map(Number);
+const [shard, shards] = [shardSpec[0]!, shardSpec[1]!];
+/** A page belongs to exactly one shard, by its id, so a page in both sources is never written twice. */
+const mine = (p: string) => shards <= 1 || parseInt(p.slice(0, 4), 16) % shards === shard;
 const out = arg("--out");
 if (!out) throw new Error("--out is required");
 mkdirSync(out, { recursive: true });
@@ -114,6 +119,7 @@ if (corpus) {
       stats.skippedSealed++;
       continue;
     }
+    if (!mine(page.raw.sha256.slice(0, 16))) continue;
     try {
       const bytes = gunzipSync(readFileSync(`${corpus}/pages/blobs/${page.raw.sha256}.html.gz`));
       emit(
@@ -143,6 +149,7 @@ if (dataset && storePath) {
   for await (const line of input) {
     if (!line) continue;
     const row = JSON.parse(line) as { p: string; domain: string; s: string };
+    if (!mine(row.p)) continue;
     const digest = sha16(row.domain);
     if (bucketOf(row.domain) >= 90) {
       stats.skippedBucket++;

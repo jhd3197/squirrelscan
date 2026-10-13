@@ -16,7 +16,7 @@ the head only answers above a confidence bar (the way squirrel would use it).
 
   DOM_CLASSIFIER_DATASET_VERSION=silver-cc uv run --script train/ablate_skeleton.py \
       --data-root /Volumes/BACKUP/dom-classifier-data/2026-10-08-cc \
-      --jev <labels/pagetype-v81> --skeletons <skeletons.jsonl> --out <dir>
+      --jev <labels/pagetype-v81> --skeletons <skeletons dir or file> --out <dir>
 
 Schema, og:type and URL tokens are in none of the three sets.
 """
@@ -38,12 +38,17 @@ CONFIG = {"learningRate": 0.05, "numLeaves": 31, "minDataInLeaf": 20}
 BARS = (0.8, 0.9, 0.95)
 
 
-def load_skeleton(path: Path) -> dict[str, np.ndarray]:
+def load_skeleton(root: Path) -> dict[str, np.ndarray]:
+    """One skeletons.jsonl, or a directory of shard-*/skeletons.jsonl (extract-skeletons.ts --shard)."""
+    paths = [root] if root.is_file() else sorted(root.glob("shard-*/skeletons.jsonl"))
+    if not paths:
+        raise SystemExit(f"no skeleton rows under {root}")
     out: dict[str, np.ndarray] = {}
-    with path.open() as handle:
-        for line in handle:
-            row = json.loads(line)
-            out[row["p"]] = np.asarray(row["f"], dtype=np.float32)
+    for path in paths:
+        with path.open() as handle:
+            for line in handle:
+                row = json.loads(line)
+                out[row["p"]] = np.asarray(row["f"], dtype=np.float32)
     return out
 
 
