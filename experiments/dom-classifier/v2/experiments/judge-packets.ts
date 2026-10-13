@@ -21,6 +21,8 @@ function arg(name: string): string {
   return Bun.argv[i + 1]!;
 }
 const corpus = arg("--corpus");
+const urlsIndex = Bun.argv.indexOf("--urls");
+const urlPaths: Record<string, string> = urlsIndex >= 0 ? JSON.parse(readFileSync(Bun.argv[urlsIndex + 1]!, "utf8")) : {};
 const sample = readFileSync(arg("--sample"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { p: string });
 const wanted = new Set(sample.map((s) => s.p));
 const sha = new Map<string, string>();
@@ -54,6 +56,7 @@ for (const { p } of sample) {
       JSON.stringify({
         itemId: p,
         packet: [
+          ...(urlPaths[p] ? [`url path: ${urlPaths[p]}`] : []),
           `language: ${document.documentElement?.getAttribute("lang") ?? "unknown"}`,
           `title: ${flat(document.querySelector("title")?.textContent, 160)}`,
           `headings:\n${headings.join("\n")}`,
