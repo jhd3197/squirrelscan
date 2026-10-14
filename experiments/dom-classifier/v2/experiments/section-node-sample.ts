@@ -30,6 +30,10 @@ function arg(name: string, fallback?: string): string {
 const corpus = arg("--corpus");
 const out = arg("--out");
 const perPage = Number(arg("--per-page", "6"));
+// --bias: fill most slots from nodes whose tag/role/class/id tokens look like a rare section class (pagination, newsletter,
+// login, share, byline, address, breadcrumbs, related). Ids get the "secb-" prefix so evaluation can keep natural items apart.
+const bias = Bun.argv.includes("--bias");
+const RARE = /pagina|pager|breadcrumb|newsletter|subscribe|signup|sign-up|login|log-in|account|share|social|byline|author|address|contact-info|opening|hours|related|recommend|more-from|locale|language|lang-switch|cookie|consent|review|rating|video|embed/;
 let seed = Number(arg("--seed", "7"));
 const rand = () => ((seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296);
 const urlPaths: Record<string, string> = JSON.parse(readFileSync(arg("--urls"), "utf8"));
@@ -121,14 +125,21 @@ for (const id of ids) {
       while (chosen.length < n && copy.length) chosen.push(copy.splice(Math.floor(rand() * copy.length), 1)[0]!);
       return chosen;
     };
-    const chosen = [...pick(landmark, Math.ceil(perPage / 3)), ...pick(rest, perPage)].slice(0, perPage);
+    const rareHit = (n: (typeof candidates)[number]) => {
+      const el = elements[n.nodeId] as El;
+      return RARE.test(`${n.tag} ${n.role ?? ""} ${el.getAttribute?.("class") ?? ""} ${el.getAttribute?.("id") ?? ""} ${el.getAttribute?.("aria-label") ?? ""}`.toLowerCase());
+    };
+    const rare = bias ? candidates.filter(rareHit) : [];
+    const chosen = bias
+      ? [...pick(rare, perPage - 1), ...pick(candidates.filter((n) => !rare.includes(n)), 1)].slice(0, perPage)
+      : [...pick(landmark, Math.ceil(perPage / 3)), ...pick(rest, perPage)].slice(0, perPage);
     const nodePackets: Record<string, string> = {};
     for (const node of chosen) {
       const el = elements[node.nodeId] as El;
       nodePackets[String(node.nodeId)] = packetFor(el);
       items.push(
         JSON.stringify({
-          itemId: `sec-${id}-${node.nodeId}`,
+          itemId: `${bias ? "secb" : "sec"}-${id}-${node.nodeId}`,
           axis: "section",
           pageId: id,
           nodeId: String(node.nodeId),

@@ -46,6 +46,8 @@ def main() -> None:
     parser.add_argument("--goal-precision", type=float, default=0.9)
     parser.add_argument("--min-answers", type=int, default=10)
     parser.add_argument("--min-class", type=int, default=15)
+    parser.add_argument("--natural-only-thresholds", action="store_true",
+                        help="choose thresholds on out-of-fold rows whose itemId does not start with secb- (mined, class-enriched)")
     args = parser.parse_args()
 
     truth: dict[str, str] = {}
@@ -75,6 +77,7 @@ def main() -> None:
         test = groups == k
         oof[test] = lgb.train(params, lgb.Dataset(x[~test], label=y[~test]), num_boost_round=args.rounds).predict(x[test])
     pred, conf = oof.argmax(axis=1), oof.max(axis=1)
+    nat = np.asarray([not r["itemId"].startswith("secb-") for r in rows]) if args.natural_only_thresholds else np.ones(len(rows), bool)
     thresholds, report = [], {}
     for i, cls in enumerate(classes):
         if cls == "none":
@@ -82,16 +85,16 @@ def main() -> None:
             continue
         chosen = None
         for bar in BARS:
-            fired = (pred == i) & (conf >= bar)
+            fired = (pred == i) & (conf >= bar) & nat
             if fired.sum() < args.min_answers:
                 break
             prec = float((y[fired] == i).mean())
             if prec >= args.goal_precision:
                 chosen = {"bar": bar, "answered": int(fired.sum()), "precision": round(prec, 3),
-                          "recall": round(float(((y == i) & fired).sum() / max((y == i).sum(), 1)), 3)}
+                          "recall": round(float(((y == i) & fired).sum() / max(((y == i) & nat).sum(), 1)), 3)}
                 break  # lowest bar holding the goal = most recall
         thresholds.append(chosen["bar"] if chosen else 1.01)
-        report[cls] = {"support": int((y == i).sum()), "threshold": chosen["bar"] if chosen else None, "oof": chosen}
+        report[cls] = {"support": int(((y == i) & nat).sum()), "supportAll": int((y == i).sum()), "threshold": chosen["bar"] if chosen else None, "oof": chosen}
 
     final = lgb.train(params, lgb.Dataset(x, label=y), num_boost_round=args.rounds)
     args.out.mkdir(parents=True, exist_ok=True)

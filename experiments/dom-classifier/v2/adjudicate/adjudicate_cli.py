@@ -92,8 +92,9 @@ def valid(answer: object, classes: list[str], section: bool = False) -> bool:
 
 
 class Guard:
-    def __init__(self, stop_at: float):
+    def __init__(self, stop_at: float, tolerate_warning: bool = False):
         self.stop_at = stop_at
+        self.ok_statuses = (None, "allowed", "allowed_warning") if tolerate_warning else (None, "allowed")
         self.stopped: str | None = None
         self.utilization: float | None = None
         self.resets_at: int | None = None
@@ -107,7 +108,7 @@ class Guard:
                     self.utilization = window["utilization"]
                 if window.get("resetsAt"):
                     self.resets_at = window["resetsAt"]
-                if info.get("status") not in (None, "allowed"):
+                if info.get("status") not in self.ok_statuses:
                     self.stopped = f"rate_limit_status:{info.get('status')}"
                 elif self.utilization is not None and self.utilization >= self.stop_at:
                     self.stopped = f"five_hour_utilization:{self.utilization}"
@@ -233,6 +234,7 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--concurrency", type=int, default=2)
     parser.add_argument("--stop-utilization", type=float, default=0.9)
+    parser.add_argument("--tolerate-warning", action="store_true", help="keep going on allowed_warning (e.g. weekly window); still stops on rejected")
     parser.add_argument(
         "--start-below", type=float, default=1.0, help="run one item first; go on only if the window is under this"
     )
@@ -263,7 +265,7 @@ def main() -> None:
     # No marker list (the gold sets): ad and promo_banner stay as answered.
     ad_marked = {f"{r['pageId']}#{r['nodeId']}" for r in jsonl(args.ad_markers)} if args.ad_markers else None
     system = systems()
-    guard = Guard(args.stop_utilization)
+    guard = Guard(args.stop_utilization, args.tolerate_warning)
     started = time.time()
     counts = {"ok": 0, "errors": 0}
 
