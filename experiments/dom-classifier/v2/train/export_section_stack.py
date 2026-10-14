@@ -20,8 +20,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import random
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import lightgbm as lgb
@@ -73,6 +74,10 @@ def main() -> None:
     parser.add_argument("--items-as-section", action="store_true",
                         help="a node the labeller marked as an ITEM of a class (label none, itemOf set) takes that class as its label; "
                         "without this flag only comments items do")
+    parser.add_argument("--max-pages-per-domain", type=int, default=0,
+                        help="keep at most N pages of any one domain (random, seed 5; all nodes of a kept page stay); needs --domains; 0 = no cap")
+    parser.add_argument("--domain-weight", choices=("none", "sqrt"), default="none",
+                        help="sqrt: weight each training node by 1/sqrt(pages of its domain), normalised to mean 1; needs --domains")
     parser.add_argument("--featurizer-version", help="recorded in the meta; default: the nodes sidecar, else unknown")
     parser.add_argument("--threads", type=int, default=2)
     args = parser.parse_args()
@@ -85,6 +90,20 @@ def main() -> None:
                 truth[row["itemId"]] = row["label"]
                 item_of[row["itemId"]] = row.get("itemOf") or ""
     rows = [r for r in jsonl(args.nodes) if r["itemId"] in truth]
+    domains: dict[str, str] = json.loads(args.domains.read_text()) if args.domains else {}
+    if (args.max_pages_per_domain or args.domain_weight != "none") and not domains:
+        raise SystemExit("--max-pages-per-domain and --domain-weight need --domains")
+    pages_of: dict[str, set[str]] = defaultdict(set)
+    for r in rows:
+        pages_of[str(domains.get(r["pageId"], r["pageId"]))].add(r["pageId"])
+    if args.max_pages_per_domain:
+        rng = random.Random(5)
+        keep: set[str] = set()
+        for d in sorted(pages_of):
+            pages = sorted(pages_of[d])
+            keep.update(rng.sample(pages, min(len(pages), args.max_pages_per_domain)))
+        rows = [r for r in rows if r["pageId"] in keep]
+        pages_of = {d: {p for p in ps if p in keep} for d, ps in pages_of.items()}
 
     def label(item_id: str) -> str:
         item = item_of[item_id]
@@ -94,7 +113,6 @@ def main() -> None:
     counts = Counter(label_of.values())
     classes = sorted(c for c, n in counts.items() if n >= args.min_class and c != "none") + ["none"]
     y = np.asarray([classes.index(label_of[r["itemId"]]) if label_of[r["itemId"]] in classes else len(classes) - 1 for r in rows])
-    domains: dict[str, str] = json.loads(args.domains.read_text()) if args.domains else {}
     group_keys = [str(domains.get(r["pageId"], r["pageId"])) for r in rows]
     groups = np.asarray([fold_of(k, args.folds) for k in group_keys])
     n_dense, buckets = len(rows[0]["f"]), 512
@@ -106,10 +124,15 @@ def main() -> None:
     params = {"objective": "multiclass", "num_class": len(classes), "learning_rate": 0.05, "num_leaves": 15, "min_data_in_leaf": 8,
               "feature_fraction": 0.7, "bagging_fraction": 0.8, "bagging_freq": 1, "num_threads": args.threads, "verbose": -1,
               "seed": 5, "lambda_l2": 1.0}
+    weight = None
+    if args.domain_weight == "sqrt":
+        weight = np.asarray([1.0 / np.sqrt(len(pages_of[k])) for k in group_keys])
+        weight = weight / weight.mean()
     oof = np.zeros((len(rows), len(classes)))
     for k in range(args.folds):
         test = groups == k
-        oof[test] = lgb.train(params, lgb.Dataset(x[~test], label=y[~test]), num_boost_round=args.rounds).predict(x[test])
+        train_w = None if weight is None else weight[~test]
+        oof[test] = lgb.train(params, lgb.Dataset(x[~test], label=y[~test], weight=train_w), num_boost_round=args.rounds).predict(x[test])
     pred, conf = oof.argmax(axis=1), oof.max(axis=1)
     nat = np.asarray([not r["itemId"].startswith("secb-") for r in rows]) if args.natural_only_thresholds else np.ones(len(rows), bool)
     thresholds, report = [], {}
@@ -138,7 +161,7 @@ def main() -> None:
         report[cls] = {"support": int(((y == i) & nat).sum()), "supportAll": int((y == i).sum()), "threshold": chosen["bar"] if chosen else None,
                        "oof": chosen, "curve": curve}
 
-    final = lgb.train(params, lgb.Dataset(x, label=y), num_boost_round=args.rounds)
+    final = lgb.train(params, lgb.Dataset(x, label=y, weight=weight), num_boost_round=args.rounds)
     args.out.mkdir(parents=True, exist_ok=True)
     model_path = args.out / "section-stack.txt"
     final.save_model(str(model_path))
@@ -157,6 +180,7 @@ def main() -> None:
             "foldGrouping": "domain" if args.domains else "page", "foldGroups": len(set(group_keys)), "folds": args.folds,
             "itemsAsSection": args.items_as_section, "minAnswers": args.min_answers, "minClass": args.min_class,
             "naturalOnlyThresholds": args.natural_only_thresholds,
+            "maxPagesPerDomain": args.max_pages_per_domain, "domainWeight": args.domain_weight,
             "featurizerVersion": featurizer_version(args.nodes, args.featurizer_version)}
     (args.out / "section-head.meta.json").write_text(json.dumps(meta, indent=1) + "\n")
     print(json.dumps(report, indent=1))
