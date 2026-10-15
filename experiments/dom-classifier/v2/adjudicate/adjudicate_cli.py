@@ -240,8 +240,11 @@ def main() -> None:
     )
     parser.add_argument("--scratch", type=Path, required=True, help="empty working directory for every process")
     args = parser.parse_args()
-    if args.concurrency > 3:
-        raise SystemExit("at most 3 concurrent claude processes on this machine")
+    # 3 by default (each claude process is ~150-190 MB and the box has OOM-restarted before); a run that must go faster sets
+    # ADJUDICATE_MAX_CONCURRENCY on purpose and watches memory.
+    limit = int(os.environ.get("ADJUDICATE_MAX_CONCURRENCY", "3"))
+    if args.concurrency > limit:
+        raise SystemExit(f"at most {limit} concurrent claude processes on this machine (ADJUDICATE_MAX_CONCURRENCY raises it)")
     args.arm = f"cli-{args.model}-{args.effort}" + ("" if args.modality == "image" else f"-{args.modality}")
     items = jsonl(args.items)
     if args.only_pilot:
