@@ -19,6 +19,10 @@ How it works:
 
 Thanks to @WilliamK112, whose pull requests are behind the `content/hidden-text`, crawler event, plan lookup and npm install fixes below, and who also kept the `squirrel analyze` tests from scanning a developer's real project databases and made CI check that the compiled CLI carries the rules version it was built from.
 
+### Added
+
+- `schema/expected-type` flags a page that the bundled page classifier is sure about and that declares none of the structured data its type should carry: `Product` on a product page, `Article` or `BlogPosting` on an article or blog post, `CollectionPage` or `ItemList` on a listing, `ContactPage` or an organization type on a contact page, `AboutPage`, `Person` or an organization type on an about page, and `TechArticle`, `HowTo` or `FAQPage` on documentation. It trusts only the model's answer, at 0.9 confidence or above (`min_confidence` sets it), never a type read from the page's own markup. A page that declares a listing type is not asked for article or product markup. With `--no-classifier` it reports nothing. See [schema/expected-type](https://docs.squirrelscan.com/rules/schema/expected-type).
+
 ### Changed
 
 - The crawler's `page:fetched` event now carries each page's `ttfbMs` and `fetcherId`, and no longer declares a `rendered` field, which the crawler never set and nothing read.

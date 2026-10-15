@@ -178,7 +178,12 @@ describe("runStreamingRules — canonical 518-page v1↔v2 merge gate", () => {
       // or code-editor markup and no mojibake for it to change; the new
       // placeholder-title check adds a row only for a broken title, and every
       // synthetic title is real copy.
-      expect(v1.findings.length).toBe(101743);
+      // 101743 -> 102243: schema/expected-type is page-scoped and adds one check on each
+      // of 500 pages. The harness pages carry no classification (the page classifier
+      // is not wired into the synthetic site), so the check is the info "not
+      // classified with enough confidence". Info does not score, so
+      // healthScore.overall is unmoved at 51.
+      expect(v1.findings.length).toBe(102243);
       // Tripwire: EXTENDING a rule must never add a tally key, so a change here
       // is only correct alongside a deliberate new rule id. 266 -> 267 is
       // content/hidden-text, 267 -> 268 content/thin-vs-site-norm, 268 -> 269
@@ -204,9 +209,9 @@ describe("runStreamingRules — canonical 518-page v1↔v2 merge gate", () => {
       // 305 -> 306 mobile/web-app-manifest,
       // 306 -> 307 reliability/broken-forms,
       // 307 -> 308 content/common-misspellings,
-      // 308 -> 309 mobile/input-zoom;
+      // 308 -> 309 mobile/input-zoom, 309 -> 310 schema/expected-type;
       // anything else means a rule id leaked in, so fix that rather than this number.
-      expect(v1.perRuleTally.length).toBe(309);
+      expect(v1.perRuleTally.length).toBe(310);
       expect(v1.perRuleTally.find((t) => t.ruleId === "reliability/broken-forms")).toEqual({
         ruleId: "reliability/broken-forms",
         pass: 0,
