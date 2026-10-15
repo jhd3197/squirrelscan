@@ -24,6 +24,7 @@ Thanks to @WilliamK112, whose pull requests are behind the `content/hidden-text`
 - The crawler's `page:fetched` event now carries each page's `ttfbMs` and `fetcherId`, and no longer declares a `rendered` field, which the crawler never set and nothing read.
 - The rule runner builds its per-rule timing line only when `SQUIRREL_RULE_PROFILE` is set, instead of building it on every rule run and throwing it away. Measured on a 300-page crawl of the docs site, which makes 53,450 rule runs, the difference is not measurable: about 5 ms of work against 38 s of rule time. With `SQUIRREL_RULE_PROFILE=1` the `[rule-profile]` lines are unchanged.
 - `links/broken-links` says where on the page a broken internal link sits (the footer, the navigation, the comments, the page content), from landmarks and comment-thread markup. Each item also carries `meta.sections` counts.
+- Where the markup says nothing, a small page classifier bundled with squirrel (about 9 MB, no network call) names the part of the page: the header, footer, navigation, sidebar or page content, and sections such as the pagination, breadcrumbs, a related-content block, the business details, the social sharing links, the account and login links, the author byline and the newsletter signup. Markup always wins and comment threads stay markup-only. Each page also stores the classifier's page type. `squirrel self doctor` shows the artifact and its load time.
 
 ### Fixed
 
