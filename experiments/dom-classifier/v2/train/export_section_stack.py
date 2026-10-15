@@ -166,6 +166,11 @@ def main() -> None:
     model_path = args.out / "section-stack.txt"
     final.save_model(str(model_path))
     booster, head_json, reference = em.head(model_path, None, classes, threshold=1.01, class_thresholds=thresholds)
+    fv = featurizer_version(args.nodes, args.featurizer_version)
+    # Featurizer 2.3.0 rows carry the text/attribute token stream: the head declares that it reads it (and gets the union at runtime).
+    token_streams = ["classid", "text"] if fv.startswith("v2.3") else ["classid"]
+    if token_streams != ["classid"]:
+        head_json["tokenStreams"] = token_streams
     dense_x = x[:2000].toarray().astype(np.float32)
     lgb_probs, ref_probs = booster.predict(dense_x), em.evaluate(reference, dense_x)
     diff = np.abs(lgb_probs - ref_probs)
@@ -181,7 +186,7 @@ def main() -> None:
             "itemsAsSection": args.items_as_section, "minAnswers": args.min_answers, "minClass": args.min_class,
             "naturalOnlyThresholds": args.natural_only_thresholds,
             "maxPagesPerDomain": args.max_pages_per_domain, "domainWeight": args.domain_weight,
-            "featurizerVersion": featurizer_version(args.nodes, args.featurizer_version)}
+            "featurizerVersion": fv, "tokenStreams": token_streams}
     (args.out / "section-head.meta.json").write_text(json.dumps(meta, indent=1) + "\n")
     print(json.dumps(report, indent=1))
     (args.out / "oof-table.txt").write_text(table(report, classes) + "\n")
