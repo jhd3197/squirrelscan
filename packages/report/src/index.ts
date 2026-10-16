@@ -307,6 +307,7 @@ export {
   TEMPLATE_REGIONS,
   checkPagesScopedAway,
   checkRegionScope,
+  itemLabel,
   itemRegionScope,
   regionScopeData,
   regionScopeLine,
