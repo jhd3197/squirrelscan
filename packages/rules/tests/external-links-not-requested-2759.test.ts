@@ -300,6 +300,6 @@ describe("links/broken-external-links: masked hrefs still find their section (#2
     expect(item.id).toBe(masked);
     expect(item.label).toBe(`${masked}, linked in the footer`);
     // The credential is in neither the label nor the meta.
-    expect(JSON.stringify(item)).not.toContain("0123456789abcdef0123456789abcdef");
+    expect(JSON.stringify(item)).not.toContain("0123456789abcdef0123456789abcdef"); // pragma: allowlist secret
   });
 });
