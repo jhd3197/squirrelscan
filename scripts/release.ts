@@ -141,14 +141,9 @@ async function checkChangelogSection(version: string): Promise<void> {
 
 // Every manifest that carries the release version. server.json is deliberately
 // absent: it tracks its own 1.0.x cadence because the MCP registry rejects a
-// backwards version jump.
-export const SYNCED_MANIFESTS = [
-  PACKAGE_JSON,
-  "npm/package.json",
-  "plugin.json",
-  ".cursor-plugin/plugin.json",
-  ".claude-plugin/plugin.json",
-];
+// backwards version jump. The agent plugin manifests are gone too: they live in
+// squirrelscan/skills now and version by commit, not by CLI release.
+export const SYNCED_MANIFESTS = [PACKAGE_JSON, "npm/package.json"];
 
 // Throws when one of these is missing rather than skipping it. They are all
 // tracked files, so absence means a broken checkout -- and "skip what isn't

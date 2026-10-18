@@ -24,6 +24,7 @@ export interface CrawlMetadataWithPublished extends CrawlMetadata {
   published?: PublishedReportRecord;
 }
 
+import { parseResolvedAuditSettings } from "@squirrelscan/core-contracts/audit-levels";
 import { unpackComponentOccurrences } from "@squirrelscan/core-contracts/component-evidence";
 import { unpackSiteResourceOccurrences } from "@squirrelscan/core-contracts/site-resource-evidence";
 import { WITHHELD_SEED_REDIRECT_TARGET } from "@squirrelscan/report";
@@ -34,10 +35,15 @@ import {
   type OutputFormat,
 } from "@/constants";
 import { getGlobalContentStore } from "@/crawler/storage/content-store";
+import { warnEvictedPages } from "@/crawler/storage/eviction-notice";
 import { SQLiteStorage } from "@/crawler/storage/sqlite";
 import { reconstructReport } from "@/reports/reconstruct";
 import { retiredAuditReason } from "@/reports/retired";
-import { isValidCategory, normalizeCategoryCode } from "@/rules/categories";
+import {
+  CATEGORIES,
+  isValidCategory,
+  normalizeCategoryCode,
+} from "@/rules/categories";
 import { getProjectsPath } from "@/self/paths";
 import {
   isEquivalentAuditTarget,
@@ -135,6 +141,8 @@ interface SlimJsonReport {
     maxPages?: number;
     /** Requested cap, present only when it was clamped (#1909). */
     requestedMaxPages?: number;
+    /** The audit level snapshot; absent in slim JSON written before audit levels. Untrusted. */
+    auditLevel?: unknown;
   };
   // Audit validity (#801): absent in slim JSON written before #801 ⇒ completed.
   status?: AuditStatus;
@@ -150,13 +158,25 @@ interface SlimJsonReport {
     passed: number;
     warnings: number;
     failed: number;
+    /** Skipped-page count (#518); absent in slim JSON written before it. */
+    skipped?: number;
   };
+  /**
+   * Evaluation gaps (#518). Not read back: skipped checks are not findings, so
+   * they are never rebuilt into `ruleResults`.
+   */
+  skippedChecks?: unknown[];
   issues: Array<{
     ruleId: string;
     name: string;
     description: string;
     solution?: string;
     domain: string;
+    /**
+     * Display name the report was written with (e.g. "Reliability"), absent in slim JSON written
+     * before the field was read back. The rule id's prefix is NOT always the category (pub#836).
+     */
+    category?: string;
     subcategory?: string;
     severity: "error" | "warning" | "info";
     checks: Array<{
@@ -204,14 +224,27 @@ function isSlimJsonReport(
   );
 }
 
+/** Category code for a category display name ("Reliability" → "reliability"); undefined when unknown. */
+function categoryCodeByName(name: string | undefined): string | undefined {
+  if (!name) return undefined;
+  const lower = name.trim().toLowerCase();
+  return Object.values(CATEGORIES).find((c) => c.name.toLowerCase() === lower)
+    ?.code;
+}
+
 function convertSlimReport(report: SlimJsonReport): AuditReport {
   const ruleResults: Record<string, ReportRuleResult> = {};
 
   for (const issue of report.issues) {
+    // The category the report was written with wins: a rule can sit in a category other than its
+    // id prefix (`links/broken-links` is Reliability since pub#836), and slim JSON written before
+    // that still says "Links". Slim JSON that names no known category falls back to the prefix.
     // Normalize legacy code prefixes (e.g. stable rule IDs keep the `adblock/`
     // prefix while the category was renamed to `blocking`).
     const categoryCandidate = normalizeCategoryCode(
-      issue.ruleId.split("/")[0] ?? "other"
+      categoryCodeByName(issue.category) ??
+        issue.ruleId.split("/")[0] ??
+        "other"
     );
     const category = isValidCategory(categoryCandidate)
       ? categoryCandidate
@@ -319,6 +352,11 @@ function convertSlimReport(report: SlimJsonReport): AuditReport {
     };
   }
 
+  // The audit level the run used. The file is user-supplied, so the snapshot
+  // is re-read through the shared parser: only valid levels and settings come
+  // back, never a string the renderers would print as is.
+  const auditLevel = parseResolvedAuditSettings(report.meta.auditLevel);
+
   return {
     baseUrl: report.meta.baseUrl,
     // #1418: carry a refused off-site seed redirect back through the round
@@ -356,6 +394,7 @@ function convertSlimReport(report: SlimJsonReport): AuditReport {
           },
         }
       : {}),
+    ...(auditLevel ? { auditLevel } : {}),
     passed: report.summary.passed,
     warnings: report.summary.warnings,
     failed: report.summary.failed,
@@ -474,12 +513,22 @@ export async function listStoredAudits(
 }
 
 /**
+ * Where a loaded audit came from: the loaders below fill it in when they find
+ * the audit, so a later write for that audit (`report --publish` marking it
+ * published, #625) goes to the same database instead of searching for it again.
+ */
+export interface AuditSource {
+  dbPath?: string;
+}
+
+/**
  * Get audit by ID from SQLite and reconstruct report
  * Searches all project databases if no explicit path given
  */
 export async function getStoredAudit(
   auditId: string,
-  storagePath?: string
+  storagePath?: string,
+  source?: AuditSource
 ): Promise<Result<AuditReport>> {
   const dbPaths = storagePath ? [storagePath] : getProjectStoragePaths();
 
@@ -523,11 +572,13 @@ export async function getStoredAudit(
           return yield* reconstructReport(storage, auditId);
         })
       );
+      await warnEvictedPages(storage, auditId, "report");
 
       const validated = validateReportData(report, auditId);
       if (!validated.ok) {
         return validated;
       }
+      if (source) source.dbPath = dbPath;
       return ok(report);
     } catch {
       // Try next database
@@ -549,7 +600,8 @@ export async function getStoredAudit(
  */
 export async function getStoredAuditByPrefix(
   prefix: string,
-  storagePath?: string
+  storagePath?: string,
+  source?: AuditSource
 ): Promise<Result<AuditReport>> {
   const dbPaths = storagePath ? [storagePath] : getProjectStoragePaths();
 
@@ -627,7 +679,10 @@ export async function getStoredAuditByPrefix(
         return yield* reconstructReport(storage, match.crawl.id);
       })
     );
-    return validateReportData(report, match.crawl.id);
+    await warnEvictedPages(storage, match.crawl.id, "report");
+    const validated = validateReportData(report, match.crawl.id);
+    if (validated.ok && source) source.dbPath = match.dbPath;
+    return validated;
   } catch (error) {
     return err(
       commandError(
@@ -648,7 +703,8 @@ export async function getStoredAuditByPrefix(
  */
 export async function getLatestAudit(
   baseUrl?: string,
-  storagePath?: string
+  storagePath?: string,
+  source?: AuditSource
 ): Promise<Result<AuditReport>> {
   const dbPaths = storagePath ? [storagePath] : getProjectStoragePaths();
 
@@ -771,8 +827,11 @@ export async function getLatestAudit(
           return reconstructed;
         })
       );
+      await warnEvictedPages(storage, latest.crawl.id, "report");
 
-      return validateReportData(report, latest.crawl.id);
+      const validated = validateReportData(report, latest.crawl.id);
+      if (validated.ok && source) source.dbPath = latest.dbPath;
+      return validated;
     } finally {
       await Effect.runPromise(
         storage.close().pipe(Effect.catchAll(() => Effect.void))

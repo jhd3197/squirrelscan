@@ -1,10 +1,10 @@
 ---
 title: "Local audits with the CLI"
-description: "Run a full website audit from your terminal with no account and no credits, then read the report in any format"
+description: "Run a full website audit from your terminal, signed out with no account and no credits, then read the report in any format"
 icon: "terminal"
 ---
 
-Local audits are free and need no login, up to the CLI's 10,000-page cap per crawl. The `squirrel` CLI crawls a site on your machine and runs the deterministic audit rules against it, so you can check a live URL or your own localhost dev server without spending a thing. By the end of this guide you will have installed the CLI, run an audit, and read the report in the format that suits you.
+Signed-out local audits cost nothing and need no login, up to the CLI's 10,000-page cap per crawl. The `squirrel` CLI crawls a site on your machine and runs the deterministic audit rules against it, so you can check a live URL or your own localhost dev server without spending a thing. By the end of this guide you will have installed the CLI, run an audit, and read the report in the format that suits you.
 
 <Info>
 Local audits run the deterministic rules only. The cloud-backed rules (AI analysis, technology detection, browser rendering) need an account and credits: see [Cloud audits](/guides/cloud-audits). Everything below works logged out.
@@ -23,9 +23,15 @@ Local audits run the deterministic rules only. The cloud-backed rules (AI analys
     iwr -useb https://install.squirrelscan.com/install.ps1 | iex
     ```
   </Tab>
+  <Tab title="Homebrew (macOS)">
+    ```bash
+    brew install --cask squirrelscan/tap/squirrel
+    ```
+    The cask is macOS only. It installs a launcher that runs the regular installer on first use. `brew upgrade` does nothing for the CLI: update it with `squirrel self update`. See [Homebrew](/quickstart#homebrew) for updates and uninstall.
+  </Tab>
 </Tabs>
 
-This drops the binary at `~/.local/bin/squirrel` and adds it to your PATH. Confirm it works:
+This drops the binary at `~/.local/bin/squirrel` and adds it to your PATH. With Homebrew, that happens on the first run, when the launcher runs the regular installer. Confirm it works:
 
 ```bash
 squirrel self doctor
@@ -62,17 +68,17 @@ Core SEO (1 error, 3 warnings)
 ──────────────────────────────────────────────────
 ```
 
-Logged out, audits default to the `quick` coverage mode: a fast scan of the seed URL plus sitemaps, with no cloud calls and no credit spend. For a wider crawl, raise the page limit or switch coverage:
+Logged out, audits default to the `quick` [audit level](/guides/audit-levels): a fast local scan of the seed URL plus sitemaps, no account needed. For a wider crawl, raise the page limit or pick another level:
 
 ```bash
 # Crawl up to 200 pages
 squirrel audit https://example.com -m 200
 
 # Smart sampling across URL patterns
-squirrel audit https://example.com -C surface
+squirrel audit https://example.com --level surface
 ```
 
-The three coverage modes are `quick`, `surface`, and `full`. See [`squirrel audit`](/cli/audit#coverage-modes) for what each one crawls.
+The three levels are `quick`, `surface`, and `full`. Logged out, every level runs on your machine; the cloud checks need an account. See [Audit levels](/guides/audit-levels) for what each one crawls and checks.
 
 <Tip>
 Auditing a site you are building? Point it at your dev server: `squirrel audit http://localhost:3000`. Local audits work the same against localhost, so you can catch issues before they ship. See [Projects](/projects) for keeping dev and production histories separate.
@@ -80,7 +86,7 @@ Auditing a site you are building? Point it at your dev server: `squirrel audit h
 
 ### Local and private hosts stay local
 
-An audit of a host no squirrelscan server can reach runs and prints its report exactly as any other audit does. That covers `localhost`, loopback and link-local addresses, private ranges such as `192.168.1.10` or `10.0.0.5`, and internal names such as `box.local` or anything under `.internal` or `.lan`. What changes is everything that would need a squirrelscan server to reach the address itself:
+An audit of a host no squirrelscan server can reach runs and prints its report exactly as any other audit does. That covers `localhost`, loopback and link-local addresses, private ranges such as `192.168.1.10` or `10.0.0.5`, and internal names such as `box.local`, a Laravel Valet or Herd site such as `myapp.test`, or anything under `.internal` or `.lan`. What changes is everything that would need a squirrelscan server to reach the address itself:
 
 - The report is not published, so no shareable link is created and no site appears in your dashboard. The same applies to publishing it later with `squirrel report --publish`.
 - The run is not registered, so it does not cost the audit base even when you are signed in.
@@ -91,6 +97,37 @@ The reason is reachability, not policy: hosted services would have to fetch the 
 Cloud analysis that works from pages the CLI has already crawled is unaffected, so a signed-in local audit still gets the AI summary, technology detection, and the other content-based checks.
 
 To get a shareable report for a site you are developing, audit it once it is on a public URL, such as a preview deployment.
+
+Type a local host without a scheme and it is audited over `http://`, since most dev servers and local boxes serve plain http: `squirrel audit myapp.test` audits `http://myapp.test/`, and the same goes for `localhost:3000`, `192.168.1.10` and `box.local`. That covers every host the list at the end of [Transport and delivery rules do not apply](#transport-and-delivery-rules-do-not-apply) counts as local. Any other host without a scheme is audited over `https://`. Type the scheme to choose it yourself, for example `squirrel audit https://myapp.test` for a Valet or Herd site you have secured.
+
+### Transport and delivery rules do not apply
+
+A dev server is plain HTTP on purpose, usually speaks HTTP/1.1, and sends no production caching or compression headers. Those things are decided by the server or CDN in front of the production site, not by your code, so the rules that judge them have nothing to say about a local or private host. On such a host they are skipped:
+
+| Rule | What it judges |
+|------|----------------|
+| [`security/https`](/rules/security/https) | Pages served over HTTPS |
+| [`security/hsts`](/rules/security/hsts) | The Strict-Transport-Security header |
+| [`security/http-to-https`](/rules/security/http-to-https) | HTTP URLs redirecting to HTTPS |
+| [`perf/http2`](/rules/perf/http2) | HTTP/2 and HTTP/3 support |
+| [`perf/compression`](/rules/perf/compression) | Gzip or Brotli on HTML |
+| [`perf/asset-compression`](/rules/perf/asset-compression) | Gzip or Brotli on scripts and stylesheets |
+| [`perf/cache-headers`](/rules/perf/cache-headers) | Cache-Control on each page |
+| [`perf/bad-caching`](/rules/perf/bad-caching) | Caching and validators across the site |
+
+A skipped rule is not a pass and not a failure: it is left out of the score entirely, so a clean site on `localhost` scores what the same site scores behind a production edge, and one missing piece (no HTTPS, no compression, no caching policy) is not charged by several rules at once. The report says so once, under Scan details in Report detail at the end, instead of once per rule and page:
+
+```text
+Local or private-network host: {count} transport and delivery rules do not apply here and are not scored ({rule names}).
+```
+
+The JSON report carries the same fact as a top-level `notApplicable` object with `reason: "private-target"` and the skipped `rules`, and the `llm` format as a `<not-applicable reason="private-target">` element. Inside the report data, each skipped check has `status: "skipped"` and `skipReason: "private-target"`.
+
+The host is classified from the URL you audit, not from where it redirects, with no DNS lookup, the same way the cloud handoff above is decided: `localhost` and anything under `.localhost`, loopback (`127.0.0.0/8`, `::1`), private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`), link-local (`169.254.0.0/16`, `fe80::/10`), shared address space (`100.64.0.0/10`), internal names under `.local`, `.internal`, `.lan`, `.home.arpa`, `.corp` and similar, names under the reserved `.test`, `.example` and `.invalid`, under `.localdomain` and `.home`, and under `.onion` and `.alt`, which public DNS never resolves, and single-label names such as `intranet`. A public name is public even when it resolves to your machine, so `localhost.example.com` and a hosts-file entry for `staging.example.com` are audited like any public site.
+
+Everything else still runs on a local host, including the rules that judge your markup or headers your app sets itself: [`security/mixed-content`](/rules/security/mixed-content), [`security/form-https`](/rules/security/form-https), [`security/csp`](/rules/security/csp), [`security/x-frame-options`](/rules/security/x-frame-options), [`perf/unminified-js`](/rules/perf/unminified-js) and [`perf/ttfb`](/rules/perf/ttfb).
+
+To check transport and delivery, audit the site where it is actually delivered: the production URL or a preview deployment.
 
 ## Set project defaults with a config file
 
@@ -163,7 +200,7 @@ squirrel audit https://example.com --format llm | claude "prioritize these fixes
 squirrel mcp
 ```
 
-Local MCP audits are free and need no account. Setup and the tool list are in [`squirrel mcp`](/cli/mcp) and the [Hosted MCP server](/developers/mcp#local-mcp-server) guide.
+Signed-out local MCP audits cost nothing and need no account. Setup and the tool list are in [`squirrel mcp`](/cli/mcp) and the [Hosted MCP server](/developers/mcp#local-mcp-server) guide.
 
 **Install the skill.** `squirrel skills install` teaches your agent the audit workflow so a prompt like "audit this site and fix the issues" just works. See [Coding agent integration](/developers/agents).
 
@@ -183,7 +220,7 @@ Quote each expression, since shells read bare `<` and `>` as redirection. The fu
 
 ## Related
 
-- [`squirrel audit`](/cli/audit) - every flag and coverage mode
+- [`squirrel audit`](/cli/audit) - every flag and audit level
 - [`squirrel report`](/cli/report) - query and export stored audits
 - [Reports and scoring](/reports) - how the health score works
 - [Cloud audits](/guides/cloud-audits) - add AI analysis, rendering, and a shared tracker

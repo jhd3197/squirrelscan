@@ -1,14 +1,24 @@
 // a11y/link-text - Check for descriptive link text
 // Based on WCAG 2.4.4 Link Purpose (In Context) (Level A)
 
-import { hasUnsafeUrlScheme } from "@squirrelscan/utils";
+import type { LinkSection } from "@squirrelscan/core-contracts";
+import {
+  coerceSchemelessUrl,
+  hasNonCrawlableUrlScheme,
+  hasUnsafeUrlScheme,
+  isCloudflareEmailProtectionUrl,
+} from "@squirrelscan/utils";
 
+import { pageRegionsField } from "../links/link-section-label";
+import { isConventionalLinkLabel } from "../shared/conventional-link-labels";
 import type { Rule, RuleContext, RuleResult, CheckResult } from "../types";
 import { ComponentOccurrenceCache, componentOccurrence } from "../shared/component-occurrence";
 
 // Generic link text that doesn't describe the destination
-// Expanded list based on Lighthouse and common patterns
-const GENERIC_LINK_TEXT = [
+// Expanded list based on Lighthouse and common patterns. Conventional account and
+// site-utility labels ("sign in", "sign up", "log in", "register", "terms", "privacy")
+// name their destination and are NOT here: see shared/conventional-link-labels.ts (pub#839).
+export const GENERIC_LINK_TEXT = [
   // Original
   "click here",
   "here",
@@ -31,15 +41,10 @@ const GENERIC_LINK_TEXT = [
   "get",
   "start",
   "begin",
-  // Sign up/account related
-  "sign up",
-  "signup",
-  "register",
+  // Calls to action that name nothing. Account actions (sign in, sign up, log in,
+  // register) are conventional labels, not generic text, and are exempt instead (pub#839).
   "subscribe",
   "join",
-  "login",
-  "log in",
-  "sign in",
   // Navigation
   "next",
   "previous",
@@ -71,6 +76,27 @@ const GENERIC_LINK_TEXT = [
   "discover",
   "explore",
 ];
+
+/** A link label as the generic-text list reads it: lowercase, without sentence punctuation. */
+function normalizeLinkLabel(label: string): string {
+  return label
+    .toLowerCase()
+    .replace(/[.,!?;:'"]+/g, "")
+    .trim();
+}
+
+/**
+ * True when the label is generic text that does not describe its destination. A
+ * conventional account or site-utility label is never generic, and that check runs first,
+ * so it wins over the list whatever the list holds (pub#839).
+ */
+export function isGenericLinkText(
+  label: string,
+  genericPhrases: readonly string[] = GENERIC_LINK_TEXT,
+): boolean {
+  if (isConventionalLinkLabel(label)) return false;
+  return genericPhrases.includes(normalizeLinkLabel(label));
+}
 
 /**
  * Get accessible name from an element
@@ -162,6 +188,50 @@ function hasAccessibleContent(link: Element): {
   return { hasContent: false, contentType: "empty" };
 }
 
+function noteSection(
+  byText: Map<string, Set<LinkSection | undefined>>,
+  text: string,
+  section: LinkSection | undefined,
+): void {
+  let sections = byText.get(text);
+  if (!sections) byText.set(text, (sections = new Set()));
+  sections.add(section);
+}
+
+/**
+ * Where each anchor sits, from the parse's placement of the page's links (pub#846): the markup
+ * landmarks and the page classifier's answer, as `parsed.links[].section` stores them. The parse
+ * keeps one entry per crawlable anchor in document order, keyed here by resolved URL and text, so
+ * reading every anchor in document order hands each repeat of a link its own entry. An anchor the
+ * parse did not keep, or a parse without sections, has no section.
+ */
+function linkPlacements(ctx: RuleContext): (anchor: Element, href: string) => LinkSection | undefined {
+  const placed = ctx.parsed.links ?? [];
+  if (!placed.some((l) => l.section && l.section !== "unknown")) return () => undefined;
+  const queues = new Map<string, Array<LinkSection | undefined>>();
+  for (const l of placed) {
+    const key = `${l.url}\u0000${l.text}`;
+    const queue = queues.get(key);
+    if (queue) queue.push(l.section);
+    else queues.set(key, [l.section]);
+  }
+  return (anchor, href) => {
+    // The anchors the engine's link extractor leaves out have no entry: reading one would take
+    // the entry of a kept anchor that resolves to the same URL and text.
+    if (!href || href.trim() === "#" || hasNonCrawlableUrlScheme(href)) return undefined;
+    let url: string;
+    try {
+      url = new URL(coerceSchemelessUrl(href.trim()), ctx.page.url).toString();
+    } catch {
+      return undefined;
+    }
+    // Cloudflare's email-protection link is a contact, not a page: never in `parsed.links` (pub#811).
+    if (isCloudflareEmailProtectionUrl(url)) return undefined;
+    const section = queues.get(`${url}\u0000${anchor.textContent?.trim() ?? ""}`)?.shift();
+    return section === "unknown" ? undefined : section;
+  };
+}
+
 export const linkTextRule: Rule = {
   meta: {
     id: "a11y/link-text",
@@ -183,7 +253,10 @@ export const linkTextRule: Rule = {
 
     const links = doc.querySelectorAll("a[href]");
     const genericLinks: string[] = [];
-    const emptyLinks: Array<{ href: string; reason: string }> = [];
+    const emptyLinks: Array<{ href: string; reason: string; section?: LinkSection }> = [];
+    // pub#846: the section each flagged link sits in, per generic text.
+    const genericSections = new Map<string, Set<LinkSection | undefined>>();
+    const sectionOf = linkPlacements(ctx);
     const genericOccurrences = [];
     const emptyOccurrences = [];
     const occurrenceCache = new ComponentOccurrenceCache();
@@ -214,6 +287,8 @@ export const linkTextRule: Rule = {
 
     for (const link of links) {
       const href = link.getAttribute("href") || "";
+      // Read for every anchor, in document order, so repeats of one link line up with the parse.
+      const section = sectionOf(link, href);
 
       // Skip anchor links and javascript
       if (href.trimStart().startsWith("#") || hasUnsafeUrlScheme(href)) continue;
@@ -224,11 +299,7 @@ export const linkTextRule: Rule = {
       // If has accessible name via ARIA, skip further checks
       if (accessibleName) {
         // Still check if it's generic
-        const normalizedName = accessibleName
-          .toLowerCase()
-          .replace(/[.,!?;:'"]+/g, "")
-          .trim();
-        if (GENERIC_LINK_TEXT.includes(normalizedName)) {
+        if (isGenericLinkText(accessibleName)) {
           genericLinks.push(accessibleName);
           genericOccurrences.push(
             componentOccurrence(
@@ -238,12 +309,13 @@ export const linkTextRule: Rule = {
                 rendered: ctx.page.rendered === true,
                 element: link,
                 kind: "link-text-generic",
-                values: { nameSource: "accessible-name", normalizedText: normalizedName },
+                values: { nameSource: "accessible-name", normalizedText: normalizeLinkLabel(accessibleName) },
                 sensitiveValues: { destination: resolvedHref(href) },
               },
               occurrenceCache,
             ),
           );
+          noteSection(genericSections, accessibleName, section);
         }
         continue;
       }
@@ -255,6 +327,7 @@ export const linkTextRule: Rule = {
         emptyLinks.push({
           href: href.substring(0, 50),
           reason: contentType,
+          section,
         });
         emptyOccurrences.push(
           componentOccurrence(
@@ -275,8 +348,7 @@ export const linkTextRule: Rule = {
 
       // Has content - check if it's generic
       const text = link.textContent?.trim().toLowerCase() || "";
-      const normalizedText = text.replace(/[.,!?;:'"]+/g, "").trim();
-      if (GENERIC_LINK_TEXT.includes(normalizedText)) {
+      if (isGenericLinkText(text)) {
         genericLinks.push(text);
         genericOccurrences.push(
           componentOccurrence(
@@ -286,12 +358,13 @@ export const linkTextRule: Rule = {
               rendered: ctx.page.rendered === true,
               element: link,
               kind: "link-text-generic",
-              values: { nameSource: "text", normalizedText },
+              values: { nameSource: "text", normalizedText: normalizeLinkLabel(text) },
               sensitiveValues: { destination: resolvedHref(href) },
             },
             occurrenceCache,
           ),
         );
+        noteSection(genericSections, text, section);
       }
     }
 
@@ -303,6 +376,7 @@ export const linkTextRule: Rule = {
         items: emptyLinks.map((item) => ({
           id: item.href,
           label: item.reason,
+          ...pageRegionsField([item.section]),
         })),
         details: {
           reasons: [...new Set(emptyLinks.map((e) => e.reason))],
@@ -317,9 +391,11 @@ export const linkTextRule: Rule = {
         name: "link-text-generic",
         status: "warn",
         message: `${genericLinks.length} link(s) with generic text`,
-        items: uniqueGeneric.map((text) => ({ id: text })),
+        items: uniqueGeneric.map((text) => ({
+          id: text,
+          ...pageRegionsField(genericSections.get(text)),
+        })),
         componentOccurrences: genericOccurrences,
-
       });
     }
 

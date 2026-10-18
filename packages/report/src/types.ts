@@ -22,6 +22,7 @@ export type {
   GroupScore,
   HealthScore,
   ReportRuleResult,
+  ReportStructure,
   ReportTechnologies,
   ReportTechnology,
   SiteMetadata,

@@ -5,6 +5,7 @@ import type { Rule } from "../types";
 import { articleLinksRule } from "./article-links";
 import { authorInfoRule } from "./author-info";
 import { brokenHtmlRule } from "./broken-html";
+import { commonMisspellingsRule } from "./common-misspellings";
 import { dateAgreementRule } from "./date-agreement";
 import { devLeakageRule } from "./dev-leakage";
 import { duplicateDescriptionRule } from "./duplicate-description";
@@ -16,6 +17,8 @@ import { keywordStuffingRule } from "./keyword-stuffing";
 import { metaInBodyRule } from "./meta-in-body";
 import { mojibakeRule } from "./mojibake";
 import { mimeTypeRule } from "./mime-type";
+import { placeholderContactRule } from "./placeholder-contact";
+import { placeholderMediaRule } from "./placeholder-media";
 import { placeholderTextRule } from "./placeholder-text";
 import { contentQualityRule } from "./quality";
 import { readingLevelRule } from "./reading-level";
@@ -46,14 +49,18 @@ export const rules: Rule[] = [
   titlePatternOutlierRule,
   dateAgreementRule,
   placeholderTextRule,
+  placeholderMediaRule,
   unrenderedMarkupRule,
   devLeakageRule,
+  placeholderContactRule,
+  commonMisspellingsRule,
 ];
 
 export {
   articleLinksRule,
   authorInfoRule,
   brokenHtmlRule,
+  commonMisspellingsRule,
   contentQualityRule,
   dateAgreementRule,
   devLeakageRule,
@@ -66,6 +73,8 @@ export {
   metaInBodyRule,
   mimeTypeRule,
   mojibakeRule,
+  placeholderContactRule,
+  placeholderMediaRule,
   placeholderTextRule,
   readingLevelRule,
   staleCopyrightRule,

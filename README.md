@@ -19,17 +19,25 @@ Combine your coding agent with a deterministic and extensible audit tool.
 [![npm](https://img.shields.io/npm/v/squirrelscan?style=for-the-badge&label=npm)](https://www.npmjs.com/package/squirrelscan)
 [![License: MIT](https://img.shields.io/badge/License-MIT-52a852?style=for-the-badge)](LICENSE)
 
+![Terminal demo: squirrel audit on a small test site reports 13 failed checks, the report is piped to Claude Code, which fixes the pages and re-audits from 32/100 (F) to 92/100 (A), then git status lists the files it changed](assets/readme-demo.gif)
+
+<sub>A real run on a tiny test site, with the released CLI (signed out, so free) and Claude Code. We cut the two minutes the agent spent working, because nobody wants to watch an agent think.</sub>
+
 ## Features
 
-- **295 Rules, 21 Categories** - Comprehensive coverage across SEO, accessibility, performance, and security
-- **Fast crawler** - Highly optimized memory efficient crawler
-- **Agent Experience** - Audit agent experience to assist agents in using your site
-- **Security Audit** - Detect phishing kits, leaked credentials, and more
-- **Smart Incremental Crawling** - ETag, Last-Modified, content hashing. Resume from checkpoints.
-- **Developer-First CLI** - Single binary, zero dependencies, shell completions, self-update
-- **Crawl History & Changes** - Track site evolution, compare crawls, spot regressions
-- **Multiple Output Formats** - Console, JSON, HTML, Markdown, Text, LLM, XML
-- **MCP Connection** - Connect your agent to local or cloud MCP to run audits, fixes, etc.
+- **[Built for coding agents](https://docs.squirrelscan.com/developers/agents)** - Skills for Claude Code, Cursor, Codex and any coding agent run the audit, fix and re-audit loop. Connect over the CLI, the hosted or local MCP server, or the API.
+- **[Enriched fixes for you and your coding agent](https://docs.squirrelscan.com/guides/fix-your-site-with-an-ai-agent)** - Every finding says how to fix it, in LLM-optimized output your agent can apply, and every rule has its own docs page. Signed in, the report adds an editor's summary of what to fix first and the technology stack the site runs on.
+- **[300+ rules, 22 categories](https://docs.squirrelscan.com/rules)** - Audit coverage across SEO, accessibility, performance, security, content and more.
+- **[Agent experience](https://docs.squirrelscan.com/rules/ax)** - Audit how well AI agents can read, discover and act on your site: llms.txt, AGENTS.md, Markdown responses, and what AI crawlers are served.
+- **[Link checking and monitoring](https://docs.squirrelscan.com/guides/link-checking)** - Perch, the cloud link checker, tells a broken link from a blocked one and confirms a failure before reporting it. On Pro and Team, scheduled audits email you when a link breaks.
+- **[Security and site integrity](https://docs.squirrelscan.com/rules/integrity)** - Detect phishing kits, injected pages, leaked credentials and missing security headers.
+- **[Entity map](https://docs.squirrelscan.com/guides/entity-map)** - Your site's JSON-LD collapsed into one graph: one identity, or a new one on every page.
+- **[Browser rendering in the cloud](https://docs.squirrelscan.com/guides/browser-rendering)** - Signed in, pages are rendered in a real browser in the cloud, so single-page apps and JavaScript-heavy sites are audited as visitors see them, at no extra cost per page.
+- **[Cloud audits](https://docs.squirrelscan.com/guides/cloud-audits)** - AI page analysis, scheduled audits, a per-website issue tracker and shareable reports.
+- **[Smart crawling](https://docs.squirrelscan.com/crawl)** - Fast and memory efficient, incremental with ETag, Last-Modified and content hashing, and resumable from checkpoints.
+- **[Crawl history and changes](https://docs.squirrelscan.com/cli/report)** - Track site evolution, compare crawls, spot regressions.
+- **[Developer-first CLI](https://docs.squirrelscan.com/cli)** - Single binary, zero dependencies, shell completions, self-update.
+- **[Multiple output formats](https://docs.squirrelscan.com/cli/report#output-formats)** - Console, JSON, HTML, Markdown, Text, LLM, XML.
 
 ## Rule categories
 
@@ -41,14 +49,15 @@ Ordered by how much a failure usually costs you, not by how many rules each one 
 | Core SEO | 14 | The per-page fundamentals: title, meta description, H1, canonical, charset, doctype, robots meta, Open Graph and Twitter cards, plus canonical form drift across the site |
 | Agent Experience | 17 | How ready you are for AI agents to read, discover and act on the site: whether GPTBot and Claude-User get the same content a browser does, AGENTS.md, llms.txt, Markdown responses, API and MCP discovery, licensing and noai signals, pay-per-crawl, response token weight |
 | Site Integrity | 9 | Signs the site has been compromised: injected doorway pages, phishing kit signatures, obfuscated scripts, brand impersonation, cloaking, known-malicious URLs |
-| Security | 16 | Transport and header hygiene: HTTPS and HSTS, CSP, cookie flags, mixed content, subresource integrity, leaked secrets, unprotected and downgraded forms |
-| Links | 15 | Internal and external link health: broken and dead links, redirect chains, anchor-text quality, orphan and dead-end pages, pages linked only from sitewide chrome, HTTPS downgrades |
-| Content | 21 | Text quality and honesty: duplicate titles and descriptions, title-template consistency, readability, word count, freshness, heading hierarchy, keyword stuffing, hidden text, encoding damage |
+| Security | 22 | Transport and header hygiene: HTTPS and HSTS, CSP, cookie flags, mixed content, subresource integrity, leaked secrets, tokens in web storage, unprotected and downgraded forms, open GraphQL introspection and mutations over GET |
+| Links | 13 | Internal and external link structure: redirect chains, anchor-text quality, orphan and dead-end pages, pages linked only from sitewide chrome, HTTPS downgrades |
+| Content | 24 | Text quality and honesty: common misspellings, duplicate titles and descriptions, title-template consistency, readability, word count, freshness, heading hierarchy, keyword stuffing, hidden text, placeholder media and contact details, encoding damage |
 | Performance | 30 | Core Web Vitals and delivery: LCP, CLS and INP hints, TTFB, compression, caching, render-blocking resources, DOM size, font delivery, legacy and unminified JS/CSS |
+| Reliability | 5 | Scripts, stylesheets and fonts that fail to load (a first-party bundle that answers 404 or 500 after a deploy, third-party and font failures), forms that lose submissions, and broken internal and external links and in-page anchors whose target is gone |
 | Images | 15 | Alt text, modern formats, responsive `srcset`, intrinsic dimensions and aspect-ratio mismatches, lazy loading above versus below the fold, file weight |
-| Structured Data | 25 | JSON-LD validity and rich-result eligibility for Article, Product, FAQ, Review, Breadcrumb, Organization, LocalBusiness, Video and site search, plus thirteen site-wide checks on the entity map: whether the site declares one identity for itself or a new one on every page, and rating markup that is not about the page it sits on |
+| Structured Data | 26 | JSON-LD validity and rich-result eligibility for Article, Product, FAQ, Review, Breadcrumb, Organization, LocalBusiness, Video and site search, the markup a page's classified type should carry, plus thirteen site-wide checks on the entity map: whether the site declares one identity for itself or a new one on every page, and rating markup that is not about the page it sits on |
 | Accessibility | 61 | WCAG coverage: ARIA roles and names, form labels and autocomplete tokens, colour contrast, heading order, landmarks, tables and lists, focus visibility, touch targets, captions |
-| Mobile | 6 | Viewport configuration, tap-target size, legible font sizes, horizontal scroll, blocked zoom, intrusive interstitials |
+| Mobile | 8 | Viewport configuration, tap-target size, legible font sizes, horizontal scroll, blocked zoom, form fields small enough to zoom the page on focus, intrusive interstitials, the web app manifest and its icons |
 | Social Media | 5 | Open Graph and Twitter Card completeness, image dimensions, canonical URL match, social profile links, site-chrome assets that disagree across pages |
 | URL Structure | 9 | Length, casing, hyphenation, stop words, query parameters, special characters, trailing-slash consistency, site-wide convention consistency |
 | E-E-A-T | 15 | Experience, expertise, authority and trust signals: author bylines and credentials, about and contact pages, citations, editorial policy, disclaimers, YMYL detection |
@@ -59,13 +68,19 @@ Ordered by how much a failure usually costs you, not by how many rules each one 
 | Analytics | 2 | Google Tag Manager presence and consent-mode wiring |
 | Blocking | 3 | Content, links and trackers that ad blockers and privacy filters strip for a large share of your visitors |
 
-**Total: 295 rules across 21 categories**
+**Total: 300+ rules across 22 categories**
 
 See the [rules reference](https://docs.squirrelscan.com/rules) for full details.
 
 ## CLI
 
 ### Installation
+
+**Paste into your coding agent** (Claude Code, Codex, Cursor, opencode and friends):
+```text
+Fetch and follow the setup instructions for squirrelscan at https://docs.squirrelscan.com/agent-setup/prompt.md
+```
+Your agent installs the CLI, connects MCP and runs a first audit. You can [read exactly what it will follow](https://docs.squirrelscan.com/agent-setup/prompt) first.
 
 **macOS / Linux:**
 ```bash
@@ -76,6 +91,12 @@ curl -fsSL https://install.squirrelscan.com | bash
 ```powershell
 iwr -useb https://install.squirrelscan.com/install.ps1 | iex
 ```
+
+**Homebrew (macOS):**
+```bash
+brew install --cask squirrelscan/tap/squirrel
+```
+The cask installs a launcher that runs the regular installer on first use. The CLI then updates itself with `squirrel self update`; `brew upgrade` leaves it alone.
 
 **npm (all platforms):**
 ```bash
@@ -99,8 +120,8 @@ squirrel audit example.com -f html -o report.html
 # Pipe to Claude for AI analysis
 squirrel audit example.com --format llm | claude
 
-# Quick audit for fast initial probe (other options surface, full)
-squirrel audit example.com -C quick
+# Quick audit for a fast first look (other levels: surface, full)
+squirrel audit example.com --level quick
 
 # run only agent experience and performance rules
 squirrel audit example.com --rule-include ax,performance
@@ -133,14 +154,14 @@ Click the **Add to Cursor** badge above, or add it manually to `~/.cursor/mcp.js
 }
 ```
 
-Skills: `npx skills add squirrelscan/squirrelscan`
+Skills: `squirrel skills install`
 
 ### Claude Code
 
 Install the plugin (bundles skills + the MCP server):
 
 ```
-/plugin marketplace add squirrelscan/squirrelscan
+/plugin marketplace add squirrelscan/skills
 /plugin install squirrelscan@squirrelscan
 ```
 
@@ -159,7 +180,7 @@ Add the server to `~/.codex/config.toml`:
 url = "https://mcp.squirrelscan.com/mcp"
 ```
 
-Codex reads Agent Skills from `~/.agents/skills`, so skills work too: `npx skills add squirrelscan/squirrelscan`
+Codex reads Agent Skills from `~/.agents/skills`, so skills work too: `squirrel skills install`
 
 ### opencode
 
@@ -186,18 +207,18 @@ squirrelscan is in the [MCP Registry](https://registry.modelcontextprotocol.io) 
 https://mcp.squirrelscan.com/mcp
 ```
 
-Authentication is per-user OAuth (or pass a squirrelscan API key as a Bearer token). Skills follow the [Agent Skills standard](https://agentskills.io): `npx skills add squirrelscan/squirrelscan` lands them in `.agents/skills/`.
+Authentication is per-user OAuth (or pass a squirrelscan API key as a Bearer token). Skills follow the [Agent Skills standard](https://agentskills.io): `squirrel skills install` puts them in `~/.agents/skills/` and `~/.claude/skills/`.
 
 
 ## Skills
 
-Two skills drive agent workflows:
+Two skills drive agent workflows. They live in [squirrelscan/skills](https://github.com/squirrelscan/skills), along with the Claude Code, Cursor and Agent Plugins packages that bundle them with the MCP server. `squirrel skills install` downloads and verifies them itself, and from v0.0.99 `squirrel`'s auto-update keeps them current. Installs made earlier with `npx skills` are taken over.
 
-- **`squirrelscan`** - operating the CLI: install, login, keys, credits, running audits, publishing reports, MCP setup, config, troubleshooting.
+- **`squirrelscan`** - operating the CLI: install, login, keys, credits, running audits, publishing reports, the entity map, MCP setup, config, troubleshooting.
 - **`audit-website`** - the full fix loop: audit, map issues to source files, fix in batches, re-audit until the site scores well.
 
 ```bash
-npx skills add squirrelscan/squirrelscan
+squirrel skills install
 ```
 
 Then, in your agent:
@@ -269,6 +290,8 @@ NO_TELEMETRY=1 squirrel audit https://example.com
 - [Share feedback](https://squirrelscan.com/feedback)
 - [Bugs, issues and feature requests](https://github.com/squirrelscan/squirrelscan/issues)
 - [Twitter/X](https://x.com/squirrelscan_)
+
+If squirrelscan caught something your agent missed, a [star on GitHub](https://github.com/squirrelscan/squirrelscan) helps other developers find it.
 
 ## License
 

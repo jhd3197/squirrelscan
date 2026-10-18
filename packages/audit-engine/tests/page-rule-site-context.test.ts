@@ -87,7 +87,7 @@ describe("page rules read only the SiteData fields the cache key covers", () => 
       // populates it, so a rule that looks for one finds it rather than
       // short-circuiting on undefined and never recording the read.
       const siteData: SiteData = {
-        baseUrl: "http://synthetic.test",
+        baseUrl: "http://synthetic.example.com",
         pages: [],
         robotsTxt: null,
         sitemaps: null,
@@ -103,12 +103,12 @@ describe("page rules read only the SiteData fields the cache key covers", () => 
           css: [
             recordFields(
               {
-                url: "http://synthetic.test/app.css",
+                url: "http://synthetic.example.com/app.css",
                 status: 200,
                 error: null,
                 contentType: "text/css",
                 sizeBytes: 40_000,
-                sourcePages: ["http://synthetic.test/"],
+                sourcePages: ["http://synthetic.example.com/"],
                 cacheControl: "public, max-age=3600",
                 cacheReason: null,
                 contentEncoding: null,
@@ -120,20 +120,43 @@ describe("page rules read only the SiteData fields the cache key covers", () => 
               resourceFieldReads,
             ),
           ],
-          images: [],
+          images: [
+            recordFields(
+              {
+                url: "http://synthetic.example.com/photo.jpg",
+                status: 200,
+                error: null,
+                contentType: "image/jpeg",
+                sizeBytes: 400_000,
+                sourcePages: ["http://synthetic.example.com/"],
+                cacheControl: "public, max-age=3600",
+                cacheReason: null,
+                contentEncoding: null,
+                transferBytes: 400_000,
+                etag: null,
+                lastModified: null,
+                vary: null,
+                // Read from the header by the image pool (#470).
+                naturalWidth: 1200,
+                naturalHeight: 1200,
+                animated: false,
+              },
+              resourceFieldReads,
+            ),
+          ],
         },
         scripts: [
           recordFields(
             {
-              url: "http://synthetic.test/app.js",
+              url: "http://synthetic.example.com/app.js",
               status: 200,
               error: null,
               contentType: "application/javascript",
               sizeBytes: 90_000,
               content: "var a = 1;\n//# sourceMappingURL=app.js.map\n",
-              sourcePages: ["http://synthetic.test/"],
+              sourcePages: ["http://synthetic.example.com/"],
               redirected: false,
-              finalUrl: "http://synthetic.test/app.js",
+              finalUrl: "http://synthetic.example.com/app.js",
               sourceMapHeader: "app.js.map",
               contentEncoding: null,
             },
@@ -185,4 +208,86 @@ describe("page rules read only the SiteData fields the cache key covers", () => 
       await run(storage.close());
     }
   }, 120_000);
+
+  // The synthetic site has no images, so the test above never sees
+  // images/responsive-size read an image entry. This one runs every page rule
+  // over a gallery page whose thumbnails take both of that rule's paths: the
+  // pixel test (natural size read from the header, #470) and the byte budget.
+  test("no page rule reads an image entry field outside PAGE_RULE_RESOURCE_FIELDS", async () => {
+    const runner = createRunner(getGoldenBaselineConfig());
+    const reads = new Set<string>();
+    const recordFields = <T extends object>(entry: T): T =>
+      new Proxy(entry, {
+        get(target, key, receiver) {
+          if (typeof key === "string") reads.add(key);
+          return Reflect.get(target, key, receiver);
+        },
+      });
+    const entry = (path: string, header: { naturalWidth: number | null; naturalHeight: number | null; animated: boolean | null }) =>
+      recordFields({
+        url: `http://synthetic.example.com/${path}`,
+        status: 206,
+        error: null,
+        contentType: "image/jpeg",
+        sizeBytes: 400_000,
+        sourcePages: ["http://synthetic.example.com/gallery"],
+        cacheControl: "public, max-age=3600",
+        cacheReason: null,
+        contentEncoding: null,
+        transferBytes: 400_000,
+        etag: null,
+        lastModified: null,
+        vary: null,
+        ...header,
+      });
+    const siteData: SiteData = {
+      baseUrl: "http://synthetic.example.com",
+      pages: [],
+      robotsTxt: null,
+      sitemaps: null,
+      llmsTxt: null,
+      markdownResponse: null,
+      wellKnown: null,
+      agentAccess: null,
+      rsl: null,
+      externalLinks: [],
+      resourceSizes: {
+        css: [],
+        images: [
+          entry("pixels.jpg", { naturalWidth: 1200, naturalHeight: 1200, animated: false }),
+          entry("bytes.jpg", { naturalWidth: null, naturalHeight: null, animated: null }),
+        ],
+      },
+      scripts: [],
+      pdfSizes: [],
+      sitemapUrlStatuses: [],
+      cloakingProbes: [],
+      crawlLimits: { pagesCrawled: 1, maxPages: 100 },
+    };
+    const html =
+      `<!doctype html><html lang="en"><head><title>Gallery</title></head><body><main><h1>Gallery</h1>` +
+      `<img src="/pixels.jpg" width="64" height="64" alt="a"><img src="/bytes.jpg" width="64" height="64" alt="b">` +
+      `</main></body></html>`;
+    const result = await runner.runPageRules(
+      {
+        url: "http://synthetic.example.com/gallery",
+        html,
+        statusCode: 200,
+        loadTime: 10,
+        headers: { "content-type": "text/html" },
+      },
+      siteData
+    );
+    // Not vacuous: the rule took both paths, and read the header fields to do it.
+    const findings = result.ruleResults.get("images/responsive-size")?.checks ?? [];
+    expect(findings.find((c) => c.name === "images-possibly-oversized")?.items?.map((i) => i.id)).toEqual([
+      "pixels.jpg (64x64, no srcset)",
+      "bytes.jpg (64x64, no srcset)",
+    ]);
+    expect([...reads]).toEqual(expect.arrayContaining(["naturalWidth", "naturalHeight", "animated"]));
+    const undeclared = [...reads].filter(
+      (key) => !(PAGE_RULE_RESOURCE_FIELDS as readonly string[]).includes(key),
+    );
+    expect(undeclared).toEqual([]);
+  });
 });

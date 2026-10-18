@@ -45,9 +45,18 @@ function collectItemPages(item: CheckItem, acc: Set<string>): void {
  * the items listing, or it silently disappears from both places (#1136
  * review round 3 — `sourcePages: []` was being conflated with "no
  * sourcePages key" and dropped entirely).
+ *
+ * A page-URL item that carries its own `label` (a text that differs from the id) is NOT
+ * redundant either: the label says something the page list does not ("linked only from the
+ * footer and the navigation", #2307), and dropping the row dropped that sentence with it.
  */
-export function isRedundantPageItem(item: { id: string; sourcePages?: string[] }): boolean {
-  return isPageUrl(item.id) && item.sourcePages === undefined;
+export function isRedundantPageItem(item: {
+  id: string;
+  sourcePages?: string[];
+  label?: string;
+}): boolean {
+  if (!isPageUrl(item.id) || item.sourcePages !== undefined) return false;
+  return item.label === undefined || item.label === "" || item.label === item.id;
 }
 
 /**
@@ -171,4 +180,26 @@ export function ruleCarriedPageCount(checks: GroupedCheck[]): number {
   const acc = new Set<string>();
   for (const check of checks) for (const page of check.carriedPages ?? []) acc.add(page);
   return acc.size;
+}
+
+/**
+ * repo#2661: how many of a check's items its report left out of `items`, from
+ * `details.additional` (the fold's and the publish capper's dropped count, and
+ * every rule's own "first N, the rest as additional" remainder). A capped report
+ * keeps 5 items per class, so a renderer that shows only `items.length` would
+ * read "5 items" for a class that has 1,147. 0 when the check left none out.
+ */
+export function itemsNotListed(check: Pick<CheckResult, "details">): number {
+  const additional = (check.details as { additional?: unknown } | undefined)?.additional;
+  return typeof additional === "number" && Number.isFinite(additional) && additional > 0
+    ? Math.floor(additional)
+    : 0;
+}
+
+/**
+ * repo#2661: the line for a check that lists none of its items but left some
+ * out (a counts-only class in a capped report keeps no rows at all).
+ */
+export function itemsNotListedLine(count: number): string {
+  return `${count.toLocaleString("en-US")} item${count === 1 ? "" : "s"} not listed`;
 }

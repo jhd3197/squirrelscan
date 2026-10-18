@@ -3,10 +3,21 @@
 
 import { Effect } from "effect";
 
-import { SCRIPT_FETCH_LIMITS, SQUIRRELSCAN_USER_AGENT } from "@squirrelscan/utils/constants";
-import { readBodyCapped } from "@squirrelscan/utils/response-body";
-import { safeRedirectFetch } from "@squirrelscan/utils/safe-fetch";
+import {
+  ASSET_FETCH_REFUSED_ERROR,
+  ASSET_FETCH_SKIPPED_ERROR,
+  SCRIPT_FETCH_LIMITS,
+  SQUIRRELSCAN_USER_AGENT,
+} from "@squirrelscan/utils/constants";
+import {
+  EgressRefusedError,
+  egressGuardedSend,
+  type EgressPolicy,
+} from "@squirrelscan/utils/public-egress";
+import { fetchUndecoded, readBodyCapped } from "@squirrelscan/utils/response-body";
+import { isHttpOrHttpsUrl, safeRedirectFetch } from "@squirrelscan/utils/safe-fetch";
 import type { FetchBudget, FetchOutcome } from "./fetch-budget";
+import { rateLimitedFlag, wafBlockedFlag } from "./lib/asset-status";
 import { normalizeEncoding } from "./resource-checker";
 
 export interface ScriptFetchResult {
@@ -25,6 +36,10 @@ export interface ScriptFetchResult {
    * identity/absent. Absent (`undefined`) when no response was seen. (#9)
    */
   contentEncoding?: string | null;
+  /** Throttled by the origin (429/430, or 503 with Retry-After) (#703). */
+  rateLimited?: boolean;
+  /** A WAF or bot challenge answered in place of the script (#703). */
+  wafBlocked?: boolean;
 }
 
 export interface ScriptFetcherOptions {
@@ -42,6 +57,18 @@ export interface ScriptFetcherOptions {
    * budget is spent or its host is tarpitting. Absent (CLI) → fetch as today.
    */
   budget?: FetchBudget;
+  /**
+   * #710: keep the body of a non-JavaScript response too. The web app manifest
+   * is fetched through this path and is JSON, which the JS-only gate would drop.
+   * Default false, so every script caller keeps its gate.
+   */
+  anyContentType?: boolean;
+  /**
+   * Every hop is vetted against this policy before it is sent (see
+   * `@squirrelscan/utils/public-egress`); a refused one is never requested and
+   * reads as ASSET_FETCH_REFUSED_ERROR. Absent: hosts are unrestricted.
+   */
+  egress?: EgressPolicy;
 }
 
 const DEFAULT_OPTIONS: ScriptFetcherOptions = {
@@ -109,15 +136,20 @@ async function fetchScriptAttempt(
       response,
       finalUrl: resolvedFinalUrl,
       redirected,
-    } = await safeRedirectFetch(url, {
-      method: "GET",
-      headers: {
-        "User-Agent": options.userAgent,
-        Accept: "application/javascript, text/javascript, */*",
-        ...options.customHeaders,
+    } = await safeRedirectFetch(
+      url,
+      {
+        method: "GET",
+        headers: {
+          "User-Agent": options.userAgent,
+          Accept: "application/javascript, text/javascript, */*",
+          ...options.customHeaders,
+        },
+        signal: controller.signal,
       },
-      signal: controller.signal,
-    });
+      // #2717: undecoded on every hop; readBodyCapped decodes within its cap.
+      options.egress ? egressGuardedSend(fetchUndecoded, options.egress) : fetchUndecoded
+    );
 
     const contentType = response.headers.get("content-type");
     const contentLength = response.headers.get("content-length");
@@ -130,9 +162,9 @@ async function fetchScriptAttempt(
       response.headers.get("x-sourcemap") ||
       undefined;
 
-    // #9: a transfer coding (gzip/br/…) or null for identity/absent. `fetch`
-    // decodes the body but leaves this header intact, so it stays observable
-    // even though `sizeBytes` below measures the DECODED text.
+    // #9: a transfer coding (gzip/br/…) or null for identity/absent. The body
+    // is decoded as it is read but this header stays intact, so it remains
+    // observable even though `sizeBytes` below measures the DECODED text.
     const contentEncoding = normalizeEncoding(
       response.headers.get("content-encoding")
     );
@@ -168,10 +200,12 @@ async function fetchScriptAttempt(
         sourceMapHeader,
         contentEncoding,
         error: `HTTP ${response.status}`,
+        rateLimited: rateLimitedFlag(response.status, response.headers),
+        wafBlocked: wafBlockedFlag(response.status, response.headers),
       };
     }
 
-    if (!isJavaScriptContentType(contentType)) {
+    if (!options.anyContentType && !isJavaScriptContentType(contentType)) {
       return {
         ...defaultResult,
         status: response.status,
@@ -223,6 +257,9 @@ async function fetchScriptAttempt(
     };
   } finally {
     clearTimeout(timeoutId);
+    // Closes the connection (#766): a capped read stops reading, but Bun
+    // keeps downloading the body until the signal aborts.
+    controller.abort();
   }
 }
 
@@ -232,8 +269,15 @@ async function fetchSingleScriptAsync(
   retryCount = 0
 ): Promise<ScriptFetchResult> {
   try {
+    if (options.egress && !isHttpOrHttpsUrl(url)) {
+      throw new EgressRefusedError("refused scheme");
+    }
     return await fetchScriptAttempt(url, options);
   } catch (error) {
+    // Refused by the egress policy: nothing was sent, and a retry is refused too.
+    if (error instanceof EgressRefusedError) {
+      return { ...emptyScriptResult(url), error: ASSET_FETCH_REFUSED_ERROR };
+    }
     // Retries live outside the attempt so each one arms its own deadline; a
     // retry started inside the attempt's `finally` would inherit an expired
     // timer, or keep the spent one alive for the length of the retry.
@@ -257,9 +301,16 @@ async function fetchSingleScriptAsync(
   }
 }
 
-/** Map a completed script fetch to a tarpit outcome — any error (incl. timeout) strikes. */
-function scriptOutcome(result: ScriptFetchResult): FetchOutcome {
+/**
+ * Map a completed script fetch to a tarpit outcome — any error (incl. timeout)
+ * strikes. A body kept whatever its type (the manifest pass, #710) has no
+ * "not JavaScript" error, so there an HTTP answer is an answer, not a failing
+ * host: a site whose linked manifests 404 is not a tarpit. Slow answers still
+ * strike on their latency.
+ */
+function scriptOutcome(result: ScriptFetchResult, anyContentType = false): FetchOutcome {
   if (result.error === "timeout") return "timeout";
+  if (anyContentType && result.status !== null && result.error?.startsWith("HTTP ")) return "ok";
   if (result.error != null) return "error";
   return "ok";
 }
@@ -268,15 +319,21 @@ function fetchSingleScript(
   url: string,
   options: ScriptFetcherOptions
 ): Effect.Effect<ScriptFetchResult, never, never> {
-  // No caching in package version — CLI wraps with content-store caching
+  // No cache: every audit, and `squirrel analyze`, fetches its scripts afresh.
   return Effect.promise(async () => {
     // #1252: skip before launching once the budget is spent or the host tarpits.
     if (options.budget?.shouldSkip(url)) {
-      return { ...emptyScriptResult(url), error: "skipped" };
+      return { ...emptyScriptResult(url), error: ASSET_FETCH_SKIPPED_ERROR };
     }
     const startedAt = Date.now();
     const result = await fetchSingleScriptAsync(url, options);
-    options.budget?.record(url, Date.now() - startedAt, scriptOutcome(result));
+    // A refusal is an answer for the budget: only its latency strikes (see the
+    // resource checker).
+    const outcome =
+      result.error === ASSET_FETCH_REFUSED_ERROR
+        ? "ok"
+        : scriptOutcome(result, options.anyContentType === true);
+    options.budget?.record(url, Date.now() - startedAt, outcome);
     return result;
   });
 }

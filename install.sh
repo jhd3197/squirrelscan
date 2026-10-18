@@ -94,7 +94,11 @@ info() { echo -e "${BLUE}::${NC} $1" >&2; }
 # forget (never blocks or fails the install), and carries only coarse context
 # (os/arch/step/exit code) — never paths, env, hostname, or secrets. #1013
 # v2 adds `error_output` — the tail of the failing command's own output (#1538).
-INSTALLER_REPORT_VERSION="2"
+# v3 adds `version` (the release being installed) and, on Linux, `libc`.
+INSTALLER_REPORT_VERSION="3"
+# The release being installed, bare ("0.0.73"), set as soon as it is known
+# (pinned or resolved). Empty before that, and then the report omits the field.
+INSTALLER_RELEASE_VERSION=""
 ERROR_ENDPOINT="${SQUIRREL_ERROR_ENDPOINT:-https://install.squirrelscan.com/error}"
 # Release metadata (latest version per channel) — R2-backed, no rate limits.
 RELEASES_ENDPOINT="${SQUIRREL_RELEASES_ENDPOINT:-https://install.squirrelscan.com/releases}"
@@ -146,15 +150,53 @@ scrub_for_report() {
   fi
 }
 
+# Detect libc (glibc vs musl)
+detect_libc() {
+  # Method 1: Check for musl loader (most reliable)
+  if ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then
+    echo "-musl"
+    return
+  fi
+
+  # Method 2: Check Alpine release file
+  if [ -f /etc/alpine-release ]; then
+    echo "-musl"
+    return
+  fi
+
+  # Method 3: ldd version string
+  if command -v ldd >/dev/null 2>&1; then
+    if ldd --version 2>&1 | grep -qi musl; then
+      echo "-musl"
+      return
+    fi
+  fi
+
+  # Default: glibc (no suffix)
+  echo ""
+}
+
 report_error() {
   local step="$1" code="$2" line="${3:-}" output="${4:-}"
   # Presence disables reporting, including an explicitly empty value.
   [ "${NO_TELEMETRY+x}" = x ] && return 0
   command -v curl >/dev/null 2>&1 || return 0
 
-  local os arch scrubbed="" scrubbed_output=""
+  local os arch scrubbed="" scrubbed_output="" version_field="" libc_field=""
   os=$(uname -s 2>/dev/null | tr '[:upper:]' '[:lower:]')
   arch=$(uname -m 2>/dev/null)
+
+  if [ -n "$INSTALLER_RELEASE_VERSION" ]; then
+    version_field=$(printf ',"version":"%s"' "$(json_escape "${INSTALLER_RELEASE_VERSION#v}")")
+  fi
+  # A fact, not a guess: the worker would otherwise resolve a musl report to the
+  # glibc platform. Same detection the installer itself uses to pick the asset.
+  if [ "$os" = linux ]; then
+    case "$(detect_libc)" in
+      -musl) libc_field=',"libc":"musl"' ;;
+      *) libc_field=',"libc":"glibc"' ;;
+    esac
+  fi
 
   scrubbed=$(scrub_for_report "$line" "$ERROR_LINE_MAX")
   # The failing command's own stdout/stderr: without it a self_install failure
@@ -162,11 +204,13 @@ report_error() {
   scrubbed_output=$(scrub_for_report "$output" "$ERROR_OUTPUT_MAX" tail)
 
   local payload
-  payload=$(printf '{"script":"sh","script_version":"%s","channel":"%s","os":"%s","arch":"%s","step":"%s","exit_code":%s,"error_line":"%s","error_output":"%s"}' \
+  payload=$(printf '{"script":"sh","script_version":"%s","channel":"%s","os":"%s","arch":"%s"%s%s,"step":"%s","exit_code":%s,"error_line":"%s","error_output":"%s"}' \
     "$(json_escape "$INSTALLER_REPORT_VERSION")" \
     "$(json_escape "${SQUIRREL_CHANNEL:-stable}")" \
     "$(json_escape "$os")" \
     "$(json_escape "$arch")" \
+    "$libc_field" \
+    "$version_field" \
     "$(json_escape "$step")" \
     "${code:-1}" \
     "$(json_escape "$scrubbed")" \
@@ -601,17 +645,51 @@ place_release_by_hand() {
   printf '%s' "$target"
 }
 
+# Indirected so the tests can answer for a Mac from a Linux runner.
+is_darwin() {
+  [ "$(uname -s 2>/dev/null)" = "Darwin" ]
+}
+
+# The macOS release, e.g. 15.6. Empty anywhere else, and on a Mac where the
+# command is missing, so every caller has to cope with an empty value.
+macos_product_version() {
+  sw_vers -productVersion 2>/dev/null || true
+}
+
 # What to tell a user whose binary is installed but will not run. Everything
 # the user needs is stated as a path or a command: nothing here says "retry".
 binary_unrunnable_guidance() {
-  local code="$1" target="$2" link="$3" mib="" out=""
+  local code="$1" target="$2" link="$3" mib="" out="" macos_version=""
   mib=$( (available_memory_mib) 2>/dev/null || true)
   out="  squirrel is installed, but this machine could not run it:
     Binary: ${target}
     Link:   ${link}
   Nothing needs downloading again: once the machine can run it, use it as is.
 "
-  if [ "$code" = 137 ]; then
+  if [ "$code" = 137 ] && is_darwin; then
+    # On macOS a SIGKILL before the process prints anything is a rejection,
+    # not the OOM killer: `squirrel --version` does not exhaust a Mac. Either
+    # the code signature did not satisfy the kernel or security software
+    # refused a binary it has not approved (#2310).
+    macos_version=$(macos_product_version)
+    out="${out}
+  macOS killed it (SIGKILL) before it printed anything, which on a Mac is
+  almost always the code signature being rejected, or security software
+  (Santa, an MDM policy, an EDR agent) refusing a binary it has not approved."
+    if [ -n "$macos_version" ]; then
+      out="${out}
+  macOS version: ${macos_version}"
+    fi
+    out="${out}
+
+  Check which of the two it is:
+    codesign --verify --strict $(shell_quote "$target")
+  A signature error there is the published binary at fault, not this machine:
+  install the latest release, which re-signs its darwin binaries, or report it
+  at https://github.com/${REPO}/issues
+  A valid signature means your security software stopped it: allow
+  ${target} in its policy, then run: squirrel --version"
+  elif [ "$code" = 137 ]; then
     out="${out}
   The system killed it (SIGKILL), which on a small VPS or a memory-capped
   container is almost always the out-of-memory killer."
@@ -626,11 +704,6 @@ binary_unrunnable_guidance() {
       sudo fallocate -l 1G /swapfile && sudo chmod 600 /swapfile
       sudo mkswap /swapfile && sudo swapon /swapfile
     Or resize the machine, or raise the container memory limit, to 1GB or more."
-    if [ "$(uname -s 2>/dev/null)" = "Darwin" ]; then
-      out="${out}
-  On macOS, endpoint security (Santa, an MDM policy) kills binaries it has not
-  approved the same way: check its log and allow ${target}."
-    fi
   elif [ "$code" = 143 ]; then
     out="${out}
   Something outside the installer stopped it (SIGTERM): a timeout wrapper, a
@@ -669,18 +742,23 @@ report_on_exit() {
 trap report_on_exit EXIT
 
 # --- Banner ---------------------------------------------------------------
-# Blocky lowercase "squirrelscan" wordmark, matching the CLI's own banner
-# (apps/cli/src/cli/banner.ts) instead of the old camel-case figlet art.
-# BANNER_ART_COLOR is a precomputed copy of that file's gradient-string
-# output for the autumn palette (#CD853F -> #D2691E -> #8B4513 -> #A0522D) --
-# this installer has no Node/gradient-string available at curl|bash time.
-BANNER_ART_PLAIN=' ▄█▀ ▄▀█ █ █ █ █▀▄ █▀▄ █▀▀ █   ▄█▀ ▄▀▀ ▄▀█ █▄ █
- ▀▄  █ █ █ █ █ ██▀ ██▀ █▀  █   ▀▄  █   █▀█ █ ▀█
- █▄▀ ▀▀█ ▀▄▀ █ █ █ █ █ █▄▄ █▄▄ █▄▀ ▀▄▄ █ █ █  █'
+# The pixel squirrel + wordmark the CLI prints (apps/cli/src/cli/brand.ts),
+# pre-rendered because nothing but bash exists at curl|bash time. Truecolor
+# where the terminal says so (COLORTERM), 256 colours otherwise.
 
-BANNER_ART_COLOR=$' \033[38;2;205;133;63m▄\033[39m\033[38;2;205;132;62m█\033[39m\033[38;2;205;131;61m▀\033[39m \033[38;2;206;130;60m▄\033[39m\033[38;2;206;129;58m▀\033[39m\033[38;2;206;128;57m█\033[39m \033[38;2;206;127;56m█\033[39m \033[38;2;206;126;55m█\033[39m \033[38;2;206;125;54m█\033[39m \033[38;2;207;124;53m█\033[39m\033[38;2;207;123;52m▀\033[39m\033[38;2;207;122;50m▄\033[39m \033[38;2;207;121;49m█\033[39m\033[38;2;207;120;48m▀\033[39m\033[38;2;207;119;47m▄\033[39m \033[38;2;208;119;46m█\033[39m\033[38;2;208;118;45m▀\033[39m\033[38;2;208;117;44m▀\033[39m \033[38;2;208;116;43m█\033[39m   \033[38;2;208;115;41m▄\033[39m\033[38;2;208;114;40m█\033[39m\033[38;2;209;113;39m▀\033[39m \033[38;2;209;112;38m▄\033[39m\033[38;2;209;111;37m▀\033[39m\033[38;2;209;110;36m▀\033[39m \033[38;2;209;109;35m▄\033[39m\033[38;2;209;108;33m▀\033[39m\033[38;2;210;107;32m█\033[39m \033[38;2;210;106;31m█\033[39m\033[38;2;210;105;30m▄\033[39m \033[38;2;207;104;30m█\033[39m\n \033[38;2;205;102;29m▀\033[39m\033[38;2;202;101;29m▄\033[39m  \033[38;2;200;100;28m█\033[39m \033[38;2;197;99;28m█\033[39m \033[38;2;195;97;28m█\033[39m \033[38;2;192;96;27m█\033[39m \033[38;2;190;95;27m█\033[39m \033[38;2;187;93;26m█\033[39m\033[38;2;185;92;26m█\033[39m\033[38;2;182;91;26m▀\033[39m \033[38;2;180;90;25m█\033[39m\033[38;2;177;88;25m█\033[39m\033[38;2;175;87;25m▀\033[39m \033[38;2;172;86;24m█\033[39m\033[38;2;169;84;24m▀\033[39m  \033[38;2;167;83;23m█\033[39m   \033[38;2;164;82;23m▀\033[39m\033[38;2;162;81;23m▄\033[39m  \033[38;2;159;79;22m█\033[39m   \033[38;2;157;78;22m█\033[39m\033[38;2;154;77;21m▀\033[39m\033[38;2;152;75;21m█\033[39m \033[38;2;149;74;21m█\033[39m \033[38;2;147;73;20m▀\033[39m\033[38;2;144;72;20m█\033[39m\n \033[38;2;142;70;19m█\033[39m\033[38;2;139;69;19m▄\033[39m\033[38;2;140;69;20m▀\033[39m \033[38;2;141;70;21m▀\033[39m\033[38;2;141;70;22m▀\033[39m\033[38;2;142;71;23m█\033[39m \033[38;2;143;71;24m▀\033[39m\033[38;2;144;72;25m▄\033[39m\033[38;2;144;72;26m▀\033[39m \033[38;2;145;73;26m█\033[39m \033[38;2;146;73;27m█\033[39m \033[38;2;147;74;28m█\033[39m \033[38;2;147;74;29m█\033[39m \033[38;2;148;75;30m█\033[39m \033[38;2;149;75;31m█\033[39m\033[38;2;150;76;32m▄\033[39m\033[38;2;150;76;33m▄\033[39m \033[38;2;151;76;34m█\033[39m\033[38;2;152;77;35m▄\033[39m\033[38;2;153;77;36m▄\033[39m \033[38;2;153;78;37m█\033[39m\033[38;2;154;78;38m▄\033[39m\033[38;2;155;79;39m▀\033[39m \033[38;2;156;79;39m▀\033[39m\033[38;2;156;80;40m▄\033[39m\033[38;2;157;80;41m▄\033[39m \033[38;2;158;81;42m█\033[39m \033[38;2;159;81;43m█\033[39m \033[38;2;159;82;44m█\033[39m  \033[38;2;160;82;45m█\033[39m'
-
-BANNER_TEXT_FALLBACK='squirrelscan'
+# BEGIN GENERATED HEADER (scripts/sync-install-header.ts, from apps/cli/src/cli/brand.ts; do not edit)
+BANNER_ART_TRUECOLOR=$'  \033[38;2;160;82;45;48;2;160;82;45m▀\033[0m\033[38;2;160;82;45;48;2;160;82;45m▀\033[0m\n  \033[38;2;139;69;19;48;2;139;69;19m▀\033[0m\033[38;2;139;69;19;48;2;139;69;19m▀\033[0m       \033[38;2;160;82;45;48;2;160;82;45m▀\033[0m\033[38;2;160;82;45;48;2;160;82;45m▀\033[0m\033[38;2;222;184;135m▄\033[0m\n  \033[38;2;139;69;19;48;2;139;69;19m▀\033[0m\033[38;2;139;69;19;48;2;139;69;19m▀\033[0m      \033[38;2;160;82;45;48;2;160;82;45m▀\033[0m\033[38;2;160;82;45;48;2;160;82;45m▀\033[0m\033[38;2;160;82;45;48;2;160;82;45m▀\033[0m\033[38;2;160;82;45;48;2;0;0;0m▀\033[0m     \033[1;38;2;205;133;63msquirrelscan\033[0m\n   \033[38;2;139;69;19;48;2;139;69;19m▀\033[0m\033[38;2;139;69;19;48;2;139;69;19m▀\033[0m \033[38;2;160;82;45;48;2;160;82;45m▀\033[0m\033[38;2;160;82;45;48;2;160;82;45m▀\033[0m\033[38;2;160;82;45;48;2;160;82;45m▀\033[0m\033[38;2;160;82;45;48;2;160;82;45m▀\033[0m\033[38;2;205;133;63;48;2;205;133;63m▀\033[0m\033[38;2;205;133;63;48;2;205;133;63m▀\033[0m\033[38;2;205;133;63;48;2;205;133;63m▀\033[0m\033[38;2;205;133;63;48;2;205;133;63m▀\033[0m\033[38;2;160;82;45;48;2;160;82;45m▀\033[0m\033[38;2;160;82;45;48;2;160;82;45m▀\033[0m   \033[2mThe website QA tool for your coding agent\033[0m\n    \033[38;2;160;82;45;48;2;160;82;45m▀\033[0m\033[38;2;160;82;45;48;2;160;82;45m▀\033[0m\033[38;2;205;133;63;48;2;205;133;63m▀\033[0m\033[38;2;205;133;63;48;2;205;133;63m▀\033[0m\033[38;2;205;133;63;48;2;205;133;63m▀\033[0m\033[38;2;205;133;63;48;2;205;133;63m▀\033[0m\033[38;2;160;82;45;48;2;160;82;45m▀\033[0m\033[38;2;160;82;45;48;2;160;82;45m▀\033[0m  \033[38;2;139;69;19m▄\033[0m\033[38;2;34;139;34;48;2;139;69;19m▀\033[0m\n      \033[38;2;205;133;63;48;2;205;133;63m▀\033[0m\033[38;2;205;133;63;48;2;205;133;63m▀\033[0m\033[38;2;222;184;135;48;2;222;184;135m▀\033[0m\033[38;2;222;184;135;48;2;222;184;135m▀\033[0m\033[38;2;205;133;63;48;2;205;133;63m▀\033[0m\033[38;2;205;133;63;48;2;205;133;63m▀\033[0m  \033[38;2;139;69;19m▀\033[0m\033[38;2;139;69;19m▀\033[0m\n      \033[38;2;139;69;19;48;2;139;69;19m▀\033[0m\033[38;2;139;69;19;48;2;139;69;19m▀\033[0m  \033[38;2;139;69;19;48;2;139;69;19m▀\033[0m\033[38;2;139;69;19;48;2;139;69;19m▀\033[0m'
+BANNER_ART_256=$'  \033[38;5;130;48;5;130m▀\033[0m\033[38;5;130;48;5;130m▀\033[0m\n  \033[38;5;94;48;5;94m▀\033[0m\033[38;5;94;48;5;94m▀\033[0m       \033[38;5;130;48;5;130m▀\033[0m\033[38;5;130;48;5;130m▀\033[0m\033[38;5;180m▄\033[0m\n  \033[38;5;94;48;5;94m▀\033[0m\033[38;5;94;48;5;94m▀\033[0m      \033[38;5;130;48;5;130m▀\033[0m\033[38;5;130;48;5;130m▀\033[0m\033[38;5;130;48;5;130m▀\033[0m\033[38;5;130;48;5;16m▀\033[0m     \033[1;38;5;173msquirrelscan\033[0m\n   \033[38;5;94;48;5;94m▀\033[0m\033[38;5;94;48;5;94m▀\033[0m \033[38;5;130;48;5;130m▀\033[0m\033[38;5;130;48;5;130m▀\033[0m\033[38;5;130;48;5;130m▀\033[0m\033[38;5;130;48;5;130m▀\033[0m\033[38;5;173;48;5;173m▀\033[0m\033[38;5;173;48;5;173m▀\033[0m\033[38;5;173;48;5;173m▀\033[0m\033[38;5;173;48;5;173m▀\033[0m\033[38;5;130;48;5;130m▀\033[0m\033[38;5;130;48;5;130m▀\033[0m   \033[2mThe website QA tool for your coding agent\033[0m\n    \033[38;5;130;48;5;130m▀\033[0m\033[38;5;130;48;5;130m▀\033[0m\033[38;5;173;48;5;173m▀\033[0m\033[38;5;173;48;5;173m▀\033[0m\033[38;5;173;48;5;173m▀\033[0m\033[38;5;173;48;5;173m▀\033[0m\033[38;5;130;48;5;130m▀\033[0m\033[38;5;130;48;5;130m▀\033[0m  \033[38;5;94m▄\033[0m\033[38;5;28;48;5;94m▀\033[0m\n      \033[38;5;173;48;5;173m▀\033[0m\033[38;5;173;48;5;173m▀\033[0m\033[38;5;180;48;5;180m▀\033[0m\033[38;5;180;48;5;180m▀\033[0m\033[38;5;173;48;5;173m▀\033[0m\033[38;5;173;48;5;173m▀\033[0m  \033[38;5;94m▀\033[0m\033[38;5;94m▀\033[0m\n      \033[38;5;94;48;5;94m▀\033[0m\033[38;5;94;48;5;94m▀\033[0m  \033[38;5;94;48;5;94m▀\033[0m\033[38;5;94;48;5;94m▀\033[0m'
+BANNER_ART_PLAIN='  ██
+  ██       ██▄
+  ██      ███▀     squirrelscan
+   ██ ██████████   The website QA tool for your coding agent
+    ████████  ▄█
+      ██████  ▀▀
+      ██  ██'
+BANNER_TEXT_FALLBACK='  squirrelscan
+  The website QA tool for your coding agent'
+# END GENERATED HEADER
 
 # Half-block glyphs need a UTF-8 locale to render correctly; CI logs and
 # dumb terminals often run C/POSIX. Fall back to plain text there.
@@ -702,9 +780,12 @@ is_utf8_locale() {
 print_banner() {
   echo ""
   if ! is_utf8_locale; then
-    echo "  $BANNER_TEXT_FALLBACK"
+    printf '%s\n' "$BANNER_TEXT_FALLBACK"
   elif [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
-    printf '%s\n' "$BANNER_ART_COLOR"
+    case "${COLORTERM:-}" in
+      *truecolor*|*24bit*) printf '%s\n' "$BANNER_ART_TRUECOLOR" ;;
+      *) printf '%s\n' "$BANNER_ART_256" ;;
+    esac
   else
     printf '%s\n' "$BANNER_ART_PLAIN"
   fi
@@ -953,32 +1034,6 @@ download_failure_guidance() {
     echo "  release is published. Allowlist github.com or install.squirrelscan.com,"
     echo "  or install from a network that already reaches one of them."
   fi
-}
-
-# Detect libc (glibc vs musl)
-detect_libc() {
-  # Method 1: Check for musl loader (most reliable)
-  if ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then
-    echo "-musl"
-    return
-  fi
-
-  # Method 2: Check Alpine release file
-  if [ -f /etc/alpine-release ]; then
-    echo "-musl"
-    return
-  fi
-
-  # Method 3: ldd version string
-  if command -v ldd >/dev/null 2>&1; then
-    if ldd --version 2>&1 | grep -qi musl; then
-      echo "-musl"
-      return
-    fi
-  fi
-
-  # Default: glibc (no suffix)
-  echo ""
 }
 
 # Detect platform and architecture
@@ -1287,7 +1342,7 @@ download_and_install() {
 # files are in place but the binary will not execute.
 install_by_hand_and_verify() {
   local binary="$1" version="$2" bin_dir="$3" kill_rc="$4"
-  local target link
+  local target link headline macos_version=""
 
   warn "$(self_install_kill_headline "$kill_rc")"
   log "Finishing the install by hand..."
@@ -1310,7 +1365,23 @@ install_by_hand_and_verify() {
     LAST_ERROR_OUTPUT=$(tail -n 40 "$verify_log" 2>/dev/null || true)
     LAST_ERROR_CODE="$rc"
     CURRENT_STEP=$(verify_binary_step_for_code "$rc")
-    error "squirrel is installed at $target but cannot run on this machine (exit $rc)" \
+    # The reported payload is a fixed set of fields (the worker drops anything
+    # it does not know), so the macOS release rides in the message itself,
+    # which is what Sentry shows as error_line. Without it a darwin kill is
+    # indistinguishable from every other darwin kill (#2310). It goes early in
+    # the line because the report keeps the message's HEAD when it truncates.
+    headline="squirrel is installed but cannot run on this machine"
+    if is_darwin; then
+      macos_version=$(macos_product_version)
+      if [ -n "$macos_version" ]; then
+        headline="${headline} (macOS ${macos_version}, exit $rc)"
+      else
+        headline="${headline} (macOS, exit $rc)"
+      fi
+    else
+      headline="${headline} (exit $rc)"
+    fi
+    error "${headline}: $target" \
       "$(binary_unrunnable_guidance "$rc" "$target" "$link")"
   fi
   info "Installed by hand after self install was killed (exit $kill_rc); the binary runs."
@@ -1355,30 +1426,26 @@ detect_shell_config() {
   fi
 }
 
-# Get-started epilogue: one scannable next-steps block instead of the old
-# scattered "Tip:"/"Installation complete!"/skill-hint tail (#1029).
-# "squirrel skills install" is the canonical path (installs both skills,
-# no --skill filter); the npx fallback line stays copy-paste-able for
-# docs/agents that can't shell out to the freshly-installed binary.
+# Get-started epilogue: one next step. `squirrel setup` walks sign-in, the
+# agent skills and defaults, then points at the first audit, so the installer
+# no longer lists those separately (#2367).
 print_epilogue() {
   local version="$1"
   # Same UTF-8 gate as the banner -- CI logs / dumb terminals shouldn't get
-  # mojibake from the checkmark/arrow glyphs either (codex review, #1029).
-  local check="✓" arrow="→"
+  # mojibake from the checkmark glyph either (codex review, #1029).
+  local check="✓"
   if ! is_utf8_locale; then
     check="v"
-    arrow="->"
   fi
   echo ""
   echo -e "${GREEN}${check}${NC} squirrel ${version} installed"
   echo ""
-  echo "Get started:"
-  echo "  1. Run your first audit:   squirrel audit https://your-site.com"
-  echo "  2. Add agent skills:       squirrel skills install   (Claude Code, Cursor, Codex, ...)"
-  echo "                             or: npx skills add squirrelscan/skills -y -g"
-  echo "  3. Unlock cloud audits:    squirrel auth login       ${arrow} https://squirrelscan.com/login"
-  echo "  Shell completions:         squirrel self completion <bash|zsh|fish>"
-  echo "  Docs: https://docs.squirrelscan.com"
+  echo "Next, set it up (sign in, agent skills, defaults):"
+  echo ""
+  echo "  squirrel setup"
+  echo ""
+  echo "Or jump straight to an audit:  squirrel audit https://your-site.com"
+  echo "Docs: https://docs.squirrelscan.com"
   echo ""
 }
 
@@ -1449,6 +1516,7 @@ main() {
   # Version: pinned or latest
   if [ -n "${SQUIRREL_VERSION:-}" ]; then
     version="$SQUIRREL_VERSION"
+    INSTALLER_RELEASE_VERSION="${version#v}"
     log "Installing pinned version: $version"
   else
     CURRENT_STEP="fetch_releases"
@@ -1460,6 +1528,7 @@ main() {
         error "No releases found for channel '$channel'\n  Check: https://github.com/${REPO}/releases"
       fi
     fi
+    INSTALLER_RELEASE_VERSION="${version#v}"
     log "Latest version: $version (channel: $channel)"
   fi
 

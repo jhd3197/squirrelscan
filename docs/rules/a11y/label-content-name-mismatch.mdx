@@ -15,7 +15,7 @@ One check, `label-content-name-mismatch`, at severity error. It looks at element
 
 Visible text is gathered by walking the element's child nodes, skipping any subtree marked `aria-hidden="true"` or carrying the `hidden` attribute. Both strings are lowercased and their whitespace collapsed before comparison.
 
-- Fail when the `aria-label` does not contain the visible text as a substring. Report message: `N element(s) where visible text doesn't match accessible name`. Items read `button: visible="search" vs aria-label="find products"`, truncating each side at 20 characters. Only the first ten are listed. The finding carries the issue `Voice control users may not be able to activate these controls`.
+- Fail when the `aria-label` does not contain the visible text as a substring. Report message: `N element(s) where visible text doesn't match accessible name`. Items read `button: visible="search" vs aria-label="find products"`, truncating each side at 20 characters, up to ten with a count of the rest. The finding carries the issue `Voice control users may not be able to activate these controls`.
 - Pass with `Visible labels match accessible names`.
 - Info with `No elements with aria-label and visible text found`.
 
@@ -58,8 +58,9 @@ disable = ["a11y/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["a11y/label-content-name-mismatch"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
@@ -78,7 +79,7 @@ Accessibility findings ship in every audit next to the SEO, performance and agen
 
 ## Check your site
 
-Run `squirrel audit https://example.com` and open the Accessibility section of the report. Each finding shows the visible text and the accessible name side by side. Local audits are free.
+Run `squirrel audit https://example.com` and open the Accessibility section of the report. Each finding shows the visible text and the accessible name side by side. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">

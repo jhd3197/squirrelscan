@@ -13,7 +13,7 @@ import {
   packComponentOccurrences,
   unpackComponentOccurrences,
 } from "@squirrelscan/core-contracts/component-evidence";
-import { isCacheHitReason } from "@squirrelscan/core-contracts";
+import { isCacheHitReason, parseUnverifiedReason } from "@squirrelscan/core-contracts";
 import { urlHostKey } from "@squirrelscan/utils/url";
 
 import type {
@@ -46,6 +46,8 @@ import type {
   SitePageRecord,
   CompactFindingsOptions,
   PageFeatureRow,
+  PageReportScalars,
+  HreflangAlternate,
   PageLinkRow,
   PageFeatureDuplicateField,
   DuplicateGroup,
@@ -59,12 +61,23 @@ import { StorageError } from "./types";
 export interface ContentStoreAdapter {
   put(content: string, contentType: string): string;
   getString(hash: string): string | null;
+  /**
+   * Presence check that neither reads nor touches the body. Optional: the
+   * eviction census falls back to `getString` without it (#2342).
+   */
+  has?(hash: string): boolean;
+  /**
+   * Mark these bodies recently used without reading them, so a size cap's LRU
+   * keeps them while the caller still needs them (#2342). Optional: a store with
+   * no eviction has nothing to protect.
+   */
+  touch?(hashes: readonly string[]): number;
 }
 
 // Schema version - increment when schema changes.
 // Exported so migration tests can assert "this DB reached the CURRENT version" rather than pinning a
 // literal, which turned every schema bump into two unrelated test failures.
-export const SCHEMA_VERSION = 31;
+export const SCHEMA_VERSION = 36;
 
 // Migrations to run when upgrading from older versions
 const MIGRATIONS: Record<number, string[]> = {
@@ -439,24 +452,104 @@ const MIGRATIONS: Record<number, string[]> = {
     `CREATE INDEX IF NOT EXISTS idx_entity_occurrences_url
       ON entity_occurrences(crawl_id, normalized_url)`,
   ],
-  // Version 30: component-aware findings (#2307). Additive DOM evidence for a
+  // Version 30: the per-page scalars the REPORT needs, captured while the DOM is
+  // live (squirrelscan/repo#2343). Without them `reconstructReport` re-parsed
+  // every stored page to recover a title, an og:title, an h1 count and a
+  // thin-content flag — a second full DOM build per page (2.4-4.8 ms, ~19 s on a
+  // 4,000-page crawl) for ~200 bytes of output. One nullable JSON column rather
+  // than nine: none of these is a rule input or a query key, so widening the
+  // table's aggregate surface for them would misdescribe what they are. ADDITIVE;
+  // ALTER is idempotent (the runner swallows "duplicate column name"). Local
+  // sqlite only — NOT a prod migration.
+  //
+  // No backfill, for the v19/v20/v22 reason: `extractPageFeatures` always writes a
+  // FULL row via INSERT OR REPLACE keyed by (crawl_id, normalized_url), each crawl
+  // writes only its own crawl_id, and the streaming loop re-extracts every scored
+  // page in the current run. NULL reads back as null, which the report treats as
+  // "this page has no captured scalars" and falls back to parsing it — which is
+  // exactly what an audit stored before this version gets.
+  30: [`ALTER TABLE page_features ADD COLUMN report_scalars TEXT`],
+  // Version 31: an edge's example pages (squirrelscan/squirrelscan#492). The
+  // map reassembled from the store had `pages: []` on every edge, so
+  // `squirrel entities` could say an @id dangles but not where the reference
+  // lives. The document's own capped list and remainder are stored as they
+  // are. ADDITIVE and nullable: a row written before this reads as "not
+  // recorded" (NULL), never as "referenced from nowhere". Local sqlite only.
+  31: [
+    `ALTER TABLE entity_edges ADD COLUMN pages TEXT`,
+    `ALTER TABLE entity_edges ADD COLUMN more_pages INTEGER`,
+  ],
+  // Version 32: an image's natural pixel size and animation, read from its
+  // first bytes by the image pool (squirrelscan/squirrelscan#470) so
+  // images/responsive-size can measure oversizing in pixels. ADDITIVE and
+  // nullable: a row written before this reads as "size unknown", which the
+  // rule answers with its byte budget, and the resource check probes that
+  // image again instead of reusing the row. `animated` is 0/1/NULL. Local
+  // sqlite only.
+  32: [
+    `ALTER TABLE resource_sizes ADD COLUMN natural_width INTEGER`,
+    `ALTER TABLE resource_sizes ADD COLUMN natural_height INTEGER`,
+    `ALTER TABLE resource_sizes ADD COLUMN animated INTEGER`,
+  ],
+  // Version 33: a page's hreflang alternates (squirrelscan/squirrelscan#489),
+  // so the streaming duplicate title and description rules can leave
+  // reciprocal same-language region variants out of their groups. ADDITIVE and
+  // nullable: a row written before this reads as "no alternates", which
+  // exempts nothing and is the behaviour before #489. Local sqlite only.
+  33: [`ALTER TABLE page_features ADD COLUMN hreflang_alternates TEXT`],
+  // Version 34: why an external link is unverifiable (squirrelscan/squirrelscan#821):
+  // blocked, unreachable or awaiting a confirming check, so a re-rendered report
+  // and `squirrel analyze` keep the label. ADDITIVE and nullable: a row written
+  // before this reads as plainly unverified. Local sqlite only.
+  34: [`ALTER TABLE links ADD COLUMN unverified_reason TEXT`],
+  // Version 35: component-aware findings (#2307). Additive DOM evidence for a
   // check, stored as JSON beside the other CheckResult fields. Without these the
   // report is rebuilt from `rule_results` with the evidence silently gone, which
   // is how the whole feature was invisible to the real `squirrel audit` path.
-  30: [
+  35: [
     "ALTER TABLE rule_results ADD COLUMN component_occurrences TEXT DEFAULT NULL",
     "ALTER TABLE rule_results ADD COLUMN component_evidence TEXT DEFAULT NULL",
   ],
-  // Version 31: shared site-resource evidence (#2341), for exactly the reason
-  // version 30 exists — the report is rebuilt from `rule_results`, so a
+  // Version 36: shared site-resource evidence (#2341), for exactly the reason
+  // version 35 exists — the report is rebuilt from `rule_results`, so a
   // CheckResult field this table does not carry is invisible to the real
   // `squirrel audit` path while every in-memory test stays green.
-  31: [
+  36: [
     "ALTER TABLE rule_results ADD COLUMN site_resource_occurrences TEXT DEFAULT NULL",
     "ALTER TABLE rule_results ADD COLUMN site_resource_evidence TEXT DEFAULT NULL",
   ],
-
 };
+
+// Every `pages` column but the two that hold a page's body, for
+// getPagesWithoutBodies (repo#2343). Listed rather than derived so a new body
+// column cannot slip into the projection unnoticed; a new scalar column has to
+// be added here too, or that read returns it undefined.
+const PAGE_COLUMNS_WITHOUT_BODIES = [
+  "crawl_id",
+  "url",
+  "normalized_url",
+  "final_url",
+  "depth",
+  "parent_url",
+  "redirect_chain",
+  "status",
+  "content_type",
+  "size_bytes",
+  "load_time_ms",
+  "ttfb",
+  "download_time",
+  "fetched_at",
+  "etag",
+  "last_modified",
+  "content_hash",
+  "headers",
+  "security_headers",
+  "request_headers",
+  "fetcher_id",
+  "fallback_reason",
+  "source_hash",
+  "html_hash",
+].join(", ");
 
 // Nullable columns added to `pages` via ALTER migrations over time, with the
 // types they were added with. `reconcilePagesColumns` re-adds any that are
@@ -511,6 +604,7 @@ const LINKS_ALTER_COLUMNS: ReadonlyArray<{ name: string; type: string }> = [
   { name: "waf_blocked", type: "INTEGER" },
   { name: "waf_provider", type: "TEXT" },
   { name: "rate_limited", type: "INTEGER" },
+  { name: "unverified_reason", type: "TEXT" },
 ];
 
 const SITEMAP_URL_STATUSES_ALTER_COLUMNS: ReadonlyArray<{ name: string; type: string }> = [
@@ -534,9 +628,34 @@ const CRAWLS_ALTER_COLUMNS: ReadonlyArray<{ name: string; type: string }> = [
   { name: "report_status", type: "TEXT" },
 ];
 
-// Same guard for `rule_results`. Migration 30 added the two component-evidence
-// columns (#2307); a DB stamped past 30 by a build numbering its own migration
-// 30 would skip them forever. The failure splits both ways this file has already
+// Same guard for `entity_edges` (#492). Migration 31 added both columns, and
+// `saveEntityMap` writes them, so a DB stamped past 31 without them would fail
+// every entity map write. That write is caught and logged rather than failing
+// the audit, which would leave `squirrel entities` reading the previous map.
+const ENTITY_EDGES_ALTER_COLUMNS: ReadonlyArray<{ name: string; type: string }> = [
+  { name: "pages", type: "TEXT" },
+  { name: "more_pages", type: "INTEGER" },
+];
+
+// Same guard for `resource_sizes` (#470). Migration 32 added the three header
+// columns and `saveResourceSizes` writes them, so a DB stamped past 32 without
+// them would throw on every resource write, after the rules had run.
+const RESOURCE_SIZES_ALTER_COLUMNS: ReadonlyArray<{ name: string; type: string }> = [
+  { name: "natural_width", type: "INTEGER" },
+  { name: "natural_height", type: "INTEGER" },
+  { name: "animated", type: "INTEGER" },
+];
+
+// Same guard for `page_features` (#489). Migration 33 added
+// `hreflang_alternates` and every page-features write names it, so a DB stamped
+// past 33 without it would fail the streamed rule loop's first upsert.
+const PAGE_FEATURES_ALTER_COLUMNS: ReadonlyArray<{ name: string; type: string }> = [
+  { name: "hreflang_alternates", type: "TEXT" },
+];
+
+// Same guard for `rule_results`. Migrations 35 and 36 added the component-evidence
+// and site-resource columns (#2307, #2341); a DB stamped past 35 by a build
+// numbering its own migration 35 would skip them forever. The failure splits both ways this file has already
 // seen: every saveRuleResults INSERT names the columns, so writes throw and the
 // audit stores no checks at all, while `SELECT *` reads map by key and would
 // merely yield `undefined` — a silent return to exactly the evidence-less report
@@ -650,6 +769,7 @@ CREATE TABLE IF NOT EXISTS links (
   waf_blocked INTEGER,
   waf_provider TEXT,
   rate_limited INTEGER,
+  unverified_reason TEXT,
   PRIMARY KEY (crawl_id, href),
   FOREIGN KEY (crawl_id) REFERENCES crawls(id)
 );
@@ -852,6 +972,9 @@ CREATE TABLE IF NOT EXISTS resource_sizes (
   last_modified TEXT,
   vary TEXT,
   cache_reason TEXT,
+  natural_width INTEGER,
+  natural_height INTEGER,
+  animated INTEGER,
   PRIMARY KEY (crawl_id, type, url),
   FOREIGN KEY (crawl_id) REFERENCES crawls(id)
 );
@@ -955,6 +1078,8 @@ CREATE TABLE IF NOT EXISTS page_features (
   favicon_href TEXT,
   theme_color TEXT,
   og_image TEXT,
+  report_scalars TEXT,
+  hreflang_alternates TEXT,
   PRIMARY KEY (crawl_id, normalized_url),
   FOREIGN KEY (crawl_id) REFERENCES crawls(id)
 );
@@ -1021,6 +1146,11 @@ CREATE TABLE IF NOT EXISTS entity_edges (
   target TEXT NOT NULL,
   dangling INTEGER NOT NULL,
   occurrences INTEGER NOT NULL,
+  -- JSON array of the pages making the reference, capped as the document caps
+  -- it, with the remainder in more_pages. NULL on a row written before
+  -- migration 31: not recorded, which is not the same as no pages.
+  pages TEXT,
+  more_pages INTEGER,
   PRIMARY KEY (crawl_id, source, predicate, target),
   FOREIGN KEY (crawl_id) REFERENCES crawls(id)
 );
@@ -1135,6 +1265,11 @@ export class SQLiteStorage implements CrawlStorage {
   private db: Database | null = null;
   private readonly path: string;
   private readonly contentStore: ContentStoreAdapter | null;
+  /**
+   * URLs whose cached entry was skipped because the content store had evicted
+   * its body (#2342). See {@link getCachedPage}.
+   */
+  private readonly evictedCacheEntries = new Set<string>();
 
   constructor(path: string = ":memory:", contentStore?: ContentStoreAdapter) {
     this.path = path;
@@ -1256,6 +1391,9 @@ export class SQLiteStorage implements CrawlStorage {
     this.reconcileColumns("links", LINKS_ALTER_COLUMNS);
     this.reconcileColumns("sitemap_url_statuses", SITEMAP_URL_STATUSES_ALTER_COLUMNS);
     this.reconcileColumns("crawls", CRAWLS_ALTER_COLUMNS);
+    this.reconcileColumns("entity_edges", ENTITY_EDGES_ALTER_COLUMNS);
+    this.reconcileColumns("resource_sizes", RESOURCE_SIZES_ALTER_COLUMNS);
+    this.reconcileColumns("page_features", PAGE_FEATURES_ALTER_COLUMNS);
     this.reconcileColumns("rule_results", RULE_RESULTS_ALTER_COLUMNS);
     this.indexesAfterMigrations();
   }
@@ -1307,6 +1445,9 @@ export class SQLiteStorage implements CrawlStorage {
       | "links"
       | "sitemap_url_statuses"
       | "crawls"
+      | "entity_edges"
+      | "resource_sizes"
+      | "page_features"
       | "rule_results",
     columns: ReadonlyArray<{ name: string; type: string }>
   ): void {
@@ -1524,6 +1665,9 @@ export class SQLiteStorage implements CrawlStorage {
       lastModified: (row.last_modified as string | null) ?? null,
       vary: (row.vary as string | null) ?? null,
       cacheReason,
+      naturalWidth: (row.natural_width as number | null) ?? null,
+      naturalHeight: (row.natural_height as number | null) ?? null,
+      animated: row.animated == null ? null : row.animated === 1,
     };
   }
 
@@ -1684,6 +1828,49 @@ export class SQLiteStorage implements CrawlStorage {
   }
 
   /**
+   * `getPages` without the two body columns: every PageRecord field except
+   * `html` and `parsedData`, which come back null (repo#2343).
+   *
+   * For the report's page walk, which since report scalars are stored needs a
+   * page's body only when it has none (a page outside the rule universe, or one
+   * stored before schema v30). `getPages` read every body anyway, out of the
+   * content store and gunzipped: 1.5 GB of transient strings over 1,000
+   * 1.5 MB pages, which the allocator grew for and kept, and which made the
+   * report phase the audit's peak (~1.8 GB footprint at 1,000 pages, ~4.5 GB
+   * at 4,000). Same ordering and pagination as `getPages`.
+   */
+  getPagesWithoutBodies(
+    crawlId: string,
+    options?: PaginationOptions
+  ): Effect.Effect<PageRecord[], StorageError, never> {
+    return Effect.try({
+      try: () => {
+        const db = this.getDb();
+        let query = `SELECT ${PAGE_COLUMNS_WITHOUT_BODIES} FROM pages WHERE crawl_id = ? ORDER BY normalized_url ASC`;
+        const params: unknown[] = [crawlId];
+
+        if (options?.limit) {
+          query += " LIMIT ?";
+          params.push(options.limit);
+        }
+        if (options?.offset) {
+          query += " OFFSET ?";
+          params.push(options.offset);
+        }
+
+        const rows = db
+          .prepare(query)
+          .all(...(params as (string | number | null)[])) as Record<
+          string,
+          unknown
+        >[];
+        return rows.map((row) => this.rowToPageRecord(row, { body: false }));
+      },
+      catch: (e) => StorageError.read(e),
+    });
+  }
+
+  /**
    * Just `normalized_url` + `parsed_data`, for the audit's incoming-link scan
    * (#1860).
    *
@@ -1832,13 +2019,109 @@ export class SQLiteStorage implements CrawlStorage {
           | Record<string, unknown>
           | undefined;
         if (!row) return null;
-        return this.rowToPageRecord(row);
+        const page = this.rowToPageRecord(row);
+        // The body went to the content store and the store's size cap has
+        // since evicted it (#2342). Reusing the entry would answer a 304 with a
+        // page that has no HTML, which then drops out of every rule without a
+        // word. A miss makes the crawler fetch it in full instead.
+        if (this.isBodyEvicted(page)) {
+          this.evictedCacheEntries.add(normalizedUrl);
+          return null;
+        }
+        // A row from before `html_hash` existed (schema < 28) cannot say
+        // whether its body went to the store. An HTML page with a content hash
+        // and no body either lost it or never had one, and fetching it in full
+        // is right both ways. Not counted as an eviction: it may not be one.
+        if (
+          this.contentStore !== null &&
+          page.html === null &&
+          !page.htmlHash &&
+          !!page.contentHash &&
+          // No content type counts: the crawler sniffs headerless HTML too.
+          (!page.contentType || /html/i.test(page.contentType))
+        ) {
+          return null;
+        }
+        return page;
       },
       catch: (e) => StorageError.read(e),
     });
   }
 
-  private rowToPageRecord(row: Record<string, unknown>): PageRecord {
+  /**
+   * True when a page's body was written to the content store and is no longer
+   * there. `htmlHash` is set only on the content-store path, so an inline or
+   * bodiless page (a redirect, a non-HTML response) never reads as evicted.
+   */
+  private isBodyEvicted(page: PageRecord): boolean {
+    return this.contentStore !== null && page.html === null && !!page.htmlHash;
+  }
+
+  /**
+   * How many cached entries this instance skipped because their body had been
+   * evicted, and so fetched again in full (#2342).
+   */
+  evictedCacheEntryCount(): number {
+    return this.evictedCacheEntries.size;
+  }
+
+  /**
+   * Mark every body this crawl stored as recently used, without reading any
+   * (#2342). A resumed crawl calls it under its retention lease: the pages
+   * stored before the interruption are skipped as done and read again only in
+   * the rules phase, so without this the resumed crawl's own puts could evict
+   * them first. Returns how many bodies were still there.
+   */
+  retainPageBodies(crawlId: string): Effect.Effect<number, StorageError, never> {
+    return Effect.try({
+      try: () => {
+        const store = this.contentStore;
+        if (!store?.touch) return 0;
+        const rows = this.getDb()
+          .prepare(
+            "SELECT content_hash FROM pages WHERE crawl_id = ? AND html IS NULL AND content_hash IS NOT NULL"
+          )
+          .all(crawlId) as Array<{ content_hash: string }>;
+        return store.touch(rows.map((r) => r.content_hash));
+      },
+      catch: (e) => StorageError.write(e),
+    });
+  }
+
+  /**
+   * Of a crawl's pages whose body lives in the content store, how many are no
+   * longer there (#2342). A presence check per page, no body reads, and it
+   * does not refresh anything's place in the store's eviction order.
+   */
+  countEvictedPageBodies(
+    crawlId: string
+  ): Effect.Effect<{ evicted: number; stored: number }, StorageError, never> {
+    return Effect.try({
+      try: () => {
+        const store = this.contentStore;
+        if (!store) return { evicted: 0, stored: 0 };
+        const rows = this.getDb()
+          .prepare(
+            "SELECT content_hash FROM pages WHERE crawl_id = ? AND html IS NULL AND html_hash IS NOT NULL AND content_hash IS NOT NULL"
+          )
+          .all(crawlId) as Array<{ content_hash: string }>;
+        let evicted = 0;
+        for (const { content_hash: hash } of rows) {
+          const present = store.has
+            ? store.has(hash)
+            : store.getString(hash) !== null;
+          if (!present) evicted++;
+        }
+        return { evicted, stored: rows.length };
+      },
+      catch: (e) => StorageError.read(e),
+    });
+  }
+
+  private rowToPageRecord(
+    row: Record<string, unknown>,
+    opts?: { body?: boolean }
+  ): PageRecord {
     const defaultHeaders: ResponseHeaders = {
       contentType: null,
       contentEncoding: null,
@@ -1866,10 +2149,11 @@ export class SQLiteStorage implements CrawlStorage {
       xRobotsTag: null,
     };
 
-    // Try to retrieve HTML from content-store if not in local DB
-    let html = row.html as string | null;
+    // Try to retrieve HTML from content-store if not in local DB. A caller that
+    // asked for no body (getPagesWithoutBodies) gets null, not a store read.
+    let html = (row.html as string | null | undefined) ?? null;
     const contentHash = row.content_hash as string;
-    if (!html && contentHash && this.contentStore) {
+    if (opts?.body !== false && !html && contentHash && this.contentStore) {
       html = this.contentStore.getString(contentHash);
     }
 
@@ -1893,7 +2177,7 @@ export class SQLiteStorage implements CrawlStorage {
       lastModified: row.last_modified as string | null,
       contentHash,
       html, // Retrieved from content-store if not in local DB
-      parsedData: row.parsed_data as string | null,
+      parsedData: (row.parsed_data as string | null | undefined) ?? null,
       headers: this.safeJsonParse(row.headers as string, defaultHeaders),
       securityHeaders: this.safeJsonParse(
         row.security_headers as string,
@@ -2183,6 +2467,34 @@ export class SQLiteStorage implements CrawlStorage {
     });
   }
 
+  /**
+   * Drop one crawl's rule results, and nothing else (repo#2343).
+   *
+   * {@link clearCrawlData} is the wrong tool at the rules phase: it also deletes
+   * the links, images, sitemaps and robots rows the CRAWL just wrote, which the
+   * rules are about to read.
+   *
+   * Since the rules phase spills its checks as it produces them, a run killed
+   * part way through leaves rows behind where it used to leave none, and running
+   * rules again over the same crawl_id would append a second copy of every
+   * check. An audit does not re-run rules over a crawl (a resume calls
+   * `clearCrawlData` before re-crawling, and every other path takes a fresh
+   * crawl id), and a half-written crawl is stuck at `crawled`, which the report
+   * refuses. This makes the invariant local to the phase that now depends on it
+   * rather than an inference across three call sites. `squirrel analyze` does
+   * re-run rules over a stored crawl; it replaces the results through
+   * `saveRuleResultsBatch(..., { replace: true })` (#844).
+   */
+  clearRuleResults(crawlId: string): Effect.Effect<void, StorageError, never> {
+    return Effect.try({
+      try: () => {
+        const db = this.getDb();
+        db.prepare("DELETE FROM rule_results WHERE crawl_id = ?").run(crawlId);
+      },
+      catch: (e) => StorageError.write(e),
+    });
+  }
+
   clearCrawlData(crawlId: string): Effect.Effect<void, StorageError, never> {
     return Effect.try({
       try: () => {
@@ -2238,8 +2550,8 @@ export class SQLiteStorage implements CrawlStorage {
       try: () => {
         const db = this.getDb();
         const stmt = db.prepare(`
-          INSERT OR REPLACE INTO links (crawl_id, href, is_internal, status, error, checked_at, waf_blocked, waf_provider, rate_limited)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          INSERT OR REPLACE INTO links (crawl_id, href, is_internal, status, error, checked_at, waf_blocked, waf_provider, rate_limited, unverified_reason)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
         stmt.run(
           crawlId,
@@ -2250,7 +2562,8 @@ export class SQLiteStorage implements CrawlStorage {
           link.checkedAt ?? null,
           link.wafBlocked ? 1 : null,
           link.wafProvider ?? null,
-          link.rateLimited ? 1 : null
+          link.rateLimited ? 1 : null,
+          link.unverifiedReason ?? null
         );
       },
       catch: (e) => StorageError.write(e),
@@ -2459,6 +2772,7 @@ export class SQLiteStorage implements CrawlStorage {
       wafBlocked: (row.waf_blocked as number | null) === 1 ? true : undefined,
       rateLimited: (row.rate_limited as number | null) === 1 ? true : undefined,
       wafProvider: (row.waf_provider as string | null) ?? undefined,
+      unverifiedReason: parseUnverifiedReason(row.unverified_reason),
     };
   }
 
@@ -3045,8 +3359,9 @@ export class SQLiteStorage implements CrawlStorage {
         const stmt = db.prepare(`
           INSERT OR REPLACE INTO resource_sizes (
             crawl_id, type, url, status, error, content_type, size_bytes, source_pages,
-            content_encoding, transfer_bytes, cache_control, etag, last_modified, vary, cache_reason
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            content_encoding, transfer_bytes, cache_control, etag, last_modified, vary, cache_reason,
+            natural_width, natural_height, animated
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
         const transaction = db.transaction(() => {
           for (const record of records) {
@@ -3065,7 +3380,10 @@ export class SQLiteStorage implements CrawlStorage {
               record.etag ?? null,
               record.lastModified ?? null,
               record.vary ?? null,
-              record.cacheReason ?? null
+              record.cacheReason ?? null,
+              record.naturalWidth ?? null,
+              record.naturalHeight ?? null,
+              record.animated == null ? null : record.animated ? 1 : 0
             );
           }
         });
@@ -3213,8 +3531,12 @@ export class SQLiteStorage implements CrawlStorage {
               check.name,
               check.status,
               check.message,
-              check.value !== undefined ? String(check.value) : null,
-              check.expected !== undefined ? String(check.expected) : null,
+              // `!= null`, not `!== undefined`: `String(null)` is the STRING
+              // "null", and a check whose value is genuinely null then reads
+              // back as a literal "null" in the report (repo#2343). The report
+              // is the only reader, and it renders a missing value as absent.
+              check.value != null ? String(check.value) : null,
+              check.expected != null ? String(check.expected) : null,
               check.items ? JSON.stringify(check.items) : null,
               check.details ? JSON.stringify(check.details) : null,
               check.pages ? JSON.stringify(check.pages) : null,
@@ -3405,6 +3727,8 @@ export class SQLiteStorage implements CrawlStorage {
         target: string;
         dangling: boolean;
         occurrences: number;
+        pages: readonly string[];
+        morePages: number;
       }>;
       occurrences: ReadonlyArray<{ key: string; normalizedUrl: string }>;
     }
@@ -3425,8 +3749,8 @@ export class SQLiteStorage implements CrawlStorage {
         `);
         const insertEdge = db.prepare(`
           INSERT OR REPLACE INTO entity_edges (
-            crawl_id, source, predicate, target, dangling, occurrences
-          ) VALUES (?, ?, ?, ?, ?, ?)
+            crawl_id, source, predicate, target, dangling, occurrences, pages, more_pages
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `);
         const insertOccurrence = db.prepare(`
           INSERT OR REPLACE INTO entity_occurrences (crawl_id, key, normalized_url)
@@ -3460,7 +3784,9 @@ export class SQLiteStorage implements CrawlStorage {
               edge.predicate,
               edge.target,
               edge.dangling ? 1 : 0,
-              edge.occurrences
+              edge.occurrences,
+              JSON.stringify(edge.pages),
+              edge.morePages
             );
           }
           for (const row of map.occurrences) {
@@ -3501,6 +3827,9 @@ export class SQLiteStorage implements CrawlStorage {
         target: string;
         dangling: boolean;
         occurrences: number;
+        /** Null when the row predates migration 31 and the pages were not recorded. */
+        pages: string[] | null;
+        morePages: number;
       }>;
       occurrences: Array<{ key: string; normalizedUrl: string }>;
     },
@@ -3530,7 +3859,7 @@ export class SQLiteStorage implements CrawlStorage {
         }>;
         const edgeRows = db
           .prepare(
-            `SELECT source, predicate, target, dangling, occurrences
+            `SELECT source, predicate, target, dangling, occurrences, pages, more_pages
              FROM entity_edges WHERE crawl_id = ? ORDER BY source, target, predicate`
           )
           .all(crawlId) as Array<{
@@ -3539,6 +3868,8 @@ export class SQLiteStorage implements CrawlStorage {
           target: string;
           dangling: number;
           occurrences: number;
+          pages: string | null;
+          more_pages: number | null;
         }>;
         const occurrenceRows = db
           .prepare(
@@ -3568,6 +3899,8 @@ export class SQLiteStorage implements CrawlStorage {
             target: row.target,
             dangling: row.dangling === 1,
             occurrences: row.occurrences,
+            pages: row.pages === null ? null : (JSON.parse(row.pages) as string[]),
+            morePages: row.more_pages ?? 0,
           })),
           occurrences: occurrenceRows.map((row) => ({
             key: row.key,
@@ -3619,13 +3952,21 @@ export class SQLiteStorage implements CrawlStorage {
     });
   }
 
+  /**
+   * Insert a batch of rule results in one transaction. `replace` first deletes
+   * the crawl's existing rule results in the same transaction, so re-running
+   * the rules over a stored crawl (`squirrel analyze`, #844) leaves exactly one
+   * set, and a failed write leaves the old set in place.
+   */
   saveRuleResultsBatch(
     crawlId: string,
-    pageResults: Map<string, { ruleId: string; checks: CheckResult[] }[]>
+    pageResults: Map<string, { ruleId: string; checks: CheckResult[] }[]>,
+    options: { replace?: boolean } = {}
   ): Effect.Effect<void, StorageError, never> {
     return Effect.try({
       try: () => {
         const db = this.getDb();
+        const clear = db.prepare("DELETE FROM rule_results WHERE crawl_id = ?");
         const stmt = db.prepare(`
           INSERT INTO rule_results (
             crawl_id, page_url, rule_id, check_name, status, message,
@@ -3638,6 +3979,7 @@ export class SQLiteStorage implements CrawlStorage {
 
         const timestamp = Date.now();
         const transaction = db.transaction(() => {
+          if (options.replace) clear.run(crawlId);
           for (const [pageUrl, results] of pageResults) {
             for (const { ruleId, checks } of results) {
               for (const check of checks) {
@@ -3648,8 +3990,9 @@ export class SQLiteStorage implements CrawlStorage {
                   check.name,
                   check.status,
                   check.message,
-                  check.value !== undefined ? String(check.value) : null,
-                  check.expected !== undefined ? String(check.expected) : null,
+                  // See the single-row writer above (repo#2343).
+                  check.value != null ? String(check.value) : null,
+                  check.expected != null ? String(check.expected) : null,
                   check.items ? JSON.stringify(check.items) : null,
                   check.details ? JSON.stringify(check.details) : null,
                   check.pages ? JSON.stringify(check.pages) : null,
@@ -4916,8 +5259,8 @@ export class SQLiteStorage implements CrawlStorage {
       meta_noindex, indexable_reasons, rich_result_types,
       nap_name, nap_phones, nap_phone_formats, nap_address, nap_address_format,
       nap_tel_link, nap_mailto_link,
-      favicon_href, theme_color, og_image
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      favicon_href, theme_color, og_image, report_scalars, hreflang_alternates
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `;
 
   private pageFeatureParams(
@@ -4957,6 +5300,10 @@ export class SQLiteStorage implements CrawlStorage {
       row.faviconHref,
       row.themeColor,
       row.ogImage,
+      row.reportScalars ? JSON.stringify(row.reportScalars) : null,
+      // Optional-chained: a rule-cache payload stored before #489 replays a
+      // features object without the field, and stores as "no alternates".
+      row.hreflangAlternates?.length ? JSON.stringify(row.hreflangAlternates) : null,
     ];
   }
 
@@ -5318,6 +5665,12 @@ export class SQLiteStorage implements CrawlStorage {
       faviconHref: (row.favicon_href as string | null) ?? null,
       themeColor: (row.theme_color as string | null) ?? null,
       ogImage: (row.og_image as string | null) ?? null,
+      reportScalars: row.report_scalars
+        ? this.safeJsonParse(row.report_scalars as string, null as PageReportScalars | null)
+        : null,
+      hreflangAlternates: row.hreflang_alternates
+        ? this.safeJsonParse(row.hreflang_alternates as string, null as HreflangAlternate[] | null)
+        : null,
     };
   }
 }

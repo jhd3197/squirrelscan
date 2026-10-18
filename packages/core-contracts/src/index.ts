@@ -1,5 +1,6 @@
 // Re-export all storage types (CrawlStorage, PageRecord, etc.)
 export * from "./storage";
+export * from "./refused-fetch";
 
 // Cache-stats aggregation helper (#108).
 export * from "./cache-stats";
@@ -36,6 +37,9 @@ export * from "./failure-reason";
 
 // #2061: the structured entity map — site-wide JSON-LD graph of one audit.
 export * from "./entity-map";
+
+// pub#837: per-source link detail on check items and how every surface phrases it.
+export * from "./item-sources";
 // #2095: the entity MCP tool contract. Types only here, because `./entity-mcp`
 // re-exports two entity-map schemas that `export *` above already provides and
 // a star would collide. The CONSTANTS — names, descriptions, field specs,
@@ -63,21 +67,57 @@ import type {
   CacheHitReason,
   CacheStats,
   CheckProvenance,
+  CrawlStats,
+  HreflangAlternate,
   RslLicenseDoc,
   SecurityHeaders,
   WellKnownProbe,
 } from "./storage";
 import type { SiteMetadata } from "./site-metadata";
-import type { ResolutionSignal } from "./resolution";
+import type { CompactResolutionSignal, ResolutionSignal } from "./resolution";
 import type { AuditFailureReasonCode } from "./failure-reason";
+import type { RefusedFetch } from "./refused-fetch";
 import type { EntityMap } from "./entity-map";
+import type { AuditLevel, ResolvedAuditSettings } from "./audit-levels";
+import type { ReportCapTier } from "./limits";
 
 export interface CheckItem {
   id: string;
   label?: string;
   snippet?: string;
   sourcePages?: string[];
+  /**
+   * Pages the item was found on, when a published report keeps fewer of them
+   * in `sourcePages` (repo#2656). Absent when `sourcePages` lists them all. A
+   * floor when the item came out of an earlier fold, which keeps at most
+   * `PUBLISH_LIMITS.maxSourcePagesPerItem` source pages and records no total.
+   */
+  pageCount?: number;
+  /**
+   * How the item sits on each page in `sourcePages` (pub#837): link rules say how many of the
+   * page's links point at the item and in which sections. One entry per page. A page
+   * `sourcePages` lists without an entry has nothing more to say, and an entry for a page it no
+   * longer lists (a publish cap clipped it) is dropped by {@link alignItemSources}.
+   */
+  sources?: CheckItemSource[];
+  /**
+   * How many pages the item sits on, by the part of the page it sits in there (pub#846):
+   * `{ footer: 49, content: 2 }`. A page counts once in each section the item has on it, and
+   * pages with no known section are not counted. Unlike `sourcePages` it counts every page, so a
+   * report can say "in the site footer, on 49 of 53 pages" from a capped list. A page-scope rule
+   * sets 1 per section on its own page; the report and the fold add them up across pages.
+   */
+  regions?: LinkSectionCounts;
   meta?: Record<string, unknown>;
+}
+
+/** One source page of a {@link CheckItem}, and how the item sits on it (pub#837). */
+export interface CheckItemSource {
+  page: string;
+  /** Links on the page that point at the item; absent when the producer did not count them. */
+  links?: number;
+  /** Where on the page the item sits; absent when no part of it had a known section. */
+  sections?: LinkSectionCounts;
 }
 
 export type CheckStatus = "pass" | "warn" | "fail" | "info" | "skipped";
@@ -306,6 +346,81 @@ export interface CheckResult {
   lastSeenAt?: number;
 }
 
+/**
+ * `skipReason` of a check the rules runner skipped because the audited host is
+ * a local or private-network address (pub#629) and the rule declares
+ * `skipOnPrivateTarget`: the transport and delivery rules (HTTPS, HSTS,
+ * caching, compression, HTTP/2) that judge a production edge a dev server is
+ * not. A "does not apply" verdict, not an evaluation gap, so it is never
+ * scored. Also the skip's `details.foldKey`, so a fold keeps it apart from the
+ * rule's other skips.
+ */
+export const PRIVATE_TARGET_SKIP_REASON = "private-target";
+
+/**
+ * `skipReason` of `links/broken-external-links` (and `links/dead-links`) when
+ * external link checking did not run for the audit (repo#2729): `--offline`,
+ * `external_links.enabled = false`, or a website or run that switched it off.
+ * An evaluation gap, not a pass: the external links on the pages were never
+ * requested, so "no broken external links" would be a claim nothing tested.
+ */
+export const EXTERNAL_LINKS_NOT_CHECKED_SKIP_REASON = "external-links-not-checked";
+
+/**
+ * `skipReason` of `links/broken-links` when the crawl did not follow links
+ * (the Quick level, or a sitemap-scoped crawl) and some internal link targets
+ * were never fetched (repo#2729). Their status is unknown, so the rule cannot
+ * say they are not broken. An evaluation gap, not a pass.
+ */
+export const LINK_TARGETS_NOT_FETCHED_SKIP_REASON = "link-targets-not-fetched";
+
+/**
+ * `details` keys `links/broken-links` sets on every row it emits (pub#794): how
+ * many distinct internal link targets the pages link, how many nothing fetched,
+ * how many the internal link check answered, and why the unfetched ones were
+ * left out. They describe what the audit covered, not any one broken link.
+ */
+export const LINK_COVERAGE_DETAIL_KEYS = [
+  "linkTargets",
+  "unfetchedTargets",
+  "probedTargets",
+  "notFetched",
+] as const;
+
+/**
+ * `error` the internal link check records on a target whose 4xx/5xx it set
+ * aside because the site also answers status-only (HEAD) requests with errors
+ * on a page it serves (repo#2729). `links/broken-links` counts such a target
+ * as not trusted rather than unanswered (pub#726).
+ */
+export const LINK_PROBE_HEAD_UNRELIABLE_ERROR = "head unreliable";
+
+/**
+ * `skipReason` of `links/broken-external-links` for the external links an audit
+ * found but did not check because they were over its per-audit limit
+ * (`externalLinkCheckCap`, repo#2729). The most-linked ones are checked first.
+ */
+export const EXTERNAL_LINKS_OVER_CAP_SKIP_REASON = "external-links-over-cap";
+
+/**
+ * `skipReason` of `links/broken-external-links` for the external links an audit
+ * selected to check but did not get answers for before the check's time budget
+ * ran out (repo#2613). Set by a caller that gives the check a budget (the cloud).
+ */
+export const EXTERNAL_LINKS_OUT_OF_TIME_SKIP_REASON = "external-links-out-of-time";
+
+/**
+ * Skip reasons that mean "this check did not run for the audit", which every
+ * report renders as a visible "Not checked" line instead of leaving the rule
+ * looking clean (repo#2729), and which never resolve an open finding.
+ */
+export const NOT_CHECKED_SKIP_REASONS: ReadonlySet<string> = new Set([
+  EXTERNAL_LINKS_NOT_CHECKED_SKIP_REASON,
+  LINK_TARGETS_NOT_FETCHED_SKIP_REASON,
+  EXTERNAL_LINKS_OVER_CAP_SKIP_REASON,
+  EXTERNAL_LINKS_OUT_OF_TIME_SKIP_REASON,
+]);
+
 export type RuleScope = "page" | "site";
 export type RuleSeverity = "error" | "warning" | "info";
 
@@ -386,10 +501,11 @@ export type RuleCategory =
   | "ax"
   | "blocking"
   | "gaps"
+  | "reliability"
   | "other";
 
 /**
- * Top-level rule groups (#626): a coarse layer above the 23 categories. Every
+ * Top-level rule groups (#626): a coarse layer above the 24 categories. Every
  * category maps to exactly one group. Kept in sync with the `group` field on
  * CATEGORIES in packages/rules/src/categories.ts (canonical) and its dep-free
  * mirror packages/report/src/categories.ts.
@@ -505,6 +621,14 @@ export interface AuditReport {
     pages: number;
     /** Host(s) that throttled the crawl. */
     hosts: string[];
+    /**
+     * URLs the crawl discovered but never fetched: the ones it gave up on
+     * because the host kept refusing, plus the ones still queued when it
+     * stopped. Disjoint from the pages the report grades, so `coverage` can add
+     * it to `auditedPages` to size the known site. Optional: reports built
+     * before it omit it.
+     */
+    unfetched?: number;
   };
   /**
    * Machine-readable class of the failure behind `statusReason` (#1822), so the
@@ -514,6 +638,13 @@ export interface AuditReport {
    * `classifyAuditFailureReasonText` recovers the class from the text.
    */
   statusReasonCode?: AuditFailureReasonCode;
+  /**
+   * Root fetches (robots.txt, sitemaps, llms.txt, the Markdown probe) the site
+   * refused with a 401/403/429 or a bot-challenge 503. A refusal is a coverage
+   * failure, not evidence the resource is absent, so the rules report these as
+   * not checked and the renderers list them. Absent when nothing was refused.
+   */
+  refusedFetches?: RefusedFetch[];
   healthScore?: HealthScore;
   ruleResults: Record<string, ReportRuleResult>;
   /**
@@ -523,6 +654,14 @@ export interface AuditReport {
    * the credited cloud tech-detect ran (logged-in users); absent otherwise.
    */
   technologies?: ReportTechnologies;
+  /**
+   * Page structure (#2307): where the audited pages' links sit (header, footer, navigation,
+   * sidebar, content, ...) and what type the page classifier says each page is. Like
+   * `technologies`, REPORT-ONLY: it NEVER contributes to `healthScore`. Absent when no audited
+   * page carries a link section or a classification, which is every crawl stored before the
+   * page classifier existed.
+   */
+  structure?: ReportStructure;
   /**
    * Resolved site-metadata "profile" (site type, business category, country,
    * audience, identity, contacts, socials, domain age). Like `technologies`,
@@ -539,9 +678,10 @@ export interface AuditReport {
    * Built on EVERY audit (#2091) — there is no flag. Absent only on a report
    * produced before the feature, or when the build itself failed.
    *
-   * It rides the publish body through `slimForPublish`'s spread, capped by
-   * `ENTITY_MAP_PUBLISH_LIMITS` so a pathological site cannot push the body
-   * toward the payload gate. The project store keeps the uncapped graph.
+   * The publish capper (`capReportForPublish`, repo#2667) projects it to
+   * `ENTITY_MAP_PUBLISH_LIMITS`, or drops it to fit the body, so a pathological
+   * site cannot push the body over its budget. The project store keeps the
+   * uncapped graph.
    *
    * NOTE for the cloud side: the API's publish schema must accept this field.
    * A strict schema rejects the whole body on an unknown key, and every publish
@@ -602,7 +742,7 @@ export interface AuditReport {
    *
    * An agent reading a report has to be able to tell a replay from a fresh
    * evaluation — the findings are identical by construction, so nothing else in
-   * the report distinguishes them (#1981). LOCAL ONLY: `slimForPublish` strips it,
+   * the report distinguishes them (#1981). LOCAL ONLY: the publish capper strips it,
    * because it describes how this machine produced the report and not the site.
    * REPORT-ONLY — never feeds `healthScore`.
    */
@@ -638,8 +778,42 @@ export interface AuditReport {
    * were clipped out of every check's published sample. Absent for older
    * CLIs/containers and local runs → the merge behaves exactly as pre-#1185.
    * Transport-only: NEVER rendered, NEVER feeds `healthScore` directly.
+   *
+   * Sent by CLIs and containers released before #2658, which replaced it with
+   * {@link AuditReport.resolutionSignalCompact}; the API accepts either.
    */
   resolutionSignal?: ResolutionSignal;
+  /**
+   * (#2658) The same signal in a fixed byte budget: crawled URLs deflated,
+   * failing pages as indexes into them (see CompactResolutionSignal). What the
+   * publish producers send now; transport-only like `resolutionSignal`.
+   */
+  resolutionSignalCompact?: CompactResolutionSignal;
+  /**
+   * This run's evaluated-check counts per rule and check name (repo#2656),
+   * counted BEFORE the publish capper sampled `ruleResults` and dropped the
+   * per-page pass rows. Present on capped published reports only. See
+   * {@link CheckTallies}. Read by the server rescore in place of the dropped
+   * rows (repo#2657), and by the "fixed on all pages checked this run" note for
+   * the passes the rows no longer list. Never rendered as data.
+   */
+  checkTallies?: CheckTallies;
+  /**
+   * The distinct pages a rule fails or warns on this run (replays left out, as
+   * in `checkTallies`), counted BEFORE the publish capper sampled `ruleResults`
+   * (repo#2935), for each rule whose issue classes reach pages its largest
+   * class does not. A reader adding up a rule's sampled classes can only take
+   * the largest as a floor; this is the exact union. Present on capped
+   * published reports only, and only for the rules that need it.
+   */
+  rulePageCounts?: Record<string, number>;
+  /**
+   * Set when the report is a capped published summary (repo#2656): every issue
+   * class carries a sample plus its true counts, and the full per-page detail
+   * lives elsewhere. Absent on local reports and on reports published before
+   * the cap.
+   */
+  detail?: PublishedReportDetail;
   /**
    * Aggregate crawl-cache stats for this audit — hit rate, bytes saved, and a
    * hits-by-reason breakdown across pages AND sub-resources (#108). Derived from
@@ -702,12 +876,105 @@ export interface AuditReport {
    */
   coverageMode?: CoverageMode;
   /**
+   * The audit level this run used, with the settings it resolved to: the level
+   * name (or `custom`), the level it started from, which settings were changed
+   * from it, and every setting's value. A snapshot, so a report still says what
+   * ran after the level's definition changes. Absent on reports from writers
+   * that do not stamp it yet, and on reports written before audit levels.
+   * REPORT-ONLY.
+   */
+  auditLevel?: ResolvedAuditSettings;
+  /**
    * Render-block recovery summary (#512/#490): pages whose browser/cloud render
    * was blocked (403/WAF) and were recovered via a non-browser fallback fetch.
    * Surfaced as an informational note. REPORT-ONLY — never feeds `healthScore`.
    * Absent when nothing was recovered.
    */
   fetchFallbacks?: { recovered: number };
+}
+
+/**
+ * One (rule, check name)'s evaluated checks in THIS run, counted before the
+ * publish capper sampled them (repo#2656). The capped report keeps a 10-page
+ * sample per issue class and no per-page pass rows, so a reader that needs the
+ * real numbers (the server rescore, repo#2657) reads them here instead of
+ * counting rows.
+ *
+ * The fields are the scorer's own (`IssueTally` in audit-engine scoring.ts),
+ * computed by the same function over the unfolded checks, so summing a rule's
+ * check names gives exactly the fresh tally the server's union rescore folds for
+ * it from an uncapped report:
+ *  - `passed` / `warnings` / `failed`: check counts. Warns of a severity-"info"
+ *    rule are advisory and already excluded, as the scorer excludes them.
+ *  - `warnUnits` / `failUnits`: the item-aware density units (#683).
+ *  - `skipped`: checks that did not evaluate (not scored; for display).
+ *
+ * Only FRESH checks are counted: a carried or unrendered check is a replay of
+ * an earlier audit, which the server re-derives from its own store. Checks on a
+ * page that returned 404/410 this run are left out too, as the server's rescore
+ * leaves them out (repo#2657). Zero fields are omitted, so a clean class is
+ * `{ "passed": 49 }`. Bounded by rules × check names, never by pages.
+ */
+export interface CheckTally {
+  passed?: number;
+  warnings?: number;
+  failed?: number;
+  warnUnits?: number;
+  failUnits?: number;
+  skipped?: number;
+}
+
+/** `ruleId` → `checkName` → {@link CheckTally}. */
+export type CheckTallies = Record<string, Record<string, CheckTally>>;
+
+/**
+ * The stamp on a capped published report (repo#2656). It tells a viewer that
+ * every list in `ruleResults` is a sample, what the sample kept, and where the
+ * rest lives, so it can say "N more" and point there instead of presenting the
+ * sample as the whole.
+ */
+export interface PublishedReportDetail {
+  capped: true;
+  /**
+   * How far the byte fitter had to go: 0 = every class kept the full sample;
+   * 1 = filled breadth first, some classes kept a smaller sample or counts only
+   * (`classesReduced`); 2 = the same with the display sections at their minimum
+   * and the entity map dropped; 3 = counts rows admitted by byte budget, some
+   * classes left out (`classesDropped`).
+   */
+  tier: number;
+  /** The full sample: the most any issue class kept. */
+  caps: ReportCapTier & { classesPerRule: number };
+  /**
+   * Issue classes kept at less than the full sample (a smaller sample, or
+   * counts only). Their true totals are in their `details` either way. Absent
+   * when every kept class has the full sample.
+   */
+  classesReduced?: number;
+  /**
+   * UTF-8 bytes the whole body would have been with every class at the full
+   * sample: the "before" of a reduced body, whose own size is the "after".
+   * Set only when `tier` is past 0 (repo#2669 reports the pair).
+   */
+  fullSampleBytes?: number;
+  /**
+   * Where the full per-page detail is: `local` = the project database on the
+   * machine that ran the audit (`squirrel report --format json`); `findings` =
+   * the cloud findings store. Absent when the producer did not say.
+   */
+  fullDetail?: "local" | "findings";
+  /** Set when the fitter dropped the entity map to fit the budget. */
+  entityMapDropped?: true;
+  /**
+   * Set when the report had an entity map that could not be projected to its
+   * publish bound, so it was left out. Never set together with a map.
+   */
+  entityMapFailed?: true;
+  /**
+   * Issue classes left out entirely by the last-resort byte admission. Their
+   * counts survive in `checkTallies`. Absent when every class fit.
+   */
+  classesDropped?: number;
 }
 
 /** Where an audit executed + how much of the site it crawled (#1180). */
@@ -727,6 +994,15 @@ export interface ScanScope {
   pagesCrawled: number;
   /** The page cap was the binding constraint — the site likely has more pages. */
   capped: boolean;
+  /**
+   * Why the crawl ended before it ran out of pages, when the page cap was not
+   * the reason. `"time"` = the crawl time budget fired with pages already
+   * collected, so the report is an audit of the pages reached in time, not of
+   * the whole site. Absent on every run that finished or hit the page cap, so a
+   * caller detects a time stop by its presence. REPORT-ONLY — never feeds
+   * `healthScore`.
+   */
+  stopReason?: "time";
 }
 
 /** Locked-rules audience for a report — anonymous/local vs signed-in tier (#368). */
@@ -912,131 +1188,242 @@ export interface ReportTechnologies {
   scannedAt?: string;
 }
 
+/** One link section's footprint across the audited pages. */
+export interface ReportStructureSection {
+  section: Exclude<LinkSection, "unknown">;
+  /** Audited pages with at least one link in this section. */
+  pages: number;
+  /** Links in this section, summed over those pages (every anchor counts, repeats included). */
+  links: number;
+}
+
+/** How many audited pages the classifier gave each page type. */
+export interface ReportStructurePageType {
+  label: string;
+  pages: number;
+}
+
+/**
+ * The report-level page structure block (#2307). Computed over the audited pages that carry
+ * link-section or classification data.
+ */
+export interface ReportStructure {
+  /** Audited pages that carry section or classification data. */
+  pages: number;
+  /** Sections other than `unknown`, most links first; sections with no links are left out. */
+  sections: ReportStructureSection[];
+  /** Links whose section is `unknown`. */
+  unknownLinks: number;
+  /** Every link counted above, `unknown` included. */
+  totalLinks: number;
+  /**
+   * Internal links in the header, footer, navigation and sidebar against internal links in the
+   * page content. `share` is chrome over chrome plus content, 0 to 1, rounded to three
+   * decimals; null when the audited pages have no internal link in either.
+   */
+  chrome: { links: number; contentLinks: number; share: number | null };
+  pageTypes: {
+    /**
+     * Labels the report stands behind: a model answer, or a markup-rules answer at 0.8
+     * confidence or more. Most pages first.
+     */
+    counts: ReportStructurePageType[];
+    /** Pages with no standing label: no answer, `unknown`, or a weak rules answer. */
+    notClassified: number;
+    /** Pages whose counted label came from the model. */
+    byModel: number;
+    /** Pages where part of the classification fell back to the markup rules. */
+    degraded: number;
+  };
+}
+
 // RedirectHop and RedirectChain are now in ./storage.ts (re-exported above)
 
+/**
+ * Every event a crawl emits. This is the one declaration (#251): the crawler
+ * package re-exports these types rather than restating them, so an event added
+ * here is visible to the crawler's emit sites and to every consumer at once.
+ */
 export type CrawlerEvent =
-  | { type: "started"; crawlId: string; baseUrl: string; timestamp: number }
-  | { type: "page:fetching"; url: string; depth: number; timestamp: number }
-  | {
-      type: "page:fetched";
-      url: string;
-      status: number;
-      loadTimeMs: number;
-      ttfbMs?: number;
-      sizeBytes: number;
-      depth: number;
-      fetcherId?: string;
-      rendered?: boolean;
-      timestamp: number;
-      /** Browser render cost only, set only for browser-queue-rendered pages (#826). */
-      renderTimeMs?: number;
-      /** Queue delivery lag + browser-pool acquisition + concurrency-slot wait, set only for browser-queue-rendered pages (#826). */
-      queueWaitMs?: number;
-    }
-  | {
-      type: "page:failed";
-      url: string;
-      error: string;
-      retryable: boolean;
-      depth: number;
-      timestamp: number;
-    }
-  | {
-      type: "page:skipped";
-      url: string;
-      reason: string;
-      depth: number;
-      timestamp: number;
-    }
-  | {
-      type: "page:unchanged";
-      url: string;
-      reason:
-        | "304"
-        | "hash_match"
-        | "etag_match"
-        | "max-age"
-        | "s-maxage"
-        | "expires"
-        | "immutable"
-        | "stale-while-revalidate";
-      depth: number;
-      timestamp: number;
-    }
-  | {
-      type: "url:discovered";
-      url: string;
-      fromUrl: string;
-      depth: number;
-      timestamp: number;
-    }
-  | {
-      type: "url:enqueued";
-      url: string;
-      priority: number;
-      source: "seed" | "sitemap" | "discovered" | "carried";
-      depth: number;
-      timestamp: number;
-    }
-  | {
-      type: "progress";
-      fetched: number;
-      pending: number;
-      failed: number;
-      skipped: number;
-      unchanged: number;
-      total: number;
-      bytesTotal: number;
-      avgLoadTimeMs: number;
-      timestamp: number;
-    }
-  | { type: "paused"; reason: string; timestamp: number }
-  | { type: "resumed"; timestamp: number }
-  | {
-      /**
-       * A host is throttling the crawl and it is waiting the host out (#1829).
-       * Distinct from `paused`, which means the user paused it.
-       */
-      type: "rate-limited";
-      host: string;
-      url: string;
-      backoffMs: number;
-      retryAfterMs?: number;
-      attempt: number;
-      exhausted: boolean;
-      timestamp: number;
-    }
-  | {
-      type: "completed";
-      stats: {
-        pagesFetched: number;
-        pagesFailed: number;
-        pagesSkipped: number;
-        pagesUnchanged: number;
-        bytesTotal: number;
-        avgLoadTimeMs: number;
-      };
-      durationMs: number;
-      timestamp: number;
-    }
-  | {
-      /**
-       * The crawl found something a human should see and carried on anyway.
-       * Non-fatal by construction — `error` is the other case — so a consumer
-       * that ignores this type loses information but never correctness.
-       *
-       * Added for squirrelscan/repo#1899, where a crawl audited the wrong half
-       * of an apex/www pair and said nothing: `logger.warn` reaches a terminal
-       * or a container's stdout, neither of which is where a hosted run is
-       * investigated weeks later. This rides the event stream the run already
-       * records.
-       */
-      type: "warning";
-      code: CrawlWarningCode;
-      message: string;
-      timestamp: number;
-    }
-  | { type: "error"; error: string; fatal: boolean; timestamp: number };
+  | CrawlerStartedEvent
+  | CrawlerPageFetchingEvent
+  | CrawlerPageFetchedEvent
+  | CrawlerPageFailedEvent
+  | CrawlerPageSkippedEvent
+  | CrawlerPageUnchangedEvent
+  | CrawlerUrlDiscoveredEvent
+  | CrawlerUrlEnqueuedEvent
+  | CrawlerProgressEvent
+  | CrawlerPausedEvent
+  | CrawlerResumedEvent
+  | CrawlerRateLimitedEvent
+  | CrawlerCompletedEvent
+  | CrawlerWarningEvent
+  | CrawlerErrorEvent;
+
+export interface CrawlerStartedEvent {
+  type: "started";
+  crawlId: string;
+  baseUrl: string;
+  timestamp: number;
+}
+
+export interface CrawlerPageFetchingEvent {
+  type: "page:fetching";
+  url: string;
+  depth: number;
+  timestamp: number;
+}
+
+export interface CrawlerPageFetchedEvent {
+  type: "page:fetched";
+  url: string;
+  status: number;
+  loadTimeMs: number;
+  ttfbMs?: number;
+  sizeBytes: number;
+  depth: number;
+  fetcherId?: string;
+  timestamp: number;
+  /** Browser render cost only, set only for browser-queue-rendered pages (#826). */
+  renderTimeMs?: number;
+  /** Queue delivery lag + browser-pool acquisition + concurrency-slot wait, set only for browser-queue-rendered pages (#826). */
+  queueWaitMs?: number;
+}
+
+export interface CrawlerPageFailedEvent {
+  type: "page:failed";
+  url: string;
+  error: string;
+  retryable: boolean;
+  depth: number;
+  timestamp: number;
+}
+
+export interface CrawlerPageSkippedEvent {
+  type: "page:skipped";
+  url: string;
+  reason: string;
+  depth: number;
+  timestamp: number;
+}
+
+export interface CrawlerPageUnchangedEvent {
+  type: "page:unchanged";
+  url: string;
+  reason:
+    | "304"
+    | "hash_match"
+    | "etag_match"
+    // Served from cache without any request (origin freshness honored)
+    | "max-age"
+    | "s-maxage"
+    | "expires"
+    | "immutable"
+    // Served stale from cache while a background revalidation refreshes it
+    | "stale-while-revalidate";
+  depth: number;
+  timestamp: number;
+}
+
+export interface CrawlerUrlDiscoveredEvent {
+  type: "url:discovered";
+  url: string;
+  fromUrl: string;
+  depth: number;
+  timestamp: number;
+}
+
+export interface CrawlerUrlEnqueuedEvent {
+  type: "url:enqueued";
+  url: string;
+  priority: number;
+  source: "seed" | "sitemap" | "discovered" | "carried";
+  depth: number;
+  timestamp: number;
+}
+
+export interface CrawlerProgressEvent {
+  type: "progress";
+  fetched: number;
+  pending: number;
+  failed: number;
+  skipped: number;
+  unchanged: number;
+  total: number;
+  bytesTotal: number;
+  avgLoadTimeMs: number;
+  timestamp: number;
+}
+
+export interface CrawlerPausedEvent {
+  type: "paused";
+  reason: string;
+  timestamp: number;
+}
+
+export interface CrawlerResumedEvent {
+  type: "resumed";
+  timestamp: number;
+}
+
+/**
+ * A host is throttling the crawl and it is waiting the host out (#1829).
+ *
+ * Distinct from `paused`, which means the USER paused the crawl. Emitted once
+ * per backoff wait so the CLI progress line and the cloud phase timeline can
+ * say why a crawl went quiet instead of looking wedged. `backoffMs` of 0 with
+ * `exhausted: true` means the host spent its whole budget and its remaining
+ * URLs are being recorded as rate-limited without further requests.
+ */
+export interface CrawlerRateLimitedEvent {
+  type: "rate-limited";
+  /** Host key being backed off from. */
+  host: string;
+  /** URL whose response triggered this backoff. */
+  url: string;
+  /** How long the crawl will wait before the next request to this host. */
+  backoffMs: number;
+  /** Minimum wait the origin asked for, when it sent `Retry-After`. */
+  retryAfterMs?: number;
+  /** Rate-limit responses seen for this URL so far (1-based). */
+  attempt: number;
+  /** The host gave up its backoff budget; remaining URLs are not fetched. */
+  exhausted: boolean;
+  timestamp: number;
+}
+
+export interface CrawlerCompletedEvent {
+  type: "completed";
+  stats: CrawlStats;
+  durationMs: number;
+  timestamp: number;
+}
+
+/**
+ * The crawl found something a human should see and carried on anyway.
+ * Non-fatal by construction — `error` is the other case — so a consumer
+ * that ignores this type loses information but never correctness.
+ *
+ * Added for squirrelscan/repo#1899, where a crawl audited the wrong half
+ * of an apex/www pair and said nothing: `logger.warn` reaches a terminal
+ * or a container's stdout, neither of which is where a hosted run is
+ * investigated weeks later. This rides the event stream the run already
+ * records.
+ */
+export interface CrawlerWarningEvent {
+  type: "warning";
+  code: CrawlWarningCode;
+  message: string;
+  timestamp: number;
+}
+
+export interface CrawlerErrorEvent {
+  type: "error";
+  error: string;
+  fatal: boolean;
+  timestamp: number;
+}
 
 /**
  * Stable keys for {@link CrawlerEvent} warnings, so a consumer can branch or
@@ -1062,7 +1449,13 @@ export type CrawlWarningCode =
    * (squirrelscan/repo#1699). Their records carry the not-attempted marker,
    * never a confirmed absence.
    */
-  | "preamble-budget-exhausted";
+  | "preamble-budget-exhausted"
+  /**
+   * An absolute-URL `include` pattern matched a URL whose host `allowedDomains`
+   * does not list, so the URL was refused. `allowedDomains` is a hard
+   * allowlist; the message names the include pattern and the host.
+   */
+  | "include-vetoed-by-allowed-domains";
 
 export interface AuditLifecycleEvent {
   type:
@@ -1411,6 +1804,57 @@ export interface SchemaData {
   raw: string | null;
 }
 
+/**
+ * Which part of a page an anchor sits in, for findings ("broken link in the footer"). Landmark tags
+ * and ARIA roles plus a markup-only comment-thread rule (parser `link-section.ts`) answer first.
+ * Where the markup says nothing, the page classifier fills in: the section purposes after
+ * `unknown` below come from its section head, and a region answer can name header, footer,
+ * navigation, sidebar or content. `comments` is never a model answer.
+ */
+export type LinkSection =
+  | "header"
+  | "footer"
+  | "navigation"
+  | "sidebar"
+  | "comments"
+  | "content"
+  | "unknown"
+  | "pagination"
+  | "breadcrumbs"
+  | "related_content"
+  | "business_info"
+  | "social_share"
+  | "account_login"
+  | "author_byline"
+  | "newsletter_signup";
+
+/** Links per section, unknown left out. Keys appear only when the count is above zero. */
+export type LinkSectionCounts = Partial<Record<Exclude<LinkSection, "unknown">, number>>;
+
+/** Where an answer came from: the page's markup (`rules`) or the page classifier's model. */
+export type ClassifierSource = "rules" | "model";
+
+/**
+ * The page classifier's page type answer. A different label space from `ParsedPage.pageType`
+ * (schema and URL based): homepage, product_detail, product_listing, article, blog_post, about,
+ * contact, docs, legal, pricing, listing_index, other, or `unknown` when nothing answered.
+ */
+export interface ClassifiedPageType {
+  label: string;
+  confidence: number;
+  source: ClassifierSource;
+}
+
+/**
+ * What the page classifier said about one page. Absent when the classifier was off or this parse
+ * was stored before it existed; readers treat absent as "not classified".
+ */
+export interface PageClassification {
+  pageType: ClassifiedPageType;
+  /** Why any part of the page fell back to the rules path, or "" when nothing did. */
+  degraded: string;
+}
+
 export interface LinkData {
   url: string;
   text: string;
@@ -1427,6 +1871,18 @@ export interface LinkData {
    * behaviour (every link contextual) instead of flagging the whole site.
    */
   isChrome?: boolean;
+  /**
+   * Part of the page the anchor sat in (#2307). Optional: crawls stored before this field existed
+   * omit it; readers treat `undefined` as unknown and say nothing about placement.
+   */
+  section?: LinkSection;
+  /**
+   * Who answered `section` when the page classifier did, "model"; absent means the markup rules
+   * did (or the section is unknown). Stored compactly: one key per link only when it matters.
+   */
+  sectionSource?: ClassifierSource;
+  /** The classifier's confidence in `section`; present only with a `model` source. */
+  sectionConfidence?: number;
 }
 
 /**
@@ -1440,6 +1896,20 @@ export interface ContactLinkData {
   value: string;
   /** The anchor's visible text — how the page actually renders the contact. */
   text: string;
+  /**
+   * Set on an email address Cloudflare's email obfuscation rewrote to a
+   * `/cdn-cgi/l/email-protection` link (pub#811). Carried as the `mailto:` it
+   * stands for, with `value` decoded from the link's payload, or empty when
+   * the payload did not decode to an address. Such links are not in
+   * {@link LinkData}: they are not pages.
+   */
+  obfuscated?: "cloudflare";
+  /** Part of the page the anchor sat in (#2307); absent on a parse stored before it. */
+  section?: LinkSection;
+  /** Who answered `section` when the page classifier did; see {@link LinkData.sectionSource}. */
+  sectionSource?: ClassifierSource;
+  /** The classifier's confidence in `section`; present only with a `model` source. */
+  sectionConfidence?: number;
 }
 
 export interface ImageData {
@@ -1453,6 +1923,12 @@ export interface HeadingData {
   level: number;
   text: string;
   order: number;
+  /**
+   * Set only when the markup hides the heading (#547): `hidden`, inline
+   * `display:none` or `visibility:hidden`, or a hidden ancestor. Stored with the
+   * parse, so a replayed parse and a fresh one agree.
+   */
+  hidden?: boolean;
 }
 
 export interface HeadingHierarchy {
@@ -1498,6 +1974,26 @@ export interface ResourceSizeData {
   vary?: string | null;
   /** Cache-hit reason if reused from a prior crawl; null on a real fetch. (#107) */
   cacheReason?: CacheHitReason | null;
+  /**
+   * Natural pixel size read from the image's first bytes by the image pool
+   * (#470). Null when unknown: not a PNG, GIF, WebP, AVIF or JPEG header the
+   * parser reads to its size (a JPEG's SOF can sit past the bytes read), or
+   * the read failed. Absent on CSS entries.
+   */
+  naturalWidth?: number | null;
+  naturalHeight?: number | null;
+  /** APNG, animated GIF/WebP or AVIF sequence; null when not settled. (#470) */
+  animated?: boolean | null;
+  /**
+   * The origin throttled us (429/430, or 503 with `Retry-After`), so `status`
+   * describes our request rate, not the file (#703). Absent or false otherwise.
+   */
+  rateLimited?: boolean;
+  /**
+   * A WAF or bot challenge answered in place of the file (#703). Absent or
+   * false otherwise.
+   */
+  wafBlocked?: boolean;
 }
 
 export interface ScriptContentData {
@@ -1519,6 +2015,10 @@ export interface ScriptContentData {
    * that as unknown, NOT as uncompressed. (#9)
    */
   contentEncoding?: string | null;
+  /** Throttled by the origin: `status` is unverified, not a broken file (#703). */
+  rateLimited?: boolean;
+  /** A WAF or bot challenge answered in place of the script (#703). */
+  wafBlocked?: boolean;
 }
 
 export interface SitemapUrl {
@@ -1558,6 +2058,13 @@ export interface SitemapDiscovery {
   totalUrls: number;
   orphanPages: string[];
   missingPages: string[];
+  /**
+   * How many orphan pages there were before `orphanPages` was cut to the
+   * report's array cap, so a rule can still state the exact count
+   * (repo#2320). Absent reads as the array's length. `missingPages` needs no
+   * twin: it lists crawled pages, which the crawl's own page cap bounds.
+   */
+  orphanPagesTotal?: number;
   failed: SitemapFetchFailure[];
   /**
    * Discovery stopped before visiting every candidate location, so an empty
@@ -1632,9 +2139,23 @@ export interface ParsedPage {
   visibleAuthor?: string | null;
   visibleDatePublished?: string | null;
   visibleDateModified?: string | null;
+  /**
+   * `<link rel="alternate" hreflang>` annotations from the page markup, hrefs
+   * resolved against the page URL, deduplicated and capped (#489). Optional so
+   * parsed records serialized before this field existed stay valid; readers
+   * must treat absent as "not extracted", which exempts nothing.
+   */
+  hreflangAlternates?: HreflangAlternate[];
+  /**
+   * The page classifier's answer for this page: page type and why it degraded, when it ran. Absent
+   * when it did not (`--no-classifier`, `classifier.enabled = false`, or a parse stored before it
+   * existed). `pageType` above is the schema and URL based label; this is the model's.
+   */
+  classification?: PageClassification;
 }
 
-export type CoverageMode = "quick" | "surface" | "full";
+/** The crawler's name for an audit level: quick, surface or full (see audit-levels.ts). */
+export type CoverageMode = AuditLevel;
 
 // Per-website cloud-render override (#318): auto = engine decides, always =
 // force browser render, never = plain HTTP fetch.
@@ -1734,9 +2255,11 @@ export interface PlanDefinition {
   maxWebsites: number;
   maxMembers: number;
   /**
-   * Max concurrent in-flight cloud render jobs per audit. Clamps the CLI's
-   * `[cloud].render_concurrency` (schema max 10) — enforced client-side; the
-   * binary fetches it from `GET /v1/credits` at crawl start.
+   * Max cloud renders in flight per audit. The hosted runner holds a cloud
+   * audit's renders to it, and an all-rendered crawl also runs exactly that
+   * wide (squirrelscan/repo#2480). It also clamps the CLI's
+   * `[cloud].render_concurrency` (schema max 10), client-side: the binary
+   * fetches it from `GET /v1/credits` at crawl start.
    */
   renderConcurrency: number;
   /**
@@ -1806,6 +2329,17 @@ export interface PlanDefinition {
    * forwards stored headers for a non-capable plan (defense in depth).
    */
   customHeaders: boolean;
+  /**
+   * Per-website broken link alerts (squirrelscan/repo#2772): after a cloud
+   * audit, an alert lists the broken links that were not in the previous
+   * audit. Only links confirmed broken count, never ones that could not be
+   * verified. A website on a plan with the flag has them on until its owner
+   * turns them off; the cloud settings route refuses to switch them on for a
+   * plan without it (403 `upgrade_required`). A feature flag only: it changes
+   * no price and no credit charge. Read off a server that predates it (absent
+   * over the wire), it is `undefined`, which reads as false.
+   */
+  brokenLinkAlerts: boolean;
   /**
    * Credits are not metered for this plan: no debit is ever rejected for
    * insufficient funds and `credit_balances` is never mutated. Every debit,

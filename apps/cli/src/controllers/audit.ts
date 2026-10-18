@@ -2,6 +2,7 @@
 
 import type { DocumentFetcher } from "@squirrelscan/fetchers";
 
+import { heapStats } from "bun:jsc";
 import { Duration, Effect, Fiber, Stream } from "effect";
 
 import type { Config } from "@/config";
@@ -17,13 +18,20 @@ export type { CrawlerEvent } from "@/crawler/core/types";
 import type { EntityMap, RenderChargeLine } from "@squirrelscan/core-contracts";
 import type { ParsedPageCache } from "@squirrelscan/parser";
 
-import { createCloudDocumentFetcher } from "@squirrelscan/audit-engine";
+import {
+  createCloudDocumentFetcher,
+  flattenChecks,
+  type FlatFinding,
+  type PageResultSink,
+} from "@squirrelscan/audit-engine";
 import { createEntityMapCollector } from "@squirrelscan/audit-engine/entity-map/collect";
+import { computeCost } from "@squirrelscan/core-contracts/credits";
 import { PLANS } from "@squirrelscan/core-contracts/plans";
 import {
   createConditionalRenderDocumentFetcher,
   createFetchDocumentFetcher,
 } from "@squirrelscan/fetchers";
+import { createProbeBudget, selectDiscoveryProbes } from "@squirrelscan/rules";
 
 import type { RetentionOutcome } from "@/audit/retention";
 import type { PreflightBalance } from "@/lib/balance";
@@ -47,7 +55,8 @@ import {
   type CloudTechDetectResult,
 } from "@/audit/cloud";
 import { gateStage1 } from "@/audit/cloud-gating";
-import { storeEntityMap } from "@/audit/entity-map";
+import { entityMapSite, storeEntityMap } from "@/audit/entity-map";
+import { guardCollector } from "@/audit/guard-collector";
 import {
   RetentionReclaimError,
   auditMayRetire,
@@ -58,7 +67,11 @@ import {
   ruleCacheEnabled,
 } from "@/audit/rule-cache-store";
 import { resolveRulesConfig } from "@/audit/rule-filter";
-import { runSmartAudits } from "@/audit/smart-audits";
+import { RULES_VERSION } from "@/audit/rules-version";
+import {
+  runSmartAudits,
+  REMOVED_STATUSES as SMART_REMOVED_STATUSES,
+} from "@/audit/smart-audits";
 import {
   resolveStreamBatchBytes,
   resolveStreamBatchPagesOverride,
@@ -85,7 +98,17 @@ import {
 import { createHybridDocumentFetcher } from "@/crawl/hybrid-fetcher";
 import { resolveSeedRedirect } from "@/crawler/frontier";
 import { createStorage, domainToProjectName } from "@/crawler/storage";
+import { retainGlobalContentStore } from "@/crawler/storage/content-store";
+import {
+  warnEvictedPages,
+  warnRefetchedPages,
+} from "@/crawler/storage/eviction-notice";
 import { getGlobalLinkCache } from "@/crawler/storage/link-cache";
+import {
+  checkAuditStores,
+  formatStoreProblems,
+} from "@/crawler/storage/store-check";
+import { isPermanentStorageError } from "@/crawler/storage/types";
 import { preflightBalanceOf } from "@/lib/balance";
 import { resolvePageLimit } from "@/lib/page-limit";
 import { reconstructReport } from "@/reports/reconstruct";
@@ -154,6 +177,10 @@ export interface RunAuditOptions extends AuditOptions {
   configPath?: string;
   documentFetcher?: DocumentFetcher;
   externalLinksEnabled?: boolean;
+  /** repo#2729: false switches the internal link probe off for this run. */
+  internalLinksEnabled?: boolean;
+  /** #2307: false switches the page classifier off for this run (markup-only link sections). */
+  classifierEnabled?: boolean;
   externalLinksConcurrency?: number;
   externalLinksTimeoutMs?: number;
   crawlerTimeoutMs?: number;
@@ -180,7 +207,8 @@ export interface RunAuditOptions extends AuditOptions {
     balance: PreflightBalance
   ) => Promise<boolean>;
   /** User accepted the cost-disclosing consent prompt under a cap → skip the
-   * post-crawl prefetch confirm. Uncapped spend (dead-links) is still gated. */
+   * post-crawl prefetch confirm, and the link-check confirm (#801: its charge
+   * is in the capped estimate). Tech/editor keep their own gates. */
   cloudConsented?: boolean;
   /**
    * Concrete fetch mode for this run, already resolved by the caller from
@@ -194,9 +222,11 @@ export interface RunAuditOptions extends AuditOptions {
    * Resolver for this run's cloud run id (#1134), threaded onto render submits so
    * the render debit is attributed to the audit in the ledger. A resolver (not a
    * value) because CLI run registration is async and may resolve after the crawl
-   * starts — renders before it lands stay untagged, the rest are attributed.
+   * starts. Pricing v11 (#2290) bills an attributed render as the page's audit
+   * charge and an untagged one as a separate standalone render, so the resolver
+   * may return a promise that waits for register to settle.
    */
-  getRunId?: () => string | undefined;
+  getRunId?: () => string | undefined | Promise<string | undefined>;
   /**
    * Render strategy when rendering is on (#294): "auto" = HTTP-first hybrid
    * (render only client-side-rendered pages), "all" = render every HTML page.
@@ -284,7 +314,7 @@ export function resolveDocumentFetcher(
       ),
     onRenderCharged,
     // #1134: attribute render debits to the run. Resolver (not value) — CLI run
-    // registration is async, so it's read at each submit once the id lands.
+    // registration is async, so it's awaited at each submit (#2290).
     ...(options.getRunId ? { runId: options.getRunId } : {}),
   });
 
@@ -336,46 +366,108 @@ export interface CloudSpendLine {
 }
 
 /**
- * Fold the per-batch render charge splits into at most two spend lines —
- * render misses (`render`) and render_cached hits (`render_cached`) —
- * preserving the ACTUAL server debit. A cache hit then surfaces as its own
- * `render_cached` line (1cr) so the savings are visible, instead of being
- * lumped under `render` at the 2cr estimate. Exported for tests. #279
+ * Fold the per-batch render charge splits into spend lines, preserving the
+ * ACTUAL server debit. Inside a registered run (#2290) every billed url comes
+ * back as an `audit_page` line: the render IS the page's audit charge. A render
+ * that belonged to no run (or an older server) keeps the standalone split:
+ * render misses (`render`) and cache hits (`render_cached`), so a hit still
+ * surfaces as its own line. Exported for tests. #279
  */
 export function foldRenderSpendLines(
   breakdown: RenderChargeLine[]
 ): CloudSpendLine[] {
-  let renderUnits = 0;
-  let renderCredits = 0;
-  let cachedUnits = 0;
-  let cachedCredits = 0;
+  const totals = {
+    audit_page: { units: 0, credits: 0 },
+    render: { units: 0, credits: 0 },
+    render_cached: { units: 0, credits: 0 },
+  };
   for (const line of breakdown) {
-    if (line.feature === "render_cached") {
-      cachedUnits += line.units;
-      cachedCredits += line.credits;
-    } else {
-      renderUnits += line.units;
-      renderCredits += line.credits;
-    }
+    const bucket =
+      line.feature === "audit_page" || line.feature === "render_cached"
+        ? totals[line.feature]
+        : totals.render;
+    bucket.units += line.units;
+    bucket.credits += line.credits;
   }
   const lines: CloudSpendLine[] = [];
-  if (renderUnits > 0) {
+  if (totals.audit_page.units > 0) {
     lines.push({
-      service: "render",
-      feature: "render",
-      units: renderUnits,
-      credits: renderCredits,
+      service: "audit-pages",
+      feature: "audit_page",
+      ...totals.audit_page,
     });
   }
-  if (cachedUnits > 0) {
+  if (totals.render.units > 0) {
+    lines.push({ service: "render", feature: "render", ...totals.render });
+  }
+  if (totals.render_cached.units > 0) {
     lines.push({
       service: "render_cached",
       feature: "render_cached",
-      units: cachedUnits,
-      credits: cachedCredits,
+      ...totals.render_cached,
     });
   }
   return lines;
+}
+
+/**
+ * Add the run's end-of-audit page settlement to its spend lines (#2290).
+ *
+ * Pricing v11 bills 2 credits for every audited page. Pages rendered inside the
+ * run were billed when their render was submitted (the `audit_page` lines the
+ * crawl and the raw-vs-rendered prefetch already carry); when the run
+ * completes the server settles the difference to `pagesAudited` either way:
+ * it charges the pages not yet billed and refunds prepaid pages that never
+ * became audited pages (a 404, a 500; #2399). This mirrors that arithmetic so
+ * the printed total and the published `cloudSpend` match the ledger, and
+ * merges everything into ONE `audit_page` line of exactly `pagesAudited`
+ * pages: the customer bought N audited pages, not "some renders and some other
+ * pages".
+ *
+ * Pure; exported for tests. Call it only for a registered run: an unregistered
+ * one has no settlement, and its renders were standalone.
+ */
+export function withAuditPageSettlement(
+  lines: CloudSpendLine[],
+  pagesAudited: number
+): CloudSpendLine[] {
+  const units = Math.max(0, Math.floor(pagesAudited));
+  const rest = lines.filter((l) => l.feature !== "audit_page");
+  if (units === 0) return rest;
+  const merged: CloudSpendLine = {
+    service: "audit-pages",
+    feature: "audit_page",
+    units,
+    credits: computeCost("audit_page", units),
+  };
+  // Right after the base (when present), so the two lines that make up the
+  // headline price read first.
+  const baseAt = rest.findIndex((l) => l.feature === "audit_base");
+  return baseAt === -1
+    ? [merged, ...rest]
+    : [...rest.slice(0, baseAt + 1), merged, ...rest.slice(baseAt + 1)];
+}
+
+/**
+ * Pages this run audited, as its report SHOWS them, which is what the server
+ * settles the page charge on (#2290, #2399): the coverage line's audited count
+ * ("Coverage: audited N of M known pages"), else the "N pages" header.
+ *
+ * Never more than the pages this run fetched (`scanScope.pagesCrawled`, else
+ * `pages.length`): a smart re-audit's report also covers pages carried from
+ * earlier audits, and a carried page is never billed again. The crawl count is
+ * only that bound: it also counts error pages (a 404 kept for its broken-link
+ * finding) that were crawled and never audited.
+ */
+export function auditedPageCount(report: {
+  pages: readonly unknown[];
+  totalPages?: number;
+  coverage?: { auditedPages: number } | null;
+  scanScope?: { pagesCrawled: number };
+}): number {
+  const fetched = report.scanScope?.pagesCrawled ?? report.pages.length;
+  const shown = report.coverage?.auditedPages ?? report.totalPages ?? fetched;
+  return Math.min(shown, fetched);
 }
 
 /**
@@ -423,8 +515,11 @@ export function streamPhaseMemoryLogger():
   return (phase, boundary) => {
     Bun.gc(true);
     const m = process.memoryUsage();
+    // `heapUsed` lags or misses JS string memory on Bun; `heapSize` from
+    // bun:jsc tracks it, and retained page strings are what this is for.
+    const { heapSize } = heapStats();
     console.error(
-      `[stream] ${phase} ${boundary} heapUsed=${mb(m.heapUsed)} external=${mb(m.external)} rss=${mb(m.rss)}`
+      `[stream] ${phase} ${boundary} heapSize=${mb(heapSize)} heapUsed=${mb(m.heapUsed)} external=${mb(m.external)} rss=${mb(m.rss)}`
     );
   };
 }
@@ -545,6 +640,12 @@ export interface CrawlConcurrencySettings {
   concurrency: number;
   perHostConcurrency: number;
   perHostDelayMs: number;
+  /**
+   * Per-host limits for the discovery probes, set only when they differ from
+   * the page limits above (#409): the probes are plain HTTP even when the
+   * pages are cloud renders.
+   */
+  discoveryProbePerHost?: { concurrency: number; delayMs: number };
 }
 
 /**
@@ -660,6 +761,14 @@ export function resolveCrawlConcurrency(
     // No artificial delay between job submissions; robots.txt crawl-delay
     // still applies (the crawler prefers robots.crawlDelayMs when present).
     perHostDelayMs: 0,
+    // The discovery probes are plain HTTP to the site, not render jobs, so
+    // they keep the configured per-host limits. Clamped with the pages they ran
+    // one at a time on the free plan (render concurrency 1), and on a slow host
+    // the later ones fell past the preamble budget (#409).
+    discoveryProbePerHost: {
+      concurrency: base.perHostConcurrency,
+      delayMs: base.perHostDelayMs,
+    },
   };
 }
 
@@ -670,12 +779,16 @@ export function resolveCrawlConcurrency(
  * a clamped Team plan (or any unknown planId) gets no hint.
  * Exported for tests.
  */
+function pagesAtOnce(n: number): string {
+  return `${n} ${n === 1 ? "page" : "pages"}`;
+}
+
 export function renderConcurrencyUpsellHint(planId: string): string {
   if (planId === "free") {
-    return ` — upgrade to Pro for ${PLANS.starter.renderConcurrency} concurrent renders`;
+    return ` — upgrade to Pro for ${pagesAtOnce(PLANS.starter.renderConcurrency)} rendered at once, per audit`;
   }
   if (planId === "starter") {
-    return ` — upgrade to Team for ${PLANS.team.renderConcurrency} concurrent renders`;
+    return ` — upgrade to Team for ${pagesAtOnce(PLANS.team.renderConcurrency)} rendered at once, per audit`;
   }
   return "";
 }
@@ -699,7 +812,7 @@ async function fetchPlanRenderConcurrency(
     if (typeof plan?.renderConcurrency !== "number") return undefined;
     if (plan.renderConcurrency < config.cloud.render_concurrency) {
       logger.warn(
-        `Render concurrency limited to ${plan.renderConcurrency} on the ${plan.name} plan` +
+        `The ${plan.name} plan renders ${pagesAtOnce(plan.renderConcurrency)} at once` +
           renderConcurrencyUpsellHint(plan.id)
       );
     }
@@ -751,9 +864,27 @@ export async function runAudit(
   // phases completed — or was in flight — before a failure.
   const phaseTimer = new PhaseTimer<(typeof AUDIT_PHASES)[number]>();
 
+  // Project name: the one provided, or derived from the domain
+  const projectName = options.projectName ?? domainToProjectName(url);
+
   try {
     configureLogger({ debug: options.debug ?? false });
     logger.debug("starting audit", url);
+
+    // #403: a store this process cannot write opens read-only without saying
+    // so, then fails at the first write or drops every page. Say which file
+    // and why before any request goes out.
+    const storeProblems = checkAuditStores(projectName, {
+      linkCache: mergedConfig.external_links.enabled,
+    });
+    if (storeProblems.length > 0) {
+      return err(
+        commandError(
+          ErrorCodes.FILE_WRITE_ERROR,
+          formatStoreProblems(storeProblems)
+        )
+      );
+    }
 
     // Initialize request tool with config
     initRequestTool({
@@ -780,14 +911,20 @@ export async function runAudit(
       );
     }
 
-    // Create storage with project name (use provided name or derive from domain)
-    const projectName = options.projectName ?? domainToProjectName(url);
     logger.debug("creating storage", projectName);
 
     const storage = await Effect.runPromise(createStorage({ projectName }));
 
     // Crawler stashes each ParsedPage here so the audit skips a re-parse (#267)
     const parsedPageCache: ParsedPageCache = new Map();
+
+    // The page classifier (#2307): on unless [classifier] enabled = false or --no-classifier. The
+    // module is imported only here, so a command that never audits never loads it, and the model
+    // itself is read on the first classified page.
+    const classify =
+      mergedConfig.classifier?.enabled === false
+        ? undefined
+        : (await import("@/classifier/hook")).createPageClassifierHook();
 
     // Fiber handle for event subscription (declared outside try for finally cleanup)
     let eventsFiber: ReturnType<typeof Effect.runFork> | undefined;
@@ -809,6 +946,13 @@ export async function runAudit(
     // Domain stats: a flat-charged, credited, report-only cloud call (STEP 3.2).
     let domainStatsCredits = 0;
 
+    // #2342: this project's content-store cap, and a lease that stops the
+    // store's LRU evicting this audit's own pages before the rules phase reads
+    // them back. Released in the finally below.
+    const releaseContentStore = retainGlobalContentStore({
+      configMaxBytes: mergedConfig.storage.content_store_max_bytes,
+    });
+
     try {
       // ============================================
       // STEP 1: CRAWL
@@ -824,11 +968,16 @@ export async function runAudit(
       );
       logger.debug(`using ${uaSource} user-agent`, userAgent);
 
-      // Resolve coverage mode: CLI flag > config > default (surface)
+      // Resolve the crawl's coverage mode: caller > config > default (surface)
       const coverageMode =
         options.coverageMode ?? mergedConfig.crawler.coverage ?? "surface";
-      // Quick coverage skips all networked cloud enrichment (no credit prompt).
+      // The quick strategy: seed and sitemaps, HTTP-first rendering.
       const isQuickMode = coverageMode === "quick";
+      // The level's cloud checks setting. Off (the quick level) skips all
+      // networked cloud enrichment (no credit prompt). Callers without a
+      // resolved level keep the old rule: quick coverage means no cloud checks.
+      const cloudChecks =
+        options.auditLevel?.settings.cloudChecks ?? !isQuickMode;
 
       const documentFetcher = resolveDocumentFetcher(
         options,
@@ -906,6 +1055,18 @@ export async function runAudit(
         headers: mergedConfig.crawler.headers,
         followRedirects: mergedConfig.crawler.follow_redirects,
         respectRobots: mergedConfig.crawler.respect_robots,
+        discoveryProbePerHost: crawlConcurrency.discoveryProbePerHost,
+        // Only the probes an enabled rule reads, and none when the user turned
+        // them off: a firewall can ban the audit for asking for /swagger.json
+        // (#409).
+        discoveryProbes: selectDiscoveryProbes({
+          enabled: mergedConfig.crawler.disable_discovery_probes !== true,
+          rules: mergedConfig.rules,
+          ruleOptions: mergedConfig.rule_options as Record<
+            string,
+            { enabled?: boolean }
+          >,
+        }),
         incremental: incrementalEnabled,
         // Browser-like freshness: skip re-requesting fresh pages (max-age /
         // Expires) across audits. Honored only when incremental; --refresh
@@ -952,6 +1113,7 @@ export async function runAudit(
           config: crawlerConfig,
           storage,
           parsedPageCache,
+          ...(classify ? { classify } : {}),
         })
       );
 
@@ -1099,6 +1261,7 @@ export async function runAudit(
         if (shouldResume) {
           // Resume interrupted crawl
           logger.info(`resuming interrupted crawl ${existingCrawl.id}`);
+          await warnEvictedPages(storage, existingCrawl.id, "resume");
           await Effect.runPromise(crawler.resumeFromStorage(existingCrawl.id));
           crawlId = existingCrawl.id;
         } else {
@@ -1168,6 +1331,8 @@ export async function runAudit(
       await Effect.runPromise(
         storage.updateCrawl(crawlId, { status: "crawled" })
       );
+
+      warnRefetchedPages(storage);
 
       // ============================================
       // POST-CRAWL: STREAMED PIPELINE (#1913)
@@ -1276,12 +1441,12 @@ export async function runAudit(
       // Cloud bulk dead-link checks (shared global cache) when authed and
       // the links/dead-links rule is enabled; null → plain local checking.
       // Gated behind the SAME spend confirmation as STEP 2.4 prefetch so the
-      // dead_links charge (which happens here, before that confirm) can't be
+      // link-check charge (which happens here, before that confirm) can't be
       // a surprise: when the estimate exceeds [cloud].confirm_threshold and a
       // TTY confirm callback exists, the user is prompted first; a decline
       // falls back to local per-link checks.
       const deadLinksClient =
-        options.cloudAvailable === false || isQuickMode
+        options.cloudAvailable === false || !cloudChecks
           ? null
           : createCloudClientFromSettings();
 
@@ -1294,14 +1459,36 @@ export async function runAudit(
       const cloudPrefetchEnabled =
         mergedConfig.cloud.enabled &&
         options.cloudAvailable !== false &&
-        !isQuickMode;
+        cloudChecks;
+      // The collectors that read page content are guarded (pub#401): a throw on
+      // one batch must not fail the audit, and a result built from the batches
+      // that survived would look complete, so the first failure drops that
+      // result whole and is logged once.
       const prefetchCollector = cloudPrefetchEnabled
-        ? createCloudPrefetchCollector(url)
+        ? guardCollector(createCloudPrefetchCollector(url), (error) => {
+            logger.warn(
+              `Cloud prefetch failed; continuing without cloud analysis: ${error instanceof Error ? error.message : String(error)}`
+            );
+          })
         : null;
+      // Left bare: it only reads status, url and whether html is present off
+      // each crawl record and keeps a capped list, so it parses nothing the
+      // site wrote. The external-link set and page statuses below are the same.
       const techSampleCollector = createTechDetectSampleCollector(url);
       // #2091: url + raw JSON-LD per page, and nothing else. Always on — the
       // entity map is part of every report now, not a flag.
-      const entityMapCollector = createEntityMapCollector();
+      //
+      // A failure degrades to no map rather than losing a finished audit. The
+      // rules treat undefined as "no map was built" and skip, which is not the
+      // same claim as "this site declares nothing".
+      const entityMapCollector = guardCollector(
+        createEntityMapCollector(),
+        (error) => {
+          logger.warn(
+            `Could not build the entity map: ${error instanceof Error ? error.message : String(error)}`
+          );
+        }
+      );
       // normalizedUrl + status per page, for the smart-audits merge and nothing
       // else — two scalars a page instead of the PageRecord it used to slice
       // them off.
@@ -1323,6 +1510,9 @@ export async function runAudit(
             resourceCheckTimeoutMs: options.resourceCheckTimeoutMs,
             // Sub-resource cache reuse (#107): mirrors the crawler's incremental flag.
             incremental: incrementalEnabled,
+            // --offline: nothing goes to a host outside the audited site, the
+            // third-party asset checks included (pub#807).
+            ...(options.offline ? { ownSiteOnly: true } : {}),
           },
           ...(externalLinksEnabled
             ? {
@@ -1356,6 +1546,10 @@ export async function runAudit(
                       client: deadLinksClient,
                       config: mergedConfig,
                       auditId: crawlId,
+                      // #801: the cloud bills the checks to the registered run;
+                      // no run, no cloud checks (local, free).
+                      getRunId: options.getRunId,
+                      maxPages: mergedConfig.crawler.max_pages,
                       externalLinkCount: externalLinkUrls.size,
                       getBalance: deadLinksClient
                         ? async () =>
@@ -1363,7 +1557,12 @@ export async function runAudit(
                               (await deadLinksClient.getBalance()).balance
                             )
                         : undefined,
-                      confirm: options.confirmCloudSpend,
+                      // #801: the link charge is in the consented, capped
+                      // estimate now (one per page of the limit), so a
+                      // consented run is not stopped mid-audit to confirm it.
+                      confirm: options.cloudConsented
+                        ? undefined
+                        : options.confirmCloudSpend,
                       onSpend: (units, credits) => {
                         deadLinksUnits += units;
                         deadLinksCredits += credits;
@@ -1407,46 +1606,54 @@ export async function runAudit(
         phaseTimer.enter("cloud_prefetch");
         logger.debug("step 2.4: cloud prefetch", crawlId);
         onProgress({ phase: "cloud" });
-        try {
-          cloudResult = await runCloudPrefetchFromPayloads(
-            {
-              client: createCloudClientFromSettings(),
-              cloudConfig: mergedConfig.cloud,
-              config: mergedConfig,
-              baseUrl: url,
-              auditId: crawlId,
-              // Stage-1 gating policy (CLI-owned): Stage-0 metadata gates which
-              // downstream cloud features run before the per-audit cap.
-              gate: gateStage1,
-              // Consented users skip THIS confirm (capped + disclosed up front);
-              // dead-links/tech/editor keep their gate below.
-              confirm: options.cloudConsented
-                ? undefined
-                : options.confirmCloudSpend,
-              onProgress: (detail) => onProgress({ phase: "cloud", detail }),
-              // Skip the raw-vs-rendered `render` service only when the crawl rendered EVERY page — i.e. the
-              // resolved fetcher is the full-render one ("cloud-render"), NOT the "auto" hybrid ("hybrid-http-
-              // first", most pages raw) or plain HTTP (undefined). #673.
-              crawlRendered: documentFetcher?.id === "cloud-render",
-            },
-            // Collected batch by batch during the pre-rules walk (#1913), so
-            // there is no whole-crawl DOM working set left to release for the
-            // duration of the cloud round trips — each batch's went with it.
-            prefetchCollector.build()
-          );
-          logger.debug(
-            "cloud prefetch done",
-            `spent=${cloudResult.totalSpent}`,
-            `services=${cloudResult.spend.length}`
-          );
-        } catch (error) {
-          // Defends the never-fail-the-audit invariant against anything the
-          // prefetch path (incl. caller-supplied confirm/onProgress callbacks)
-          // might throw. Rules see no store → skipped not-prefetched.
-          cloudResult = null;
-          logger.warn(
-            `Cloud prefetch failed; continuing without cloud analysis: ${(error as Error).message}`
-          );
+        // Collected batch by batch during the pre-rules walk (#1913), so there
+        // is no whole-crawl DOM working set left to release for the duration of
+        // the cloud round trips — each batch's went with it. Undefined when a
+        // batch failed to fold in (logged once by the guard): the prefetch then
+        // does not run, the same outcome as a prefetch that failed.
+        const prefetchPayloads = prefetchCollector.build();
+        if (prefetchPayloads) {
+          try {
+            cloudResult = await runCloudPrefetchFromPayloads(
+              {
+                client: createCloudClientFromSettings(),
+                cloudConfig: mergedConfig.cloud,
+                config: mergedConfig,
+                baseUrl: url,
+                auditId: crawlId,
+                // #2290: the registered run, so the raw-vs-rendered renders bill
+                // as this audit's pages rather than as standalone renders.
+                runId: (await options.getRunId?.()) ?? undefined,
+                // Stage-1 gating policy (CLI-owned): Stage-0 metadata gates which
+                // downstream cloud features run before the per-audit cap.
+                gate: gateStage1,
+                // Consented users skip THIS confirm (capped + disclosed up front);
+                // dead-links/tech/editor keep their gate below.
+                confirm: options.cloudConsented
+                  ? undefined
+                  : options.confirmCloudSpend,
+                onProgress: (detail) => onProgress({ phase: "cloud", detail }),
+                // Skip the raw-vs-rendered `render` service only when the crawl rendered EVERY page — i.e. the
+                // resolved fetcher is the full-render one ("cloud-render"), NOT the "auto" hybrid ("hybrid-http-
+                // first", most pages raw) or plain HTTP (undefined). #673.
+                crawlRendered: documentFetcher?.id === "cloud-render",
+              },
+              prefetchPayloads
+            );
+            logger.debug(
+              "cloud prefetch done",
+              `spent=${cloudResult.totalSpent}`,
+              `services=${cloudResult.spend.length}`
+            );
+          } catch (error) {
+            // Defends the never-fail-the-audit invariant against anything the
+            // prefetch path (incl. caller-supplied confirm/onProgress callbacks)
+            // might throw. Rules see no store → skipped not-prefetched.
+            cloudResult = null;
+            logger.warn(
+              `Cloud prefetch failed; continuing without cloud analysis: ${(error as Error).message}`
+            );
+          }
         }
         phaseTimer.mark("cloud_prefetch");
       }
@@ -1457,7 +1664,7 @@ export async function runAudit(
       if (
         mergedConfig.cloud.enabled &&
         options.cloudAvailable !== false &&
-        !isQuickMode &&
+        cloudChecks &&
         mergedConfig.cloud.technologies
       ) {
         phaseTimer.enter("tech_detect");
@@ -1495,8 +1702,9 @@ export async function runAudit(
       // since a previous audit skips its parse AND its rules; `--refresh` is the
       // documented way to force everything to run, so it turns the cache off
       // rather than merely forcing a re-fetch. `cliVersion` is in the key, so a
-      // `squirrel self update` invalidates every entry — rule CODE can change
-      // without any rule id or option changing.
+      // `squirrel self update` invalidates every entry, and so is `RULES_VERSION`,
+      // a hash of the rule code, so a rule change without a version bump does too:
+      // rule CODE can change without any rule id or option changing.
       const ruleCacheStore =
         options.refresh || !ruleCacheEnabled()
           ? undefined
@@ -1507,17 +1715,100 @@ export async function runAudit(
       // absorbing during the pre-rules walk above, so this is a move rather
       // than extra work: it sees exactly the same pages either way.
       //
-      // A failure degrades to undefined rather than losing a finished audit.
-      // The rules treat undefined as "no map was built" and skip, which is not
-      // the same claim as "this site declares nothing".
-      let entityMap: EntityMap | undefined;
-      try {
-        entityMap = entityMapCollector.build(url);
-      } catch (error) {
-        logger.warn(
-          `Could not build the entity map: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
+      // Undefined when any batch or the build failed (logged once by the guard
+      // above).
+      //
+      // The crawl's own audited URL, not this invocation's: a `--resume` of an
+      // audit started on another path of the site carries the first one, and
+      // `squirrel entities` reads the site from the crawl (#492).
+      const entityMap: EntityMap | undefined = entityMapCollector.build(
+        crawlMeta ? entityMapSite(crawlMeta) : url
+      );
+
+      // #2343: SPILL the page-rule output instead of accumulating it.
+      //
+      // The phase used to hand back every scored page's checks in three maps and
+      // the CLI wrote them all in one transaction afterwards, so a crawl's entire
+      // findings set — message/value/items strings cut from every page — sat in
+      // heap from the first page to the last. That is the term that scales with
+      // pages × page BYTES: 4,000 gymshark pages projected ~3 GB before the
+      // report phase had even started. Each page's checks now go to `rule_results`
+      // with the batch they were produced in and are dropped; the phase retains
+      // only the per-rule tallies, which are bounded by the RULE count.
+      //
+      // `removedUrls` has to be known BEFORE the stream, because a 404/410 page's
+      // checks are not smart-audit findings and the sink is the only place the
+      // checks still exist. `pageStatuses` comes from the pre-rules walk, which
+      // has already run.
+      // Spilling as we go means a run killed mid-phase leaves rows behind where
+      // it used to leave none, so re-running rules over the same crawl would
+      // append a second copy of every check. An audit never re-runs rules over
+      // a crawl (see `clearRuleResults`), so this is a no-op on every normal
+      // run, but it keeps the invariant next to the code that depends on it.
+      // `squirrel analyze`, which does re-run them, replaces the crawl's
+      // results in one transaction instead (#844).
+      await Effect.runPromise(
+        sqliteStorage
+          .clearRuleResults(crawlId)
+          .pipe(Effect.catchAll(() => Effect.void))
+      );
+
+      const smartAuditsOn = mergedConfig.smart_audits === true;
+      const removedPageUrls = new Set(
+        pageStatuses
+          .filter((p) => SMART_REMOVED_STATUSES.has(p.status))
+          .map((p) => p.normalizedUrl)
+      );
+      const freshFindings: FlatFinding[] = [];
+      const scoredPageUrls: string[] = [];
+      let pendingRuleRows = new Map<
+        string,
+        { ruleId: string; checks: import("@/types").CheckResult[] }[]
+      >();
+      const pageSink: PageResultSink = {
+        writePage(pageUrl, entries) {
+          scoredPageUrls.push(pageUrl);
+          pendingRuleRows.set(
+            pageUrl,
+            entries.map(([ruleId, checks]) => ({
+              ruleId,
+              checks: checks as import("@/types").CheckResult[],
+            }))
+          );
+          // Smart audits' fresh side, taken HERE because this is the last point
+          // the checks exist. Only fail/warn survive `flattenChecks`, so what is
+          // kept is the finding set the store was going to hold anyway, not the
+          // (mostly passing) check set.
+          if (!smartAuditsOn || removedPageUrls.has(pageUrl)) return;
+          for (const [ruleId, checks] of entries) {
+            const flat = flattenChecks(
+              pageUrl,
+              ruleId,
+              checks as import("@/types").CheckResult[]
+            );
+            for (const f of flat) freshFindings.push(f);
+          }
+        },
+        async flush() {
+          if (pendingRuleRows.size === 0) return;
+          const rows = pendingRuleRows;
+          // Swap rather than clear: the write below is async, and reusing the Map
+          // would let the next batch's pages land in the transaction mid-flight.
+          pendingRuleRows = new Map();
+          await Effect.runPromise(
+            sqliteStorage.saveRuleResultsBatch(crawlId, rows)
+          );
+        },
+      };
+
+      // One probing budget for the whole rules phase, shared by every probing
+      // rule through ctx.probe. Passive (or no resolved level) allows nothing,
+      // and so do disabled discovery probes, whatever level was passed in.
+      const probeBudget = createProbeBudget(
+        options.probe && mergedConfig.crawler.disable_discovery_probes !== true
+          ? options.probe
+          : { level: "passive", budgetMs: 0 }
+      );
 
       // Thread cloud results + the resolved Stage-0 profile into the rules phase
       // per audit run — no process-global singleton. The metadata drives
@@ -1531,13 +1822,20 @@ export async function runAudit(
           cloudResults: cloudResult?.store,
           siteMetadata: cloudResult?.siteMetadata ?? undefined,
           ...(entityMap ? { entityMap } : {}),
+          probe: probeBudget,
         },
         {
           batchSize: streamBatchSize,
           onPhase: streamPhaseMemoryLogger(),
+          pageSink,
+          retainPageResults: false,
           ...(ruleCacheStore
             ? {
-                ruleCache: { store: ruleCacheStore, engineVersion: cliVersion },
+                ruleCache: {
+                  store: ruleCacheStore,
+                  engineVersion: cliVersion,
+                  rulesVersion: RULES_VERSION,
+                },
               }
             : {}),
         }
@@ -1556,19 +1854,10 @@ export async function runAudit(
           )
         : await Effect.runPromise(rulesEffect);
 
-      // Batch all rule results into one transaction (mirrors analyze.ts:309),
-      // instead of a separate txn per (page, rule) pair.
-      type RuleEntry = {
-        ruleId: string;
-        checks: import("@/types").CheckResult[];
-      };
-      const batchResults = new Map<string, RuleEntry[]>();
-      for (const [url, ruleChecksMap] of ruleResults.pageRuleResults) {
-        batchResults.set(
-          url,
-          Array.from(ruleChecksMap, ([ruleId, checks]) => ({ ruleId, checks }))
-        );
-      }
+      // Page results already went to `rule_results` batch by batch through the
+      // sink above (#2343); only the site pass is left, and it is bounded by the
+      // rule count. Written under the same `page_url = ''` convention and AFTER
+      // every page row, so `getRuleResultsGrouped`'s rowid order is unchanged.
       const siteResultsList = Array.from(
         ruleResults.siteRuleResults,
         ([ruleId, checks]) => ({
@@ -1577,23 +1866,12 @@ export async function runAudit(
         })
       );
       if (siteResultsList.length > 0) {
-        batchResults.set("", siteResultsList);
-      }
-
-      if ("saveRuleResultsBatch" in storage) {
         await Effect.runPromise(
-          (
-            storage as import("@/crawler/storage/sqlite").SQLiteStorage
-          ).saveRuleResultsBatch(crawlId, batchResults)
+          sqliteStorage.saveRuleResultsBatch(
+            crawlId,
+            new Map([["", siteResultsList]])
+          )
         );
-      } else {
-        for (const [url, results] of batchResults) {
-          for (const { ruleId, checks } of results) {
-            await Effect.runPromise(
-              storage.saveRuleResults(crawlId, url, ruleId, checks)
-            );
-          }
-        }
       }
 
       const resourceRecords = [
@@ -1645,17 +1923,29 @@ export async function runAudit(
         phaseTimer.enter("smart_merge");
         logger.debug("step 2.7: smart audits merge", crawlId);
         try {
-          smartMerge = await Effect.runPromise(
+          const merged = await Effect.runPromise(
             runSmartAudits({
               storage,
               crawlId,
               siteKey: baseUrl,
-              ruleResults,
+              // #2343: the fresh side arrives as findings the sink flattened
+              // while each page's checks were in hand, and the rule metas come
+              // from the bounded tallies — neither needs the O(pages) result
+              // maps the phase no longer builds.
+              freshFindings,
+              scoredPageUrls,
+              ruleMeta: ruleResults.tallies,
               // Collected during the pre-rules walk in the same
               // normalized_url order `getPages` returns (#1913).
               pages: pageStatuses,
             })
           );
+          // The site checks as produced, so the report's union keeps each
+          // one's own pageUrl (see SmartMergeOverride.freshSiteChecks).
+          smartMerge = {
+            ...merged,
+            freshSiteChecks: ruleResults.siteRuleResults,
+          };
         } catch (error) {
           // Never fail the audit on a merge error — degrade to the normal path.
           smartMerge = undefined;
@@ -1714,6 +2004,10 @@ export async function runAudit(
       // publish: it says how this run was produced, not what the site is like.
       // Recorded even when nothing replayed, so "0 replayed" is a statement
       // rather than a silence an agent has to interpret.
+      // The level this run used and what it resolved to, so the report says
+      // what ran even after a level's definition changes. REPORT-ONLY.
+      if (options.auditLevel) report.auditLevel = options.auditLevel;
+
       report.rulesCache = {
         pagesReplayed: ruleResults.ruleCache.replayedPages,
         pagesEvaluated: ruleResults.ruleCache.freshPages,
@@ -1756,7 +2050,7 @@ export async function runAudit(
       if (
         mergedConfig.cloud.enabled &&
         options.cloudAvailable !== false &&
-        !isQuickMode &&
+        cloudChecks &&
         mergedConfig.cloud.editor_summary
       ) {
         phaseTimer.enter("editor_summary");
@@ -1797,7 +2091,7 @@ export async function runAudit(
       if (
         mergedConfig.cloud.enabled &&
         options.cloudAvailable !== false &&
-        !isQuickMode &&
+        cloudChecks &&
         mergedConfig.cloud.domain_stats
       ) {
         phaseTimer.enter("domain_stats");
@@ -1830,14 +2124,17 @@ export async function runAudit(
       const spendLines = [
         // render misses + render_cached hits, at the actual server debit #279.
         ...foldRenderSpendLines(renderCharges),
-        ...(deadLinksUnits > 0
+        // A batch can be charged with no answers (a settle that could not
+        // run keeps its reservation), so credits alone keep the line (#801).
+        ...(deadLinksUnits > 0 || deadLinksCredits > 0
           ? [
               {
-                service: "dead-links",
-                feature: "dead_links",
+                // Pricing v12 (#801): the cloud's link checks bill the run
+                // `external_link`, 1 per distinct link it answered.
+                service: "external links",
+                feature: "external_link",
                 units: deadLinksUnits,
-                // Accumulated per call — the server rounds ceil(urls/100)
-                // per call, so recomputing from total units would undercount.
+                // Accumulated per call: the server's own `charged` figure.
                 credits: deadLinksCredits,
               },
             ]
@@ -2027,6 +2324,7 @@ export async function runAudit(
       if (eventsFiber) {
         await Effect.runPromise(Fiber.interrupt(eventsFiber));
       }
+      releaseContentStore();
       await Effect.runPromise(storage.close());
     }
   } catch (error) {
@@ -2038,6 +2336,18 @@ export async function runAudit(
     phaseTimer.attributeInFlight();
     logger.debug("phase timings", formatPhaseTimings(phaseTimer.timingsMs));
     logger.debug("audit error", error);
+    // #403: a store that broke after the check above fails here as a raw
+    // SQLite error. Say which file and the fix, here on the user's terminal:
+    // the returned message also becomes the registered run's error, and local
+    // paths do not belong in it.
+    if (isPermanentStorageError(error)) {
+      const storeProblems = checkAuditStores(projectName, {
+        linkCache: mergedConfig.external_links.enabled,
+      });
+      if (storeProblems.length > 0) {
+        logger.error(formatStoreProblems(storeProblems));
+      }
+    }
     return err(
       commandError(
         ErrorCodes.CRAWL_ERROR,
@@ -2094,10 +2404,14 @@ export function mergeOptionsToConfig(
     smart_audits: options.smartAudits ?? config.smart_audits,
     // --rule-include/--rule-exclude (#1066): same merge the CLI command uses to
     // pre-validate --fail-on against excluded categories (resolveRulesConfig).
-    rules: resolveRulesConfig(config.rules, {
-      enable: options.ruleInclude ?? [],
-      disable: options.ruleExclude ?? [],
-    }),
+    // The rest of `[rules]`, such as `time_budget_ms` (#578), passes through.
+    rules: {
+      ...config.rules,
+      ...resolveRulesConfig(config.rules, {
+        enable: options.ruleInclude ?? [],
+        disable: options.ruleExclude ?? [],
+      }),
+    },
     crawler: {
       ...config.crawler,
       // Same clamp as the commands, through the same helper so the five cannot
@@ -2129,12 +2443,26 @@ export function mergeOptionsToConfig(
       ...(options.headers && Object.keys(options.headers).length > 0
         ? { headers: { ...config.crawler.headers, ...options.headers } }
         : {}),
+      // --disable-discovery-probes[=false] overrides [crawler]
+      // disable_discovery_probes (#409), in both directions.
+      ...(typeof options.disableDiscoveryProbes === "boolean"
+        ? { disable_discovery_probes: options.disableDiscoveryProbes }
+        : {}),
     },
     // --offline promises no network beyond the audited site itself, so
     // external-link probing (fetches to third-party URLs) is disabled too.
     external_links: options.offline
       ? { ...nextExternalLinks, enabled: false }
       : nextExternalLinks,
+    // repo#2729: the internal link probe only requests the audited site, so
+    // --offline keeps it; --no-internal-links turns it off.
+    ...(options.internalLinksEnabled === false
+      ? { internal_links: { ...config.internal_links, enabled: false } }
+      : {}),
+    // #2307: --no-classifier turns the page classifier off; absent keeps the config's choice.
+    ...(options.classifierEnabled === false
+      ? { classifier: { ...config.classifier, enabled: false } }
+      : {}),
     // --offline forces cloud off regardless of config/flags: no prefetch, no
     // bulk dead-link checks, no browser rendering (resolveDocumentFetcher
     // checks cloud.enabled first).

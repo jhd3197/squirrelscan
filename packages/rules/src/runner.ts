@@ -1,8 +1,10 @@
-import { logger } from "./logger";
+import { logger, profileRules } from "./logger";
 // Rule runner - executes rules with context
 
+import { PRIVATE_TARGET_SKIP_REASON } from "@squirrelscan/core-contracts";
 import { detectSoft404, parsePage } from "@squirrelscan/parser";
 import { mapWithConcurrency } from "@squirrelscan/utils";
+import { nonPublicHostLabel } from "@squirrelscan/utils/non-public-host";
 
 import type {
   CheckResult,
@@ -25,9 +27,20 @@ import type {
 
 import type { CloudResultStore } from "./cloud";
 import type { CollectedSiteSignals } from "./collected-signals";
+import type { EndpointSurface } from "./endpoint-surface";
+import type { ProbeBudget } from "./probe-budget";
 import { ruleApplies } from "./applicability";
 import { filterRules } from "./filter";
 import { loadAllRules, type RuleNamespace } from "./loader";
+import { describeRuleOptionIssues } from "./rule-options-check";
+import {
+  RULE_TIME_BUDGET_MS,
+  RuleTimeoutError,
+  runWithinBudget,
+  SITE_RULE_BUDGET_CAP_MS,
+  siteRuleBudgetMs,
+} from "./rule-budget";
+import { noindexSource, skipsNoindexPages } from "./shared/noindex";
 
 // Minimal config interface — CLI's full Config satisfies this
 export interface RulesConfig {
@@ -40,6 +53,10 @@ export interface RulesConfig {
     // site-metadata profile (guards against misclassification suppressing real
     // issues). Default false — `appliesWhen` gating engages normally.
     ignore_applicability?: boolean;
+    // `[rules] time_budget_ms` (#578): the per-page rule time budget, overriding
+    // RULE_TIME_BUDGET_MS. `0` turns it off. `RunnerOptions.ruleTimeBudgetMs`
+    // wins over it.
+    time_budget_ms?: number;
   };
 }
 
@@ -77,6 +94,12 @@ export interface RunnerScope {
    * Undefined = not built; the `schema/entity-*` rules skip.
    */
   entityMap?: EntityMap;
+  /**
+   * The shared probing budget for THIS run, threaded into `ctx.probe` on every
+   * page and site rule (the same object, so the cap is shared). Undefined =
+   * passive: probing rules send nothing.
+   */
+  probe?: ProbeBudget;
 }
 
 export interface RunnerOptions extends RunnerScope {
@@ -93,9 +116,46 @@ export interface RunnerOptions extends RunnerScope {
    * force fully sequential execution.
    */
   ruleConcurrency?: number;
+  /**
+   * Wall-clock budget (ms) for one page-rule evaluation on one page; site rules
+   * get this much per page of the site. A rule that runs past it is abandoned
+   * and recorded as a rule error. Defaults to {@link RULE_TIME_BUDGET_MS};
+   * `0` turns the budget off.
+   */
+  ruleTimeBudgetMs?: number;
+  /**
+   * Ceiling (ms) on one site-rule evaluation, whatever the page count. Defaults to
+   * `SITE_RULE_BUDGET_CAP_MS`.
+   */
+  siteRuleBudgetCapMs?: number;
 }
 
 const DEFAULT_RULE_CONCURRENCY = 8;
+
+/** Site rules that report the absence of a root resource, beyond the discovery-probe readers. */
+const ROOT_RESOURCE_RULES: ReadonlySet<string> = new Set(["crawl/sitemap-exists"]);
+
+/** Whether a rule's findings are about root resources (a discovery probe or the sitemap). */
+function judgesRootResource(rule: Rule): boolean {
+  return (rule.meta.discoveryProbes?.length ?? 0) > 0 || ROOT_RESOURCE_RULES.has(rule.meta.id);
+}
+
+/**
+ * Whether the crawl never saw the site answer: it fetched no page AND a root
+ * request recorded a refusal or a failed fetch. Zero pages alone is not enough:
+ * a start URL excluded by config or robots.txt, or a `maxPages` of 0, also
+ * yields zero pages while the root files answered normally, and a missing
+ * sitemap is a real finding there. Reads `crawlLimits`, which both engine paths
+ * set; undefined (a caller that never threaded it) reads as "pages were
+ * fetched", so nothing is skipped without evidence.
+ */
+function fetchedNoPages(site: SiteData | undefined): boolean {
+  const limits = site?.crawlLimits;
+  if (!site || !limits || limits.pagesCrawled !== 0 || limits.maxPages <= 0) return false;
+  const robots = site.robotsTxt;
+  const failedFetch = robots !== null && robots !== undefined && !robots.exists && robots.errors.length > 0;
+  return (site.refusedFetches?.length ?? 0) > 0 || failedFetch;
+}
 
 export interface PageRunResult {
   checks: CheckResult[];
@@ -135,9 +195,14 @@ export interface SiteRunResult {
 function getRuleOptions(rule: Rule, config: RulesConfig): Record<string, unknown> {
   const ruleConfig = config.rule_options[rule.meta.id] ?? {};
 
-  // If rule has options schema, parse with defaults
+  // If rule has options schema, parse with defaults. A value of the wrong type
+  // names the table and the option (pub#510), not a bare zod issue list.
   if (rule.meta.optionsSchema) {
-    return rule.meta.optionsSchema.parse(ruleConfig);
+    const parsed = rule.meta.optionsSchema.safeParse(ruleConfig);
+    if (!parsed.success) {
+      throw new Error(describeRuleOptionIssues(rule.meta.id, parsed.error.issues).join("; "));
+    }
+    return parsed.data;
   }
 
   return ruleConfig;
@@ -169,12 +234,51 @@ function checkApplicability(
   };
 }
 
+/**
+ * The visible skip a `skipOnPrivateTarget` rule emits on a local or
+ * private-network target (pub#629). Constant text, no host: the report says
+ * which host once, not once per rule and page.
+ */
+function privateTargetSkip(ruleId: string): CheckResult {
+  return {
+    name: ruleId,
+    status: "skipped",
+    message: "Not applicable: local or private-network host",
+    skipReason: PRIVATE_TARGET_SKIP_REASON,
+    // Folds apart from any other skip of the same rule, like the noindex gate.
+    details: { foldKey: PRIVATE_TARGET_SKIP_REASON },
+  };
+}
+
 export class RuleRunner {
   private rules: Map<string, Rule>;
   private enabledRuleIds: string[];
   private config: RulesConfig;
   // Only affects site rules — page rules are sync CPU and run sequentially (#379)
   private ruleConcurrency: number;
+  /** The per-page rule time budget this run uses, in ms; `0` means off. */
+  readonly ruleTimeBudgetMs: number;
+  private readonly siteRuleBudgetCapMs: number;
+  // Safe only because page rules run sequentially (see the note on `ruleConcurrency`):
+  // the check-then-set on this map and the in-place `details.pages++` here and in
+  // `collectedTimeoutChecks` assume no two page rules interleave. Parallelising page
+  // rules would need an atomic per-rule counter instead.
+  // Page rules that have already timed out in this run, with the live `details`
+  // of the one fail check that reported it. A slow pattern times out on every page
+  // that triggers it, so only the first page is a fail and later ones are skipped
+  // (and counted), not one fail per page flooding the report and the score.
+  //
+  // This is per-AUDIT state on the runner: a runner must serve one audit, or
+  // `resetAudit()` must be called between audits (`runSiteRules`, the last step of
+  // an audit, also clears it). Otherwise a second audit's first timeout of the
+  // same rule would be a skipped check and its report would carry no fail at all.
+  // The in-place `details.pages` on the first check is best effort: a sink may
+  // have serialized it already, so the final count is also emitted by
+  // `runSiteRules` as one `<rule>-timeouts` summary check.
+  private readonly timedOutPageRules = new Map<
+    string,
+    { details: { pages: number }; name: string; category: string; budgetMs: number }
+  >();
   // Per-run state — captured once at construction, immutable for the
   // lifetime of this runner instance. Each audit gets its own RuleRunner, so
   // concurrent audits never share these.
@@ -182,6 +286,11 @@ export class RuleRunner {
   private readonly cloudResults: CloudResultStore | undefined;
   private readonly intel: IntelContext | undefined;
   private readonly entityMap: EntityMap | undefined;
+  private readonly probe: ProbeBudget | undefined;
+  // The audited url last classified by `isPrivateTarget`, and the verdict. One
+  // audit has one base url, so this is a single classification per run; keyed on
+  // the url so a runner reused for another site cannot carry a stale verdict.
+  private privateTarget: { url: string; isPrivate: boolean } | undefined;
 
   constructor(options: RunnerOptions) {
     this.config = options.config;
@@ -189,10 +298,16 @@ export class RuleRunner {
     this.cloudResults = options.cloudResults;
     this.intel = options.intel;
     this.entityMap = options.entityMap;
+    this.probe = options.probe;
     this.ruleConcurrency = Math.max(
       1,
       options.ruleConcurrency ?? DEFAULT_RULE_CONCURRENCY
     );
+    this.ruleTimeBudgetMs =
+      options.ruleTimeBudgetMs ??
+      options.config.rules?.time_budget_ms ??
+      RULE_TIME_BUDGET_MS;
+    this.siteRuleBudgetCapMs = options.siteRuleBudgetCapMs ?? SITE_RULE_BUDGET_CAP_MS;
 
     // Load all rules (plus any caller-supplied namespaces — plugins / tests)
     this.rules = loadAllRules({ additionalNamespaces: options.additionalNamespaces });
@@ -205,6 +320,20 @@ export class RuleRunner {
       this.config.rules?.disable,
       this.config.rule_options as Record<string, { enabled?: boolean }>
     );
+  }
+
+  /**
+   * Whether this audit's target is a local or private-network host (pub#629),
+   * decided from the audit URL (`site.baseUrl`) by the same classifier the CLI's
+   * cloud preflight uses. A page rule run without site data falls back to the
+   * page's own url, which is on the audited host.
+   */
+  private isPrivateTarget(ctx: RuleContext): boolean {
+    const url = ctx.site?.baseUrl || ctx.page.url;
+    if (this.privateTarget?.url !== url) {
+      this.privateTarget = { url, isPrivate: nonPublicHostLabel(url) !== null };
+    }
+    return this.privateTarget.isPrivate;
   }
 
   // Get list of enabled rules
@@ -246,15 +375,21 @@ export class RuleRunner {
    * (#521). Callers must handle either shape.
    *
    * `fanned` substitutes a template sibling's checks for `run()` (#1951). It is
-   * consulted AFTER both gates, because both are decided per PAGE and a
+   * consulted AFTER the gates, because they are decided per PAGE and a
    * representative's verdict says nothing about them: applicability happens to be
-   * run-constant, but the soft-404 gate is not, so a member that serves 404
-   * content must take its own skip rather than a sibling's real verdict.
+   * run-constant, but the soft-404 and noindex gates are not, so a member that
+   * serves 404 content or is noindex must take its own skip rather than a
+   * sibling's real verdict.
+   *
+   * `budgetMs` bounds the synchronous part of `run()` (see rule-budget.ts). A rule
+   * that runs past it is abandoned and recorded as a `<id>-error` fail check, the
+   * same shape as a thrown error, so the rest of the audit carries on.
    */
   private runOneRule(
     rule: Rule,
     ctx: RuleContext,
     siteMetadata: SiteMetadata | undefined,
+    budgetMs: number,
     scopeForLog?: "site",
     fanned?: CheckResult[]
   ): RuleRunResult | Promise<RuleRunResult> {
@@ -263,6 +398,16 @@ export class RuleRunner {
     const skip = checkApplicability(rule, this.config, siteMetadata);
     if (skip) {
       return { meta: rule.meta, checks: [skip] };
+    }
+
+    // Private-target gate (pub#629): transport and delivery rules judge the
+    // production edge, and a dev server or a box on the local network is not it.
+    // Plain HTTP, HTTP/1.1, no caching or compression are the norm there, so the
+    // rules are skipped rather than failed, which also keeps one cause (no
+    // HTTPS, no compression, no caching policy) from costing the score several
+    // times. Decided by the audit URL, so it is constant for the whole run.
+    if (rule.meta.skipOnPrivateTarget && this.isPrivateTarget(ctx)) {
+      return { meta: rule.meta, checks: [privateTargetSkip(rule.meta.id)] };
     }
 
     // Soft-404 gate: skip page content/mechanism rules on a URL that serves 404
@@ -283,6 +428,49 @@ export class RuleRunner {
       };
     }
 
+    // Noindex gate (pub#457): skip search-presentation rules on a page its owner
+    // keeps out of the index, on a site known to be indexed (not a staging or
+    // preview host, where these rules are the point). Decided per page like the
+    // soft-404 gate, so it also comes before a fanned verdict.
+    if (rule.meta.scope === "page" && rule.meta.skipOnNoindex && skipsNoindexPages(ctx.site)) {
+      const source = noindexSource(ctx.parsed, ctx.page.headers);
+      if (source) {
+        return {
+          meta: rule.meta,
+          checks: [
+            {
+              name: rule.meta.id,
+              status: "skipped",
+              message: `Skipped: page is set to noindex via ${source}`,
+              skipReason: "noindex",
+              // Folds apart from any other skip of the same rule, so a folded
+              // aggregate is all-noindex: the resolution signal relies on it.
+              details: { foldKey: "noindex" },
+            },
+          ],
+        };
+      }
+    }
+
+    // No-observation gate: a rule that judges a root resource (a discovery
+    // probe, the sitemap) reports an absence when it finds nothing, but a crawl
+    // that fetched no page of the site never saw the site answer at all: it is
+    // down or walled, and a 500 or a challenge on /sitemap.xml says nothing
+    // about whether a sitemap exists. Skipped, never a finding.
+    if (rule.meta.scope === "site" && judgesRootResource(rule) && fetchedNoPages(ctx.site)) {
+      return {
+        meta: rule.meta,
+        checks: [
+          {
+            name: rule.meta.id,
+            status: "skipped",
+            message: "Skipped: no page of the site was fetched, so its root files were not judged",
+            skipReason: "no-pages-fetched",
+          },
+        ],
+      };
+    }
+
     // #1951: this rule already ran on a page sharing this one's template cluster
     // and declared its verdict a property of the template, so the sibling's checks
     // ARE this page's checks. Handed in pre-cloned and free of `pageUrl`, so the
@@ -291,7 +479,7 @@ export class RuleRunner {
       return { meta: rule.meta, checks: fanned };
     }
 
-    const ruleStart = performance.now();
+    const ruleStart = profileRules ? performance.now() : 0;
     let ruleError: unknown = null;
     let ruleCheckCount = 0;
 
@@ -299,6 +487,10 @@ export class RuleRunner {
     // output and logging are identical regardless of run() being sync or async.
     const finalize = (ruleChecks: CheckResult[]): RuleRunResult => {
       ruleCheckCount = ruleChecks.length;
+      // pub#274: the logger drops this line unless SQUIRREL_RULE_PROFILE is set,
+      // but its arguments (three filters and the payload) would still be built
+      // on every rule invocation, so build them only when profiling.
+      if (!profileRules) return { meta: rule.meta, checks: ruleChecks };
       const passed = ruleChecks.filter((c) => c.status === "pass").length;
       const failed = ruleChecks.filter((c) => c.status === "fail").length;
       const warned = ruleChecks.filter((c) => c.status === "warn").length;
@@ -322,6 +514,38 @@ export class RuleRunner {
 
     const errorChecks = (e: unknown): CheckResult[] => {
       ruleError = e;
+      if (e instanceof RuleTimeoutError) {
+        logger.warn("rule timed out", {
+          ruleId: rule.meta.id,
+          ...(scopeForLog ? { scope: scopeForLog } : { pageUrl: ctx.page.url }),
+          budgetMs: e.budgetMs,
+        });
+        const name = `${rule.meta.id}-error`;
+        const earlier = scopeForLog ? undefined : this.timedOutPageRules.get(rule.meta.id);
+        if (earlier) {
+          earlier.details.pages++;
+          return [
+            {
+              name,
+              status: "skipped",
+              message: `Rule error: ${e.message} (already reported for this audit)`,
+              skipReason: "rule-timed-out",
+              details: { timedOut: true, budgetMs: e.budgetMs, pages: earlier.details.pages },
+            },
+          ];
+        }
+        // `pages` is updated in place as later pages time out too.
+        const details = { timedOut: true, budgetMs: e.budgetMs, pages: 1 };
+        if (!scopeForLog) {
+          this.timedOutPageRules.set(rule.meta.id, {
+            details,
+            name: rule.meta.name,
+            category: rule.meta.category,
+            budgetMs: e.budgetMs,
+          });
+        }
+        return [{ name, status: "fail", message: `Rule error: ${e.message}`, details }];
+      }
       return [
         {
           name: `${rule.meta.id}-error`,
@@ -338,7 +562,7 @@ export class RuleRunner {
       () => {
         let outcome: ReturnType<Rule["run"]>;
         try {
-          outcome = rule.run(ctx);
+          outcome = runWithinBudget(() => rule.run(ctx), budgetMs);
         } catch (e) {
           return finalize(errorChecks(e));
         }
@@ -380,6 +604,7 @@ export class RuleRunner {
         const soft404 = detectSoft404({
           statusCode: page.statusCode,
           document: parsed.document,
+          errorShell: parsed.errorShell,
           title: parsed.meta?.title,
           h1Texts: parsed.h1?.texts,
           robotsMeta: parsed.meta?.robots,
@@ -399,6 +624,7 @@ export class RuleRunner {
         const siteMetadata = this.siteMetadata;
         const cloudResults = this.cloudResults;
         const intel = this.intel;
+        const probe = this.probe;
 
         // Sequential + sync fast-path: only the few async page rules pay a
         // microtask; sync rules run straight through, no Promise overhead (#521).
@@ -413,6 +639,7 @@ export class RuleRunner {
             siteMetadata,
             cloudResults,
             intel,
+            probe,
             options: getRuleOptions(rule, this.config),
           };
           // The substitution happens INSIDE this loop rather than by splicing
@@ -423,6 +650,7 @@ export class RuleRunner {
             rule,
             ctx,
             siteMetadata,
+            this.ruleTimeBudgetMs,
             undefined,
             fannedChecks?.get(rule.meta.id)
           );
@@ -445,7 +673,8 @@ export class RuleRunner {
   async runSiteRules(
     siteData: SiteData,
     siteQuery?: SiteQuery,
-    collectedSignals?: CollectedSiteSignals
+    collectedSignals?: CollectedSiteSignals,
+    endpointSurface?: EndpointSurface
   ): Promise<SiteRunResult> {
     return logger.withTraceAsync(
       "runSiteRules:exec",
@@ -460,6 +689,7 @@ export class RuleRunner {
         const cloudResults = this.cloudResults;
         const intel = this.intel;
         const entityMap = this.entityMap;
+        const probe = this.probe;
 
         // For site-scope rules, we need to provide page context: use the first
         // page or a dummy if no pages. Built once and shared (read-only).
@@ -481,6 +711,15 @@ export class RuleRunner {
             };
         const siteParsed = firstPage?.parsed ?? ({} as ParsedPage);
 
+        // Site rules' work grows with the site, so their budget does too. The
+        // streaming path carries no `siteData.pages`; its page count is on the
+        // query handle.
+        const budgetMs = siteRuleBudgetMs(
+          this.ruleTimeBudgetMs,
+          Math.max(siteData.pages.length, siteQuery?.pageCount() ?? 0),
+          this.siteRuleBudgetCapMs
+        );
+
         // Run rules with bounded concurrency; assemble in deterministic order.
         // runOneRule may return sync; Promise.resolve normalizes for the pool.
         const results = await mapWithConcurrency(
@@ -491,30 +730,105 @@ export class RuleRunner {
               site: siteData,
               siteQuery,
               collectedSignals,
+              endpointSurface,
               siteMetadata,
               cloudResults,
               intel,
               entityMap,
+              probe,
               options: getRuleOptions(rule, this.config),
             };
-            return Promise.resolve(this.runOneRule(rule, ctx, siteMetadata, "site"));
+            return Promise.resolve(
+              this.runOneRule(rule, ctx, siteMetadata, budgetMs, "site")
+            );
           }),
           this.ruleConcurrency
         );
 
+        // A site rule's page-time extractor that timed out on a page (streaming
+        // path, collected-signals.ts) is recorded against that rule and page here,
+        // the same shape as a timeout in the runner itself.
+        const collectedTimeouts = collectedTimeoutChecks(collectedSignals);
+
         const allChecks: CheckResult[] = [];
         const ruleResults = new Map<string, RuleRunResult>();
         for (let i = 0; i < siteRules.length; i++) {
-          const result = results[i];
+          let result = results[i];
+          const timeouts = collectedTimeouts.get(siteRules[i].meta.id);
+          // Not onto a rule that was gated off: it did not run, whatever the collector did.
+          if (timeouts && !result.checks.every((c) => c.status === "skipped")) {
+            result = { ...result, checks: [...result.checks, ...timeouts] };
+          }
           ruleResults.set(siteRules[i].meta.id, result);
           allChecks.push(...result.checks);
         }
+
+        // One summary per page rule that timed out in this audit, carrying the
+        // final count of pages it did not check. The per-page checks are emitted as
+        // each page finishes, so only this one can hold the total.
+        allChecks.push(...this.timeoutSummaryChecks());
+        this.resetAudit();
 
         return { checks: allChecks, ruleResults };
       },
       () => ({})
     );
   }
+
+  /**
+   * Forget which page rules have timed out, so the next audit on this runner
+   * reports its own first timeout as a fail. A runner should serve one audit;
+   * this is for a caller that reuses one.
+   */
+  resetAudit(): void {
+    this.timedOutPageRules.clear();
+  }
+
+  private timeoutSummaryChecks(): CheckResult[] {
+    return [...this.timedOutPageRules].map(([ruleId, t]) => {
+      const pages = t.details.pages;
+      const unchecked = `${pages} page${pages === 1 ? "" : "s"} not checked`;
+      return {
+        name: `${ruleId}-timeouts`,
+        status: "info" as const,
+        message:
+          t.category === "security"
+            ? `${t.name}: ${unchecked} because it exceeded its ${t.budgetMs} ms time budget. A timed-out security rule did not check those pages, so no finding there is not a clean result`
+            : `${t.name}: ${unchecked} because it exceeded its ${t.budgetMs} ms time budget`,
+        details: { timedOut: true, budgetMs: t.budgetMs, pagesNotChecked: pages },
+      };
+    });
+  }
+}
+
+/** `ruleId -> error checks` for the page-time extractors that ran past their
+ *  budget: one check per rule (against the first page that timed out, with the
+ *  count of pages in `details.pages`), not one per page. */
+function collectedTimeoutChecks(
+  collected: CollectedSiteSignals | undefined
+): Map<string, CheckResult[]> {
+  const byRule = new Map<string, CheckResult[]>();
+  for (const page of collected?.pages ?? []) {
+    if (!page.timedOut) continue;
+    const { budgetMs, ruleIds } = page.timedOut;
+    for (const ruleId of ruleIds) {
+      const existing = byRule.get(ruleId)?.[0];
+      if (existing) {
+        (existing.details as { pages: number }).pages++;
+        continue;
+      }
+      byRule.set(ruleId, [
+        {
+          name: `${ruleId}-error`,
+          status: "fail",
+          message: `Rule error: ${new RuleTimeoutError(budgetMs).message}`,
+          pageUrl: page.url,
+          details: { timedOut: true, budgetMs, pages: 1 },
+        },
+      ]);
+    }
+  }
+  return byRule;
 }
 
 // Convenience function to create runner with defaults. `scope` threads the

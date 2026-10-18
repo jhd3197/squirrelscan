@@ -9,11 +9,30 @@ export const RESOURCE_SIZE_LIMITS = {
   JS_WARN_BYTES: 250 * 1024, // 250KB
   JS_ERROR_BYTES: 1 * 1024 * 1024, // 1MB
   MAX_RESOURCES_TO_CHECK: 500, // Limit to prevent resource exhaustion
+  // #703: third-party scripts, stylesheets and fonts are status-checked for
+  // reliability/broken-resources only. Capped per kind well below
+  // MAX_RESOURCES_TO_CHECK so an audit sends at most 150 extra third-party requests.
+  MAX_EXTERNAL_ASSETS_TO_CHECK: 50,
   CHECK_CONCURRENCY: 5,
   CHECK_TIMEOUT_MS: 10000,
   RETRY_DELAY_MS: 1000,
   MAX_RETRIES: 2,
+  // #470: the image pool reads this much of each same-site image to parse its
+  // natural dimensions, in one ranged GET instead of a HEAD. 500 images x 32 KiB
+  // bounds the extra transfer at about 16 MB an audit.
+  IMAGE_HEADER_BYTES: 32 * 1024,
 } as const;
+
+// The `error` an asset fetch records when the shared fetch budget skipped it
+// (budget spent or host tarpitting, #1252) instead of sending a request. Rules
+// read it as "not checked", never as a network failure (#703).
+export const ASSET_FETCH_SKIPPED_ERROR = "skipped";
+
+// The `error` an asset fetch records when the egress policy refused the URL or
+// one of its redirect hops: a third-party asset on a private, loopback,
+// link-local or metadata address (#703), or a same-site fetch redirected off
+// the site (#710). The refused hop was never sent; rules read it as "not checked".
+export const ASSET_FETCH_REFUSED_ERROR = "refused by the egress policy";
 
 // Sub-resource compression thresholds (#9). Compression helps from ~1KB up, but
 // a low bar turns every small uncompressed asset into a finding. 100KB matches
@@ -453,14 +472,14 @@ export type OrgLogoContentType = (typeof ORG_LOGO_CONTENT_TYPES)[number];
 
 // Public rule/category counts for marketing and doc copy that can't read the
 // live catalog (MDX, plugin manifests, skill files, MCP tool descriptions).
-// PUBLIC_RULE_COUNT_FLOOR is deliberately rounded DOWN from the live total
-// (currently 264) so copy doesn't need a bump on every rule add/remove;
-// PUBLIC_CATEGORY_COUNT tracks exactly since categories change far less often.
-// The hosted catalog drift guard fails if the floor exceeds the live count.
-// Bump both by hand when the
+// PUBLIC_RULE_COUNT_FLOOR is deliberately rounded DOWN to the nearest 50 from the
+// live total (currently 309 enabled rules) so copy doesn't need a bump on every
+// rule add/remove. PUBLIC_CATEGORY_COUNT tracks exactly since categories change
+// far less often. The rule-count-consistency guard fails if the floor exceeds the
+// live count or the live count reaches floor + 50. Bump both by hand when the
 // live count moves meaningfully past the floor. #1019 #986 #981
-export const PUBLIC_RULE_COUNT_FLOOR = 260;
-export const PUBLIC_CATEGORY_COUNT = 21;
+export const PUBLIC_RULE_COUNT_FLOOR = 300;
+export const PUBLIC_CATEGORY_COUNT = 22;
 
 // Hosted MCP (#113). These appear in the well-known manifests, the /add/<agent>
 // install redirects, and every /for/<tool> setup snippet — a stale copy in a
@@ -487,3 +506,99 @@ export type FeedbackCategory = (typeof FEEDBACK_CATEGORIES)[number];
 
 export const FEEDBACK_SOURCES = ["website", "dashboard", "cli", "api", "mcp"] as const;
 export type FeedbackSource = (typeof FEEDBACK_SOURCES)[number];
+
+// Response headers technology detection reads (pub#871): the tech-detect
+// fingerprints and the WAF providers the technologies section reports. A local
+// audit detects from the page records the crawler stores, so the crawler keeps
+// these beside its curated headers (Set-Cookie as cookie names only, see
+// `techHeaders` in core-contracts). audit-engine's tests fail when a
+// fingerprint or WAF provider names a header missing here.
+export const TECH_DETECT_HEADER_NAMES = [
+  "cdn-pullzone",
+  "cf-cache-status",
+  "cf-ray",
+  "fly-request-id",
+  "server",
+  "vary",
+  "via",
+  "x-akamai-request-id",
+  "x-akamai-transformed",
+  "x-amz-cf-id",
+  "x-amz-cf-pop",
+  "x-amz-request-id",
+  "x-amzn-waf-action",
+  "x-aspnet-version",
+  "x-backend-server",
+  "x-cdn",
+  "x-datadome",
+  "x-dd-b",
+  "x-drupal-cache",
+  "x-ec-debug",
+  "x-fastly-request-id",
+  "x-generator",
+  "x-ghost-cache-status",
+  "x-github-request-id",
+  "x-id",
+  "x-id-fe",
+  "x-iinfo",
+  "x-ik-request-id",
+  "x-kpsdk-cd",
+  "x-kpsdk-ct",
+  "x-kpsdk-r",
+  "x-nf-request-id",
+  "x-powered-by",
+  "x-provided-by",
+  "x-px-gt",
+  "x-px-pp",
+  "x-render-origin-server",
+  "x-served-by",
+  "x-shopify-stage",
+  "x-sucuri-cache",
+  "x-sucuri-id",
+  "x-umbraco-version",
+  "x-varnish",
+  "x-vercel-cache",
+  "x-vercel-id",
+] as const;
+/** Longest value kept per header in TECH_DETECT_HEADER_NAMES. */
+export const TECH_DETECT_HEADER_MAX_CHARS = 512;
+/** Most cookie names kept for detection from one response's Set-Cookie headers. */
+export const TECH_DETECT_MAX_COOKIE_NAMES = 50;
+/**
+ * The listed headers detection only tests for presence: request ids and bot
+ * protection tokens. The crawler keeps "1" for them, not the value, so a token
+ * is never stored or sent on. A test fails when a reader starts to match one
+ * of them by value, or a new presence-only reader is not listed
+ * (packages/audit-engine/tests/tech-detect-header-names-871.test.ts).
+ */
+export const TECH_DETECT_PRESENCE_HEADERS: ReadonlySet<string> = new Set([
+  "cdn-pullzone",
+  "cf-cache-status",
+  "cf-ray",
+  "fly-request-id",
+  "x-akamai-request-id",
+  "x-akamai-transformed",
+  "x-amz-cf-id",
+  "x-amz-cf-pop",
+  "x-amz-request-id",
+  "x-amzn-waf-action",
+  "x-datadome",
+  "x-dd-b",
+  "x-ec-debug",
+  "x-fastly-request-id",
+  "x-github-request-id",
+  "x-iinfo",
+  "x-ik-request-id",
+  "x-kpsdk-cd",
+  "x-kpsdk-ct",
+  "x-kpsdk-r",
+  "x-nf-request-id",
+  "x-px-gt",
+  "x-px-pp",
+  "x-render-origin-server",
+  "x-shopify-stage",
+  "x-sucuri-cache",
+  "x-sucuri-id",
+  "x-vercel-cache",
+  "x-vercel-id",
+]);

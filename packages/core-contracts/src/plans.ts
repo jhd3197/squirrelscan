@@ -36,6 +36,10 @@ export const PLANS: Record<PlanId, PlanDefinition> = {
     maxOrgs: 1,
     maxWebsites: 100,
     maxMembers: 1,
+    // Most pages one audit renders at once. The hosted runner holds a cloud
+    // audit to it (squirrelscan/repo#2480) and the CLI clamps to it. Before
+    // #2480 the cloud ignored it: rendered crawls ran at the crawler's default
+    // width (5, or 8 under the authorised profile) on every plan.
     renderConcurrency: 1,
     // #1704: scheduling is no longer the paid line. A weekly audit of one site
     // burns roughly 250-300 of the 500 monthly credits above, so the free grant
@@ -49,6 +53,9 @@ export const PLANS: Record<PlanId, PlanDefinition> = {
     // Free on purpose: custom headers are how you audit a staging site behind
     // auth, which is evaluation, not a paid job.
     customHeaders: true,
+    // Pro and up (squirrelscan/repo#2772): alerts about new broken links are
+    // ongoing monitoring, not evaluation.
+    brokenLinkAlerts: false,
     // #1020 ladder: matches Screaming Frog's free-tier crawl cap and today's
     // `full` coverage preset ceiling. Held at 500 through #1028's raise: free
     // audits run on the 4 GiB container class, and a 10,000-page audit retains
@@ -83,6 +90,7 @@ export const PLANS: Record<PlanId, PlanDefinition> = {
     maxScheduledWebsites: -1,
     scheduleFrequencies: SCHEDULE_FREQUENCIES,
     customHeaders: true,
+    brokenLinkAlerts: true,
     // #1028 ladder: unchanged at 2,000. Pro is a single-seat plan for ordinary
     // sites; Team is where the raised ceiling is the product.
     maxPagesPerAudit: 2000,
@@ -113,6 +121,7 @@ export const PLANS: Record<PlanId, PlanDefinition> = {
     maxScheduledWebsites: -1,
     scheduleFrequencies: SCHEDULE_FREQUENCIES,
     customHeaders: true,
+    brokenLinkAlerts: true,
     // #1028 ladder: Team is where large-site auditing lives. 10,000 is the
     // measured ceiling of the paid standard-4 container class (#1869): a
     // 10,000-page audit retains ~4.4 GB, which fits 8/12 GiB and does not fit
@@ -155,11 +164,13 @@ export const PLANS: Record<PlanId, PlanDefinition> = {
     // abuse cap is a hosted-tier guard; a contracted org is not that risk.
     maxWebsites: -1,
     maxMembers: -1,
+    // At least Team's, like maxPagesPerAudit below.
     renderConcurrency: 10,
     scheduledCrawls: true,
     maxScheduledWebsites: -1,
     scheduleFrequencies: SCHEDULE_FREQUENCIES,
     customHeaders: true,
+    brokenLinkAlerts: true,
     // At least Team's ceiling, never below it (#1028) — a contracted plan that
     // audited fewer pages than the tier under it would be a pricing bug. Kept
     // as its own literal rather than a reference to Team's so a Team-tier
@@ -184,7 +195,7 @@ export const SELF_SERVE_PLAN_IDS: readonly PlanId[] = (Object.keys(PLANS) as Pla
 // Accepts a raw string (DB columns are plain text) and falls back to the free
 // plan for any unknown id — callers never need to cast or null-check.
 export function getPlan(planId: string): PlanDefinition {
-  return PLANS[planId as PlanId] ?? PLANS.free;
+  return Object.hasOwn(PLANS, planId) ? PLANS[planId as PlanId] : PLANS.free;
 }
 
 // Tier hierarchy: free < starter < team < enterprise. Keep in sync with PlanId —

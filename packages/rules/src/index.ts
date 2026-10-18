@@ -2,21 +2,35 @@
 
 export * from "./types";
 export * from "./collected-signals";
+export * from "./endpoint-surface";
 export * from "./categories";
 export * from "./filter";
 export * from "./runner";
+export * from "./rule-budget";
+export * from "./probe-budget";
 export * from "./merge";
 export * from "./fold";
 export * from "./resolution";
 export * from "./loader";
+export * from "./rule-options-check";
 export * from "./plugins";
 export * from "./cloud";
+export * from "./discovery-probes";
 export {
   APPLICABILITY_MIN_CONFIDENCE,
   type ApplicabilityVerdict,
   ruleApplies,
 } from "./applicability";
 export { setRequestAsync, setLlmCall } from "./tools";
+// Which pages count as noindex, and the homepage exception, shared by the runner
+// gate, the site rules and audit-engine's SiteData assembly (pub#457).
+export {
+  isSiteIndexable,
+  noindexSource,
+  skipsNoindexPages,
+  type NoindexSource,
+  type SiteIndexablePage,
+} from "./shared/noindex";
 // Page-time extractor for the social/asset-divergence page_features columns —
 // audit-engine's extractPageFeatures calls the SAME code the rule's legacy path
 // does, so the stored scalars and the re-derived ones can never diverge (#1371).
@@ -47,10 +61,12 @@ export * as schema from "./schema";
 export * as security from "./security";
 export * as integrity from "./integrity";
 export * as perf from "./performance";
+export * as reliability from "./reliability";
 export * as social from "./social";
 export * as crawl from "./crawl";
 export * as url from "./url";
 export * as mobile from "./mobile";
+export { listWebAppManifestIconUrls, WEB_APP_MANIFEST_ICON_LIMIT } from "./mobile/web-app-manifest";
 export * as legal from "./legal";
 export * as local from "./local";
 export * as video from "./video";
@@ -66,6 +82,7 @@ export const RULE_MODULES = [
   "security",
   "integrity",
   "perf",
+  "reliability",
   "social",
   "crawl",
   "url",

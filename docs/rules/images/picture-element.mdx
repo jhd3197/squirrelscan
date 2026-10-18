@@ -19,6 +19,8 @@ The rule runs on every crawled page over every `<picture>` element. It emits a s
 
 This is a structural check. It does not look at whether the `<source>` candidates are valid or whether their types are correct.
 
+Elements inside `<noscript>` are skipped: a browser with scripting enabled reads `<noscript>` content as plain text, so nothing in it loads or renders. See [content inside noscript](/rules#content-inside-noscript).
+
 ## How to fix it
 
 ```html
@@ -60,8 +62,9 @@ disable = ["images/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["images/picture-element"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
@@ -79,7 +82,7 @@ Images findings ship in every audit next to the SEO, performance and agent exper
 
 ## Check your site
 
-Run `squirrel audit https://example.com` and open the Images section of the report. Every picture element missing its fallback is listed by its first source. Local audits are free.
+Run `squirrel audit https://example.com` and open the Images section of the report. Every picture element missing its fallback is listed by its first source. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">

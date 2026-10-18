@@ -22,6 +22,7 @@ exclude = []
 allow_query_params = []
 drop_query_prefixes = ["utm_", "gclid", "fbclid"]
 respect_robots = false
+disable_discovery_probes = false
 incremental = true
 breadth_first = true
 max_prefix_budget = 0.25
@@ -37,7 +38,7 @@ follow_redirects = true
 **Default:** `100`
 **Range:** `1` to `10000` (capped by CLI)
 
-Maximum number of pages to crawl per audit. The literal config default is `100`, but when `max_pages` isn't explicitly set the effective budget follows the [coverage mode](/crawl): `quick` = 25, `surface` = 100, `full` = 500. The default coverage mode is auth-aware: any signed-in account (free or Pro) defaults to `surface`, only anonymous runs default to `quick` (see [Coverage Modes](/cli/audit#coverage-modes)).
+Maximum number of pages to crawl per audit. The literal config default is `100`, but when `max_pages` isn't explicitly set the effective budget follows the [audit level](/guides/audit-levels): `quick` = 25, `surface` = 100, `full` = 500. The default level is auth-aware: any signed-in account (free or Pro) defaults to `surface`, signed-out runs default to `quick` (see [Audit levels](/cli/audit#audit-levels)). A value other than `100` changes the level's page budget, and the audit becomes custom.
 
 **Examples:**
 
@@ -58,19 +59,19 @@ max_pages = 2000
 squirrel audit https://example.com -m 100
 ```
 
-The resolution order is **`--max-pages` / `-m` > non-default `[crawler] max_pages` > coverage-mode default** (`quick` 25, `surface` 100, `full` 500).
+The resolution order is **`--max-pages` / `-m` > non-default `[crawler] max_pages` > the level's page budget** (`quick` 25, `surface` 100, `full` 500). `max_pages = 100` reads as unset because `squirrel init` writes it into every new config.
 
-**Note:** The CLI enforces a hard cap (currently 10,000 pages) regardless of config or plan. Local audits are free, and this cap never changes based on your account. When a crawl stops because it hit the limit, the CLI prints a hint naming `--max-pages` and the cap; see [Hitting the page limit](/crawl#hitting-the-page-limit).
+**Note:** The CLI enforces a hard cap (currently 10,000 pages) regardless of config or plan. Signed-out local audits cost nothing, and this cap never changes based on your account. When a crawl stops because it hit the limit, the CLI prints a hint naming `--max-pages` and the cap; see [Hitting the page limit](/crawl#hitting-the-page-limit).
 
-**Cloud audits are different:** an audit dispatched from the dashboard (on-demand or [scheduled](/cloud/scheduled-audits)) is capped per plan instead - see [max pages per cloud audit](/cloud/credits#max-pages-per-cloud-audit).
+**Cloud audits are different:** an audit dispatched from the dashboard (on-demand or [scheduled](/cloud/scheduled-audits)) reads the pages its website's level asks for, lowered to your plan's ceiling when it asks for more - see [max pages per cloud audit](/cloud/credits#max-pages-per-cloud-audit) and [Limits](/guides/audit-levels#limits).
 
 ### `coverage`
 
 **Type:** `string`
 **Default:** unset (auth-aware for `audit`; always `quick` for `crawl`)
-**Values:** `quick`, `surface`, `full`
+**Values:** `quick`, `surface`, `full` (`fast` is read as `quick`)
 
-Default [coverage mode](/crawl) for crawls and audits. When unset, `audit` picks the mode by auth state (`surface` logged in, `quick` anonymous) while `crawl` always uses `quick`. Each mode sets the default page budget (`quick` 25, `surface` 100, `full` 500) and controls link discovery and cloud enrichment.
+The default [audit level](/guides/audit-levels) for crawls and audits. The key keeps its older name. When unset, `audit` picks the level by auth state (`surface` signed in, `quick` signed out) while `crawl` always uses `quick`. The level sets the page budget (`quick` 25, `surface` 100, `full` 500), how pages are picked, the cloud checks, rendering, external link checks and probing. Any other value fails config validation with the list of levels.
 
 ```toml
 [crawler]
@@ -79,7 +80,7 @@ coverage = "full"
 
 **CLI override:**
 ```bash
-squirrel audit https://example.com -C surface
+squirrel audit https://example.com --level surface
 ```
 
 ### `max_depth`
@@ -223,6 +224,13 @@ fetched, and the crawl finishes with the other hosts. Rate-limited URLs are neve
 reported as broken links or 4xx pages: their status is unknown, so they are
 listed in an informational finding and excluded from scoring.
 
+The report also says how much of the site the crawl never reached: the status is
+**partial**, and the summary names the pages the host refused and the URLs that
+were discovered but never fetched. When a site's known pages are counted, those
+unfetched URLs are included, so a throttled run never reads as full coverage.
+
+In the JSON report this is the `rateLimited` object: `pages` (refused fetches), `hosts`, and `unfetched` (URLs abandoned or still queued when the crawl stopped). `unfetched` is absent unless the run was throttled.
+
 **Examples:**
 
 Give a slow host longer to recover:
@@ -333,7 +341,7 @@ runs at raised concurrency with no per-host delay.
 `squirrel crawl` never renders, so the fast path applies to every loopback crawl.
 For `squirrel audit` it applies to **plain-HTTP crawls only**: anonymous runs,
 `--offline`, or `--http` / `--render-mode off`. When cloud browser rendering is
-active (the default for signed-in users on `surface` / `full` coverage), each
+active (the default for signed-in users at the `surface` and `full` levels), each
 page is a credit-priced render governed by your plan's render concurrency, so the
 loopback boost does not apply there. On either command, it's also suppressed
 when you set `concurrency`, `per_host_concurrency`, or `per_host_delay_ms`
@@ -342,6 +350,34 @@ engaged.
 
 ---
 
+## Compressed responses
+
+Pages are requested with `Accept-Encoding: gzip, deflate, br, zstd`, unless your
+[`headers`](#headers) set another value, and squirrel decodes `gzip`, `br`,
+`deflate` and `zstd` bodies itself, as it reads them. A read stops at its size
+limit whether the body arrived compressed or not: 10 MB of decoded HTML for a
+page, less for robots.txt, llms.txt and the other root files. A response that
+would inflate past the limit, a compression bomb included, is cut at the limit
+rather than decoded in full, so it costs about what an uncompressed response
+over the limit costs. Bytes a server appends after a complete compressed body
+are ignored, as a browser ignores them, and a `gzip` body is read to the end of
+its first member.
+
+## Responses that cannot be decoded
+
+If a server declares a `content-encoding` (`br`, `gzip`) that its response body
+does not honour, or the compressed body is cut short, the body cannot be read.
+The crawl records that page as failed with a message naming the URL and the declared encoding, for example
+`Could not decode response body from https://example.com/a (content-encoding: gzip): gzip body does not decode (no gzip header)`.
+The CLI lists those messages after the crawl, the first five and a count of the rest, so you can see which pages were lost without opening the crawl database.
+
+The page is missing from the analysis, so a rule that reports an absence cannot
+tell it from a page that really lacks the thing. When any page is lost this way
+the report status is **partial** and its reason counts them, for example
+`2 pages could not be decoded (bad content-encoding)`. The pages that were read
+are scored normally. The fix is on the server: serve the body with the encoding
+it declares, or stop declaring one.
+
 ## URL filtering
 
 ### `include`
@@ -349,7 +385,7 @@ engaged.
 **Type:** `string[]`
 **Default:** `[]` (empty = include all URLs from seed domain)
 
-URL patterns to include. If set, **only** matching URLs are crawled.
+URL patterns to include. If set, **only** matching URLs are crawled, and only within the crawl's host scope unless a pattern is absolute (see **Scope** below).
 
 **Pattern Syntax:**
 
@@ -393,7 +429,27 @@ Specific file types:
 include = ["*.html", "*.htm"]
 ```
 
-**Important:** When `include` is set, it **overrides** the `domains` setting in `[project]`.
+**Scope:** A path-only pattern narrows the crawl **within** its host scope: a URL
+must match the pattern and also be on the seed's host (or on a host allowed by
+`domains` in `[project]`). So `include = ["/blog/*"]` means the blog section of
+your site, and a third-party URL whose path starts `/blog/` is not crawled.
+Setting `domains` alongside `include` is honoured the same way.
+
+An absolute pattern (one that starts with `http://` or `https://`) names its host,
+so a URL that matches it is crawled even when that host is outside the scope. That
+is the way to reach another host on purpose:
+
+```toml
+[crawler]
+include = ["/blog/*", "https://docs.example.org/*"]
+```
+
+The exception is an explicit `domains` list in `[project]`, which is a hard
+allowlist. If `domains` is set and does not list the host an absolute pattern
+names, that URL is not crawled, and the crawl warns once for each include and host
+(`include "https://docs.example.org/*" matches docs.example.org, which allowedDomains
+does not list`). Add the host to `domains`, or remove `domains`, to let the include
+reach it.
 
 <Note>
   Cloud audits don't read this file. The same two lists live on the dashboard at
@@ -480,36 +536,46 @@ back out.
 ### `allow_query_params`
 
 **Type:** `string[]`
-**Default:** `[]` (empty = drop all query params for deduplication)
+**Default:** `[]` (empty list keeps every query parameter except known tracking parameters)
 
 Query parameters to preserve during URL deduplication.
 
 **Why this matters:**
 
-URLs are deduplicated before crawling:
-- `/page?id=1&utm_source=google` → `/page?id=1` (utm dropped)
-
-Without configuration, all query params are dropped except those in `allow_query_params`.
+The crawler deduplicates URLs before the crawl. The empty list keeps non-tracking parameters and drops known tracking parameters:
+- `/page?id=1&utm_source=google` → `/page?id=1` (`id` is kept, `utm_source` is a tracking prefix)
+- `https://example.com/products?category=shoes` stays `https://example.com/products?category=shoes`
+- `https://example.com/products?category=shoes&utm_source=google` becomes `https://example.com/products?category=shoes`
+- `https://example.com/products?fbclid=abc` becomes `https://example.com/products` with no query
 
 **Examples:**
 
-Preserve pagination:
+Keep `page` in any case:
 ```toml
 [crawler]
 allow_query_params = ["page"]
 ```
 
-Preserve filters:
+This keeps `page` in any case. It drops other non-tracking names such as `category`. The crawler still drops tracking names.
+
+- `?page=2&category=shoes` becomes `?page=2`
+- `?Page=2` is kept with its original spelling
+
+Keep these exact names:
 ```toml
 [crawler]
 allow_query_params = ["category", "sort", "filter", "q"]
 ```
 
-Preserve all query params:
+This keeps `category`, `sort`, `filter`, and `q`. It drops every other non-tracking name, including `page`.
+
+`*` is a literal name:
 ```toml
 [crawler]
 allow_query_params = ["*"]
 ```
+
+A non-empty list is an exact-name allow list. `*` matches only a parameter named `*`. `*` does not mean all parameters. The empty default keeps non-tracking parameters.
 
 **Use case:**
 
@@ -524,8 +590,12 @@ This preserves:
 - `/products?category=shoes&page=2` ✓
 
 This drops:
+- `/products?color=red` ✗ (`color` is outside the list)
 - `/products?utm_source=google` ✗ (becomes `/products`)
 - `/products?gclid=abc123` ✗ (becomes `/products`)
+- `/products?page=2&utm_source=google` becomes `/products?page=2`, even if `utm_source` is added to the allow list
+
+A name outside that list, such as `color`, is dropped. A tracking name is dropped even when the allow list includes it.
 
 ---
 
@@ -534,30 +604,16 @@ This drops:
 **Type:** `string[]`
 **Default:** `["utm_", "gclid", "fbclid"]`
 
-Query parameter prefixes to always drop, even if in `allow_query_params`.
+URL normalization ignores this list and always strips the built-in tracking set, including when the list is empty.
 
-**Default tracking params dropped:**
-- `utm_*` - Google Analytics (utm_source, utm_medium, etc.)
+The built-in tracking set is larger than the schema default. It includes:
+- `utm_` - names such as `utm_source` and `utm_medium`
 - `gclid` - Google Ads
 - `fbclid` - Facebook Ads
 
-**Examples:**
+**Example:**
 
-Drop more tracking params:
-```toml
-[crawler]
-drop_query_prefixes = [
-  "utm_",
-  "gclid",
-  "fbclid",
-  "mc_",       # Mailchimp
-  "_ga",       # Google Analytics
-  "ref",       # Referrer
-  "source"     # Generic source tracking
-]
-```
-
-Drop nothing:
+An empty list still strips the built-in tracking set:
 ```toml
 [crawler]
 drop_query_prefixes = []
@@ -692,8 +748,12 @@ user_agent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit
 **Type:** `table` (map of header name → value)
 **Default:** `{}` (no custom headers)
 
-Custom HTTP request headers attached to **every** crawl request: pages, assets,
-`robots.txt`, sitemaps, `llms.txt`, and markdown probes. Use this to authorize
+Custom HTTP request headers attached to **every** crawl request: pages, assets
+on the audited host and its subdomains, `robots.txt`, sitemaps, `llms.txt`, and
+markdown probes. The status checks
+[reliability/broken-resources](/rules/reliability/broken-resources) sends to
+scripts, stylesheets and fonts on other hosts never carry them, and neither
+does the status check of a sitemap URL on another host. Use this to authorize
 the crawler with schemes that require signed headers, such as
 [Web Bot Auth](/guides/web-bot-auth) (used by Shopify and Cloudflare).
 
@@ -732,11 +792,15 @@ end-to-end.
   sourced from secrets.
 </Warning>
 
-**Cloud audits:** applying custom headers to dashboard **cloud** audits is a
-**Pro** feature. Set them per-website under **Settings → Crawl → Custom request
-headers**; free plans receive `403 upgrade_required`. The render worker applies
-them to the headless browser via `setExtraHTTPHeaders`, so they ride every
-request the rendered page makes.
+**Cloud audits:** custom headers for dashboard **cloud** audits are available on
+[every plan](/dashboard/crawl-settings#custom-request-headers), Free included.
+Set them per-website under **Settings → Crawl → Custom request headers**. Plain
+HTTP requests carry them. For pages rendered in the cloud browser, by cloud
+audits and by signed-in CLI audits, see
+[rendering and custom headers](/cloud/firewall#rendering-and-custom-headers).
+A signed-in CLI audit's cloud renders never carry `-H` headers, so use
+`--http` when the site is only reachable with them. A cloud audit's renders
+carry the website's custom headers.
 
 ---
 
@@ -811,6 +875,118 @@ defaults to off, matching the CLI default above.
 
 ---
 
+## Discovery probes
+
+Before the first page, squirrelscan asks the site for a set of files that agents
+look for. These are the discovery probes, and the
+[agent experience rules](/rules/ax) read them: whether you publish an
+`llms.txt`, serve Markdown, expose an MCP server card or an OpenAPI spec, and
+whether AI crawlers get the same homepage a browser does.
+
+| Probe | Requests | Read by |
+|---|---|---|
+| llms.txt | `/llms.txt`, `/llms-full.txt` | `ax/llms-txt`, `ax/agents-md` |
+| Markdown | `/` with `Accept: text/markdown`, `/index.md` | `ax/markdown-response` |
+| Agent access | `/` fetched as a browser, as GPTBot and as Claude-User | `ax/agent-blocking`, `ax/pay-per-crawl` |
+| Agent manifests | `/.well-known/mcp/server-card.json`, `/.well-known/mcp.json`, `/.well-known/mcp`, `/.well-known/mcp-server`, `/.well-known/agent-card.json`, `/.well-known/agent-skills/index.json`, `/ai-plugin.json`, `/.well-known/ai-plugin.json` | `ax/well-known-agent` |
+| API and OAuth discovery | `/.well-known/api-catalog`, `/openapi.json`, `/swagger.json`, `/api/openapi.json`, `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource` | `ax/api-discovery` |
+| AGENTS.md | `/AGENTS.md`, `/agents.md`, `/.well-known/agents.md`, `/docs/AGENTS.md` | `ax/agents-md` |
+| llms.txt elsewhere | `/.well-known/llms.txt`, `/docs/llms.txt` | `ax/llms-txt` |
+| RSL licensing | `/robots.txt` again, for its `License:` lines, plus each license document it names | `ax/rsl-license` |
+
+That is 28 requests on most sites. `robots.txt`, sitemap discovery and the page
+you asked to audit are not probes: the crawl needs them, so they always run.
+
+### `disable_discovery_probes`
+
+**Type:** `boolean`
+**Default:** `false`
+
+Set to `true` to send no discovery probes at all.
+
+```toml
+[crawler]
+disable_discovery_probes = true
+```
+
+**CLI override:**
+```bash
+squirrel audit https://example.com --disable-discovery-probes
+```
+
+The flag wins over the config for one run, in both directions:
+`--disable-discovery-probes` turns the probes off, and
+`--disable-discovery-probes=false` sends them even when the config says `true`.
+
+Some servers ban a client for asking for these paths. A common fail2ban
+"sensitive files" jail reads a request for `/swagger.json` or `/openapi.json`
+as an attack and bans the auditing IP, so every request after it gets
+connection refused and the audit fails right after it starts. Turn the probes
+off for that site and the crawl goes through.
+
+### Or let squirrelscan through
+
+To keep the checks, make an exception for the audit instead.
+[Firewall and WAF exceptions](/cloud/firewall) covers the options for cloud
+audits. A CLI audit comes from your own machine, so for one of those:
+
+- **fail2ban or another log-based jail:** add your own IP to the jail's
+  `ignoreip`.
+- **A WAF or bot protection:** send a secret header with the audit and skip
+  the rule when it matches:
+
+  ```bash
+  squirrel audit https://example.com -H "X-Squirrelscan-Auth: <long random value>"
+  ```
+
+  Or set it under [`headers`](#headers). The probes, `robots.txt`, sitemaps
+  and every page carry it. The checks that resolve your start URL before the
+  crawl begins do not.
+
+### Probes follow your rules
+
+A probe is only sent when a rule that reads it is going to run. Skip the rules
+and their requests go with them, with no other setting:
+
+```bash
+# No discovery probes: every rule that reads one is skipped
+squirrel audit https://example.com --rule-exclude ax
+
+# Everything except the OpenAPI, Swagger and OAuth paths
+squirrel audit https://example.com --rule-exclude ax/api-discovery
+```
+
+`[rules] disable` in `squirrel.toml` works the same way.
+
+### What the report says
+
+When a rule's probe was not sent, or a probe for a file went out and got no
+answer (a refused connection or a timeout), the rule reports **not checked**,
+with the value `not-checked`: no answer is not evidence the file is missing.
+Those results never count as a failure and are not scored. Two rules keep their
+own reading of an unanswered request: `ax/agent-blocking` calls an AI-crawler
+fetch with no answer inconclusive, and `ax/rsl-license` still reports a license
+document your robots.txt names, but that could not be fetched, as a broken
+reference.
+
+### Pacing
+
+Discovery probes wait their turn behind the same per-host limits as pages: at
+most [`per_host_concurrency`](#per_host_concurrency) at once, with starts at
+least [`per_host_delay_ms`](#per_host_delay_ms) apart. When cloud rendering
+limits how many pages load at once, the probes still use these two settings,
+since they are plain requests. A robots.txt `Crawl-delay` applies to pages
+only. For a slow or touchy site, `per_host_concurrency = 1` sends them one at a
+time, which is usually gentler than a longer delay alone.
+
+The probes share one time budget with the start page and `robots.txt` reads: 45
+seconds, or three times `timeout_ms` when that is shorter. They go out in the
+order of the table above, so with a long `per_host_delay_ms` the last ones in it
+may not fit. Those are skipped and reported as not checked, and the crawl carries
+on.
+
+---
+
 ## Crawling politely & re-scanning efficiently
 
 squirrelscan is designed to be a good guest on the sites it audits. Two
@@ -870,6 +1046,9 @@ the rate-limit and robots controls documented above:
 - `per_host_concurrency`: cap simultaneous requests per host.
 - `delay_ms` / `concurrency`: global pacing.
 - `incremental`: skip re-downloading unchanged pages on repeat audits.
+- `disable_discovery_probes`: turn off the pre-crawl requests for agent files
+  when the site's firewall objects to them (see
+  [Discovery probes](#discovery-probes)).
 
 A `Crawl-delay` directive in the target's `robots.txt` overrides
 `per_host_delay_ms` only when `respect_robots = true`, and is capped at 2

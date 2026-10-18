@@ -11,13 +11,15 @@ It is the band just above an orphan. Nothing is broken, and the single link make
 
 ## What squirrel checks
 
-The rule is site-wide and reads the same dofollow inbound counts as `links/orphan-pages`. The homepage is never flagged, and neither is any URL matching an exclusion pattern. It emits a single check named `weak-internal-links`:
+The rule is site-wide and reads the same dofollow inbound counts as `links/orphan-pages`. The homepage is never flagged, and neither is the page the audit started from (the URL you gave and where its redirects landed) or any URL matching an exclusion pattern. It emits a single check named `weak-internal-links`:
 
 - Skipped when fewer than two pages were crawled. Message: `Insufficient pages for internal link analysis`.
 - Warn when any page has exactly one inbound internal link. Message: `12 page(s) have only 1 internal link`. Severity warning, weight 3.
 - Pass otherwise. Message: `All pages have sufficient internal link support`.
 
 The count of one is fixed and not configurable. With `links/orphan-pages` at its default threshold of 2, a page with one inbound link is reported by both rules.
+
+When the page's links carry a link section (see [Page Classifier](/configuration/classifier)), each item says where its one link sits and carries the counts in `meta.sections`, for example `https://example.com/lone, linked in the navigation`. A crawl whose links carry no section keeps the plain item, which is just the URL.
 
 ## How to fix it
 
@@ -67,8 +69,9 @@ disable = ["links/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["links/weak-internal-links"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
@@ -85,7 +88,7 @@ Links findings ship in every audit next to the SEO, performance and agent experi
 
 ## Check your site
 
-Run `squirrel audit https://example.com` and open the Links section of the report. Every page with a single inbound link is listed. Local audits are free.
+Run `squirrel audit https://example.com` and open the Links section of the report. Every page with a single inbound link is listed. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">

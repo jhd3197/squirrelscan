@@ -63,6 +63,11 @@ export const UserSettingsSchema = z.object({
     error: "channel must be 'stable' or 'beta'",
   }),
   auto_update: z.boolean({ error: "auto_update must be true or false" }),
+  // The installed agent skills update along with the CLI (#2357). Only takes
+  // effect while auto_update is on; false opts the skills alone out.
+  skills_auto_update: z
+    .boolean({ error: "skills_auto_update must be true or false" })
+    .optional(),
   notifications: z.boolean({ error: "notifications must be true or false" }),
   telemetry: z.boolean({ error: "telemetry must be true or false" }),
   // Random tip shown under the audit preamble (stderr, interactive console
@@ -137,6 +142,10 @@ export const UserSettingsSchema = z.object({
   // Authentication state
   auth: AuthSchema.optional(),
 
+  // Set when `squirrel setup` finishes (ISO date). Bare `squirrel` nudges
+  // toward setup until it is set.
+  setup_completed_at: z.string().nullable().optional(),
+
   // One-time consent for default cloud browser rendering (authed users).
   // null/undefined ⇒ never asked (prompt on the next auto-render opportunity);
   // "accepted" ⇒ render by default; "declined" ⇒ stay on plain HTTP. Explicit
@@ -152,6 +161,10 @@ export const UserSettingsSchema = z.object({
   // One-time TTY notice that signed-in audits now auto-publish to the dashboard.
   // null/undefined ⇒ not shown yet; "true" once shown so we don't repeat it.
   auto_publish_notice_shown: z.boolean().nullable().optional(),
+
+  // #801: one-time notice that a signed-in audit's cloud link checks now cost
+  // credits (pricing v12). null/undefined ⇒ not shown yet.
+  link_pricing_notice_shown: z.boolean().nullable().optional(),
 
   // #2182: ISO timestamp of the FIRST report this install put in the dashboard,
   // written by both publish paths (auto-publish in `audit`, and `report
@@ -190,6 +203,7 @@ export type ReleaseChannel = UserSettings["channel"];
 export const WRITABLE_SETTINGS = [
   "channel",
   "auto_update",
+  "skills_auto_update",
   "update_check_interval_hours",
   "notifications",
   "telemetry",

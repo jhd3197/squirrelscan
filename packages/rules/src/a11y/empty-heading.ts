@@ -1,5 +1,10 @@
 // a11y/empty-heading - Headings have content
 
+import type { CheckItem } from "@squirrelscan/core-contracts";
+
+import { isHiddenFromMarkup } from "@squirrelscan/parser";
+
+import { fieldSnippet } from "../shared/form-fields";
 import type { CheckResult, Rule, RuleContext, RuleResult } from "../types";
 
 export const emptyHeadingRule: Rule = {
@@ -22,16 +27,14 @@ export const emptyHeadingRule: Rule = {
     const checks: CheckResult[] = [];
 
     const headings = doc.querySelectorAll("h1, h2, h3, h4, h5, h6");
-    const emptyHeadings: string[] = [];
+    const emptyHeadings: CheckItem[] = [];
 
+    let position = 0;
     for (const heading of headings) {
+      position++;
       const text = heading.textContent?.trim();
       const ariaLabel = heading.getAttribute("aria-label")?.trim();
       const ariaLabelledby = heading.getAttribute("aria-labelledby");
-      const ariaHidden = heading.getAttribute("aria-hidden");
-
-      // Skip hidden headings
-      if (ariaHidden === "true") continue;
 
       // Check if heading has any accessible content
       let hasContent = !!text || !!ariaLabel;
@@ -55,13 +58,16 @@ export const emptyHeadingRule: Rule = {
         }
       }
 
-      if (!hasContent) {
+      // Only an empty heading needs the (costlier) hidden check.
+      if (!hasContent && !isHiddenFromMarkup(heading)) {
         const level = heading.tagName.toLowerCase();
         const id = heading.getAttribute("id");
         const cls = heading.getAttribute("class")?.split(" ")[0];
-        emptyHeadings.push(
-          id ? `${level}#${id}` : cls ? `${level}.${cls}` : level
-        );
+        emptyHeadings.push({
+          id: id ? `${level}#${id}` : cls ? `${level}.${cls}` : level,
+          label: `${level}, heading ${position} of ${headings.length} on the page`,
+          snippet: fieldSnippet(heading),
+        });
       }
     }
 
@@ -70,7 +76,7 @@ export const emptyHeadingRule: Rule = {
         name: "empty-heading",
         status: "warn",
         message: `${emptyHeadings.length} empty heading(s) found`,
-        items: emptyHeadings.slice(0, 10).map((id) => ({ id })),
+        items: emptyHeadings.slice(0, 10),
         details:
           emptyHeadings.length > 10
             ? { additional: emptyHeadings.length - 10 }

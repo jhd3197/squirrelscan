@@ -6,7 +6,7 @@ icon: "search"
 
 SEO is one of the four score groups on every report. It covers everything that decides whether a page can be found and understood: whether a crawler can reach and index it, how its content and markup are structured, and how accessible it is to a reader who is not using a mouse and a screen.
 
-It is the broadest group, spanning 16 categories. Most of its rules run locally and for free. A few [cloud rules](/cloud/rules) use AI analysis or live search data and are skipped when you are not logged in.
+It is the broadest group, spanning 16 categories. Most of its rules run locally and need no login. A few [cloud rules](/cloud/rules) use AI analysis or live search data and are skipped when you are not logged in.
 
 ## Categories
 
@@ -18,10 +18,10 @@ It is the broadest group, spanning 16 categories. Most of its rules run locally 
     Essential meta tags and page structure for search engines (14 rules)
   </Card>
   <Card title="Links" icon="folder" href="/rules/links">
-    Internal and external link health and structure (15 rules)
+    Internal and external link health and structure (13 rules)
   </Card>
   <Card title="Content" icon="folder" href="/rules/content">
-    Text quality, readability, and content structure (21 rules)
+    Text quality, readability, and content structure (24 rules)
   </Card>
   <Card title="Structured Data" icon="folder" href="/rules/schema">
     Structured data and rich snippet eligibility (25 rules)
@@ -36,7 +36,7 @@ It is the broadest group, spanning 16 categories. Most of its rules run locally 
     Accessibility for users with disabilities (61 rules)
   </Card>
   <Card title="Mobile" icon="folder" href="/rules/mobile">
-    Mobile-friendliness and responsive design (6 rules)
+    Mobile-friendliness and responsive design (8 rules)
   </Card>
   <Card title="URL Structure" icon="folder" href="/rules/url">
     URL structure, length, and formatting (9 rules)
@@ -73,6 +73,8 @@ disable = [
   "i18n/*", "eeat/*", "local/*", "video/*", "analytics/*", "gaps/*",
 ]
 ```
+
+`links/*` also matches `links/broken-links`, `links/broken-external-links` and `links/broken-anchors`. Those three are Reliability rules and count toward the Performance score group, but their ids keep the `links/` prefix, so a prefix pattern selects them.
 
 See the [full rules reference](/rules) for the other score groups.
 

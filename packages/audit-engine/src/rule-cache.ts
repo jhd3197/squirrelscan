@@ -33,9 +33,11 @@
 //     run.
 //  4. **The run context** — {@link computeRunContextHash}: the engine build (the
 //     CLI's release version, because the `@squirrelscan/rules` package version
-//     never moves), the enabled page rules IN ORDER with their resolved options,
-//     the Stage-0 site metadata, the prefetched cloud results, and the three
-//     `SiteData` fields page rules actually read.
+//     never moves), the rules version (a hash of the rule code itself, because a
+//     rule fix inside one release keeps the release version), the enabled page
+//     rules IN ORDER with their resolved options, the Stage-0 site metadata, the
+//     prefetched cloud results, and the four `SiteData` fields the page-rule pass
+//     actually reads.
 //
 // WHAT IS GATED OUT RATHER THAN APPROXIMATED. Two run-level inputs cannot be
 // reduced to a hash, so their presence turns the cache OFF for the whole run
@@ -47,9 +49,10 @@
 //    of the verdicts, so a feed that changed overnight would replay yesterday's
 //    answer under an unchanged key. There is no cheap exact identity available, so
 //    an intel-enabled run does not replay.
-//  - **A `SiteData` field no page rule reads today.** The three that ARE read
-//    (`baseUrl`, `scripts`, `resourceSizes`) are hashed, and within the last two
-//    only the ENTRY fields rules read — see {@link PAGE_RULE_SCRIPT_FIELDS} and
+//  - **A `SiteData` field no page rule reads today.** The four that ARE read
+//    (`baseUrl`, `scripts`, `resourceSizes`, and `siteIndexable`, which the
+//    runner's noindex gate reads, pub#457) are hashed, and within `scripts` and
+//    `resourceSizes` only the ENTRY fields rules read — see {@link PAGE_RULE_SCRIPT_FIELDS} and
 //    {@link PAGE_RULE_RESOURCE_FIELDS}. Hashing whole entries looked safer and was
 //    not: `cacheReason` is null on a cold run and set on a warm one, so it made
 //    the run context differ between exactly the two runs meant to match, and the
@@ -73,8 +76,17 @@
 import type { CheckResult, PageFeatureRow, PageRecord } from "@squirrelscan/core-contracts";
 import type { ParsedPage, RuleMeta, SiteData } from "@squirrelscan/rules";
 
-/** Bumped when the payload shape or the key's ingredients change; old rows then miss. */
-export const RULE_CACHE_FORMAT = "prc-1";
+/**
+ * Bumped when the payload shape or the key's ingredients change; old rows then miss.
+ * prc-5: `features.reportScalars.structure` (#2307). A prc-4 row would replay a page's features
+ * without its link sections and page type, and the report's page structure block would read
+ * that page as having none.
+ * prc-4: `preloadedScripts` joins the run context (security/csp-blocks-own-resources).
+ * prc-3: `features.hreflangAlternates` (#489). A prc-2 row would replay features
+ * without it, which the store reads as "no alternates" and exempts nothing, so
+ * the bump is about getting the new field filled, not about safety.
+ */
+export const RULE_CACHE_FORMAT = "prc-5";
 
 /**
  * The `SiteData` keys page-scope rules read, and therefore the only ones the run
@@ -83,12 +95,19 @@ export const RULE_CACHE_FORMAT = "prc-1";
  * Derived by inspection (`content/dev-leakage` reads `baseUrl`;
  * `integrity/kit-signature`, `performance/js-libraries`, `performance/source-maps`
  * and `performance/unminified-js` read `scripts`; `performance/unminified-css`
- * reads `resourceSizes`) and held there by `page-rule-site-context.test.ts`, which
+ * reads `resourceSizes`; the runner's noindex gate reads `siteIndexable`, pub#457)
+ * and held there by `page-rule-site-context.test.ts`, which
  * fails on any other key being read. Widening this list is safe; forgetting to
  * widen it when a rule starts reading another field is what the test exists to
  * catch, because the cost of that mistake is a stale verdict, not a crash.
  */
-export const PAGE_RULE_SITE_FIELDS = ["baseUrl", "scripts", "resourceSizes"] as const;
+export const PAGE_RULE_SITE_FIELDS = [
+  "baseUrl",
+  "scripts",
+  "preloadedScripts",
+  "resourceSizes",
+  "siteIndexable",
+] as const;
 
 /**
  * The fields of a `ctx.site.scripts` entry page rules read.
@@ -111,14 +130,23 @@ export const PAGE_RULE_SCRIPT_FIELDS = [
 
 /**
  * The fields of a `ctx.site.resourceSizes` entry page rules read
- * (`performance/unminified-css` reads url + size; nothing page-scoped reads more).
+ * (`performance/unminified-css` reads url + size; `images/responsive-size` reads
+ * url + size and the natural size and animation read from the image's header,
+ * #470; nothing page-scoped reads more).
  *
  * `cacheReason` is the field that forced this: "cache-hit reason if reused from a
  * prior crawl; null on a real fetch". It is null on every cold run and set on
  * every warm one, so hashing the whole entry made the run context differ between
- * exactly the two runs that are supposed to match.
+ * exactly the two runs that are supposed to match. The header fields do not have
+ * that problem: a cache hit carries the prior record's values unchanged.
  */
-export const PAGE_RULE_RESOURCE_FIELDS = ["url", "sizeBytes"] as const;
+export const PAGE_RULE_RESOURCE_FIELDS = [
+  "url",
+  "sizeBytes",
+  "naturalWidth",
+  "naturalHeight",
+  "animated",
+] as const;
 
 /** Keep only `fields`, in a fixed order, from each entry of `entries`. */
 function projectEntries(
@@ -144,7 +172,13 @@ export function pageRuleSiteContext(siteData: SiteData): Record<string, unknown>
   const resourceSizes = siteData.resourceSizes;
   return {
     baseUrl: siteData.baseUrl,
+    // A homepage (or entry page) that turns noindex, or back, flips the noindex
+    // gate on every other page without changing any of them, so it has to move
+    // the key. Tri-state: undefined skips nothing, like false, but is kept
+    // distinct so the key says exactly what the run saw.
+    siteIndexable: siteData.siteIndexable ?? null,
     scripts: projectEntries(siteData.scripts, PAGE_RULE_SCRIPT_FIELDS),
+    preloadedScripts: projectEntries(siteData.preloadedScripts, PAGE_RULE_SCRIPT_FIELDS),
     resourceSizes: resourceSizes
       ? {
           css: projectEntries(resourceSizes.css, PAGE_RULE_RESOURCE_FIELDS),
@@ -276,6 +310,13 @@ export interface RunContextInput {
    * passes its release version, which is what actually moves.
    */
   readonly engineVersion: string;
+  /**
+   * A hash of the rule CODE. The release version only moves on a release, so a
+   * rule fixed in a checkout, or in any build before the version bump, would
+   * otherwise replay the findings from before the fix on every unchanged page.
+   * The CLI passes a hash of the rules source taken when it was built.
+   */
+  readonly rulesVersion: string;
   /** The enabled PAGE rules, in execution order, with their resolved options. */
   readonly pageRules: ReadonlyArray<{ id: string; options: unknown }>;
   /** The site data handed to page rules; only {@link PAGE_RULE_SITE_FIELDS} is read. */
@@ -330,6 +371,7 @@ export async function computeRunContextHash(
     const canonical = canonicalJson([
       RULE_CACHE_FORMAT,
       input.engineVersion,
+      input.rulesVersion,
       input.pageRules.map((r) => [r.id, r.options]),
       projection,
       input.siteMetadata ?? null,
@@ -347,9 +389,12 @@ export async function computeRunContextHash(
     if (process.env.SQUIRREL_RULE_CACHE_DEBUG === "1") {
       const parts: Array<[string, unknown]> = [
         ["engineVersion", input.engineVersion],
+        ["rulesVersion", input.rulesVersion],
         ["pageRules", input.pageRules.map((r) => [r.id, r.options])],
         ["baseUrl", projection.baseUrl],
+        ["siteIndexable", projection.siteIndexable],
         ["scripts", projection.scripts],
+        ["preloadedScripts", projection.preloadedScripts],
         ["resourceSizes", projection.resourceSizes],
         ["siteMetadata", input.siteMetadata ?? null],
         ["cloudResults", input.cloudResults ?? null],

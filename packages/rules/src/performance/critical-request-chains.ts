@@ -2,6 +2,11 @@
 
 import type { CheckResult, Rule, RuleContext, RuleResult } from "../types";
 
+import { querySelectorAllOutsideNoscript } from "@squirrelscan/utils";
+
+import { findCssImports } from "../shared/css-imports";
+import { scriptLoading } from "./cwv";
+
 export const criticalRequestChainsRule: Rule = {
   meta: {
     id: "perf/critical-request-chains",
@@ -33,28 +38,27 @@ export const criticalRequestChainsRule: Rule = {
     }
 
     // Find render-blocking CSS (link[rel=stylesheet] without media=print/disabled)
-    const blockingCss = head.querySelectorAll(
+    const blockingCss = querySelectorAllOutsideNoscript(
+      head,
       'link[rel="stylesheet"]:not([media="print"]):not([disabled])'
     );
 
-    // Find render-blocking JS (script without async/defer/type=module in head)
-    const blockingJs = head.querySelectorAll(
-      "script[src]:not([async]):not([defer]):not([type='module'])"
+    // Find render-blocking JS (classic script without async/defer in head)
+    const blockingJs = querySelectorAllOutsideNoscript(head, "script[src]").filter(
+      (script) =>
+        script.getAttribute("src") && scriptLoading(script) === "blocking"
     );
 
-    // Count CSS @import statements from inline styles
+    // Count the CSS @imports inline styles would fetch: not one inside a comment
+    // or a string, nor one a browser ignores for coming after another rule (#725).
     let importCount = 0;
-    const styleElements = doc.querySelectorAll("style");
+    const styleElements = querySelectorAllOutsideNoscript(doc, "style");
     for (const style of styleElements) {
-      const content = style.textContent || "";
-      const imports = content.match(/@import\b/g);
-      if (imports) {
-        importCount += imports.length;
-      }
+      importCount += findCssImports(style.textContent || "").length;
     }
 
     // Check for preload hints
-    const preloads = head.querySelectorAll('link[rel="preload"]');
+    const preloads = querySelectorAllOutsideNoscript(head, 'link[rel="preload"]');
 
     const chainMembers: string[] = [];
 

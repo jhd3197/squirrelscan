@@ -3,6 +3,9 @@
 import type { Rule, RuleContext, RuleResult, CheckResult } from "../types";
 import type { SiteQuery } from "@squirrelscan/core-contracts";
 
+import { excludesNoindexPage, skipsNoindexPages } from "../shared/noindex";
+import { RegionVariantIndex } from "../shared/region-variants";
+
 const SKIP_CHECK: CheckResult = {
   name: "duplicate-description",
   status: "skipped",
@@ -55,8 +58,11 @@ function buildCheck(duplicates: { desc: string; urls: string[] }[]): CheckResult
 
 // Streaming path (#1022): build the desc→urls map from page_features scalars via
 // the async cursor, in normalized_url order (== the legacy site.pages order),
-// re-deriving the lowercase/trim key exactly as the legacy path does.
-async function runViaSiteQuery(siteQuery: SiteQuery): Promise<RuleResult> {
+// re-deriving the lowercase/trim key exactly as the legacy path does. Noindex
+// pages are left out of both paths (pub#457): their description is never shown.
+// Reciprocal same-language hreflang variants count as one page on both paths
+// (#489), read from the same parser-extracted alternates.
+async function runViaSiteQuery(siteQuery: SiteQuery, skipNoindex: boolean): Promise<RuleResult> {
   const checks: CheckResult[] = [];
   if (siteQuery.pageCount() < 2) {
     checks.push(SKIP_CHECK);
@@ -65,6 +71,7 @@ async function runViaSiteQuery(siteQuery: SiteQuery): Promise<RuleResult> {
 
   const descToUrls = new Map<string, string[]>();
   for await (const row of siteQuery.pagesMatching(() => true)) {
+    if (skipNoindex && row.robotsNoindex) continue;
     const desc = row.description?.trim().toLowerCase();
     if (!desc) continue;
 
@@ -73,7 +80,12 @@ async function runViaSiteQuery(siteQuery: SiteQuery): Promise<RuleResult> {
     descToUrls.set(desc, urls);
   }
 
-  checks.push(buildCheck(findDuplicates(descToUrls)));
+  const duplicates = findDuplicates(descToUrls);
+  const variants = await RegionVariantIndex.fromSiteQuery(
+    siteQuery,
+    duplicates.flatMap((d) => d.urls),
+  );
+  checks.push(buildCheck(variants.withoutVariantOnlyGroups(duplicates, (d) => d.urls)));
   return { checks };
 }
 
@@ -92,7 +104,7 @@ export const duplicateDescriptionRule: Rule = {
 
   run(ctx: RuleContext): RuleResult | Promise<RuleResult> {
     if (ctx.siteQuery) {
-      return runViaSiteQuery(ctx.siteQuery);
+      return runViaSiteQuery(ctx.siteQuery, skipsNoindexPages(ctx.site));
     }
 
     const checks: CheckResult[] = [];
@@ -107,6 +119,7 @@ export const duplicateDescriptionRule: Rule = {
     const descToUrls = new Map<string, string[]>();
 
     for (const page of pages) {
+      if (excludesNoindexPage(ctx.site, page.parsed, page.headers)) continue;
       const desc = page.parsed.meta.description?.trim().toLowerCase();
       if (!desc) continue;
 
@@ -115,7 +128,9 @@ export const duplicateDescriptionRule: Rule = {
       descToUrls.set(desc, urls);
     }
 
-    checks.push(buildCheck(findDuplicates(descToUrls)));
+    const duplicates = findDuplicates(descToUrls);
+    const variants = RegionVariantIndex.fromPages(pages, duplicates.flatMap((d) => d.urls));
+    checks.push(buildCheck(variants.withoutVariantOnlyGroups(duplicates, (d) => d.urls)));
     return { checks };
   },
 };

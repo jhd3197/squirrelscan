@@ -66,8 +66,9 @@ disable = ["core/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["core/canonical-form-drift"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
@@ -85,7 +86,7 @@ Core SEO findings ship in every audit next to the performance, security and agen
 
 ## Check your site
 
-Run `squirrel audit https://example.com` and open the Core SEO section of the report. Each drifting axis is listed with the norm, the deviant form and the URLs. Local audits are free.
+Run `squirrel audit https://example.com` and open the Core SEO section of the report. Each drifting axis is listed with the norm, the deviant form and the URLs. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">

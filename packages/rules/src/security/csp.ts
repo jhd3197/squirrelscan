@@ -11,7 +11,10 @@ const _RECOMMENDED_DIRECTIVES = [
   "object-src",
 ];
 
-// Overly permissive values that weaken CSP
+// Overly permissive source expressions that weaken CSP. Matched against whole
+// source tokens, never substrings (#427). `*` stands for every source whose
+// host is a bare `*` (see isAnyHostSource); `https://*.example.com` scopes a
+// host to one domain's subdomains and is not one of them.
 const WEAK_VALUES = ["*", "data:", "blob:", "'unsafe-inline'", "'unsafe-eval'"];
 
 export const cspRule: Rule = {
@@ -99,7 +102,20 @@ export const cspRule: Rule = {
     // Check for unsafe values in script-src
     const scriptSrc =
       directives.get("script-src") || directives.get("default-src") || "";
-    const weakValues = WEAK_VALUES.filter((v) => scriptSrc.includes(v));
+    const sources = sourceTokens(scriptSrc);
+    // CSP3: a nonce or hash in the list makes browsers ignore 'unsafe-inline',
+    // and 'strict-dynamic' ignores it along with every host and scheme source
+    // (#441). Read from the directive's own list only: tokens after a comma
+    // belong to a comma-joined second policy, maybe to another directive. On
+    // purpose this still warns when that second policy is itself strict.
+    const ownSources = sourceTokens(scriptSrc.split(",", 1)[0] ?? "");
+    const strictDynamic = ownSources.has("'strict-dynamic'");
+    const inlineIgnored = strictDynamic || [...ownSources].some(isNonceOrHashSource);
+    const weakValues = WEAK_VALUES.filter((v) => {
+      if (v === "*") return !strictDynamic && [...sources].some(isAnyHostSource);
+      if (v === "'unsafe-inline'" && inlineIgnored) return false;
+      return sources.has(v);
+    });
 
     if (weakValues.length > 0) {
       // unsafe-inline and unsafe-eval are critical weaknesses
@@ -154,6 +170,42 @@ export const cspRule: Rule = {
     return { checks };
   },
 };
+
+/**
+ * The source expressions of one directive value, lowercased. Keywords,
+ * schemes and hosts all match case-insensitively in CSP, so `'UNSAFE-INLINE'`
+ * is `'unsafe-inline'`. Commas split too: a header holding several policies
+ * arrives comma-joined, and no source expression contains one.
+ */
+function sourceTokens(value: string): Set<string> {
+  return new Set(
+    value
+      .toLowerCase()
+      .split(/[\t\n\f\r ,]+/)
+      .filter(Boolean)
+  );
+}
+
+/**
+ * A host-source whose host is a bare `*`, such as `*`, `https://*` or
+ * `*:443`, with or without a path. Each one matches any host. A wildcard that
+ * is only the first label, `*.example.com`, stays inside one domain.
+ */
+function isAnyHostSource(token: string): boolean {
+  const afterScheme = token.replace(/^[a-z][a-z0-9+.-]*:\/\//, "");
+  const host = afterScheme.split(/[:/]/, 1)[0];
+  return host === "*";
+}
+
+/**
+ * A nonce-source or hash-source, such as `'nonce-r4nd0m'` or `'sha256-…'`.
+ * `token` comes from `sourceTokens`, already lowercased, so the base64 class
+ * needs no upper-case letters.
+ */
+function isNonceOrHashSource(token: string): boolean {
+  // base64-value: one or more base64 characters, then at most two `=`.
+  return /^'(?:nonce|sha256|sha384|sha512)-[a-z0-9+/_-]+={0,2}'$/.test(token);
+}
 
 /**
  * Parse CSP header into directive map

@@ -6,6 +6,11 @@
 // or ship a compressible body without compression. A site that gets these
 // wrong on most pages pays for it on every repeat visit and behind every CDN,
 // so this is a site-scope signal, not a per-page nit.
+//
+// Freshness and compression are SCORED by the per-page rules, perf/cache-headers
+// and perf/compression, which list every page and its fix. Here they are info:
+// the site-wide share is still reported, but one missing server setting costs
+// the score once, not once per rule (pub#633). Validators are this rule's own.
 
 import { z } from "zod";
 
@@ -13,8 +18,23 @@ import {
   cacheControlLifetimeSeconds,
   parseCacheControl,
 } from "@squirrelscan/utils/cache-control";
+import { detectCdnFromHeaders } from "@squirrelscan/utils/cdn";
 
 import type { CheckResult, Rule, RuleContext, RuleResult } from "../types";
+
+// Cloudflare documents removing the ETag from HTML when one of these features
+// rewrites the body (developers.cloudflare.com/cache/reference/etag-headers/,
+// .../javascript-detections/). The rule cannot see the origin's response, so
+// the note says "may": a site behind Cloudflare whose origin never sent a
+// validator reads the same as one whose validator the edge removed.
+function cloudflareNote(cloudflarePages: number): string {
+  return (
+    `. ${cloudflarePages} of them came through Cloudflare, which may drop the ETag from HTML it rewrites` +
+    " with Email Address Obfuscation, Automatic HTTPS Rewrites, Replace insecure JavaScript libraries" +
+    " or JavaScript Detections (Bot Fight Mode). Add no-transform to the HTML Cache-Control," +
+    " turn those features off, or also send Last-Modified"
+  );
+}
 
 export const optionsSchema = z.object({
   min_freshness_ratio: z
@@ -60,6 +80,8 @@ export const badCachingRule: Rule = {
     scope: "site",
     severity: "warning",
     weight: 5,
+    // A dev server or private-network host is not the delivery edge (pub#629).
+    skipOnPrivateTarget: true,
     optionsSchema,
   },
 
@@ -90,6 +112,7 @@ export const badCachingRule: Rule = {
     // (a validator behind `max-age=0` / `no-cache`). Either is a policy.
     let withCachePolicy = 0;
     let withValidator = 0; // has ETag or Last-Modified
+    let noValidatorViaCloudflare = 0;
     let compressibleTotal = 0;
     let compressibleCompressed = 0;
     const noCacheExamples: string[] = [];
@@ -116,9 +139,15 @@ export const badCachingRule: Rule = {
         !cc.noCache &&
         ((lifetime !== undefined && lifetime > 0) || Boolean(expires));
 
+      // Any non-empty ETag counts, weak (`W/"..."`) included: If-None-Match
+      // compares weakly (RFC 9110 13.1.2), so a weak tag still earns a 304,
+      // and CDNs that compress turn strong tags weak as a matter of course.
       const hasValidator = Boolean(etag || lastModified);
       if (hasValidator) withValidator++;
-      else if (noValidatorExamples.length < 5) noValidatorExamples.push(page.url);
+      else {
+        if (noValidatorExamples.length < 5) noValidatorExamples.push(page.url);
+        if (detectCdnFromHeaders(h) === "cloudflare") noValidatorViaCloudflare++;
+      }
 
       // `max-age=0, must-revalidate` (or `no-cache`) WITH an ETag or a
       // Last-Modified is not a site that forgot to configure caching. It is
@@ -154,11 +183,11 @@ export const badCachingRule: Rule = {
     const compressionRatio =
       compressibleTotal > 0 ? compressibleCompressed / compressibleTotal : 1;
 
-    // --- Freshness lifetime coverage ---
+    // --- Freshness lifetime coverage (info: perf/cache-headers scores it) ---
     if (cachePolicyRatio < opts.min_freshness_ratio) {
       checks.push({
         name: "bad-caching-freshness",
-        status: cachePolicyRatio < 0.25 ? "fail" : "warn",
+        status: "info",
         message: `${total - withCachePolicy}/${total} pages set no caching policy (no freshness lifetime and no validator)`,
         value: `${Math.round(cachePolicyRatio * 100)}%`,
         expected: `≥ ${Math.round(opts.min_freshness_ratio * 100)}% with Cache-Control max-age, Expires, or a validator to revalidate against`,
@@ -168,22 +197,40 @@ export const badCachingRule: Rule = {
     } else {
       checks.push({
         name: "bad-caching-freshness",
-        status: "pass",
+        status: "info",
         message: `${withCachePolicy}/${total} pages declare a caching policy`,
         value: `${Math.round(cachePolicyRatio * 100)}%`,
       });
     }
 
     // --- Validator coverage ---
+    // Warns, never fails (pub#600). A page with no lifetime and no validator
+    // is usually charged by perf/cache-headers for the same header (no
+    // Cache-Control, or no-cache with nothing to revalidate against), and a
+    // page WITH a lifetime only loses a cheap revalidation after it
+    // expires. Cloudflare also removes HTML ETags through features that are
+    // on by default, so a fail here lands on origins configured correctly.
+    // The cap is unconditional: visitors pay the same full transfer whoever
+    // removed the header, so the Cloudflare attribution below only explains,
+    // it never moves the score.
     if (validatorRatio < opts.min_validator_ratio) {
+      const missing = total - withValidator;
+      const viaCloudflare =
+        noValidatorViaCloudflare > 0 && noValidatorViaCloudflare * 2 >= missing;
       checks.push({
         name: "bad-caching-validators",
-        status: validatorRatio < 0.25 ? "fail" : "warn",
-        message: `${total - withValidator}/${total} pages lack an ETag or Last-Modified validator`,
+        status: "warn",
+        message:
+          `${missing}/${total} pages lack an ETag or Last-Modified validator` +
+          (viaCloudflare ? cloudflareNote(noValidatorViaCloudflare) : ""),
         value: `${Math.round(validatorRatio * 100)}%`,
         expected: `≥ ${Math.round(opts.min_validator_ratio * 100)}% with ETag or Last-Modified`,
         pages: noValidatorExamples,
-        details: { pagesWithValidator: withValidator, totalPages: total },
+        details: {
+          pagesWithValidator: withValidator,
+          totalPages: total,
+          ...(viaCloudflare ? { cloudflarePages: noValidatorViaCloudflare } : {}),
+        },
       });
     } else {
       checks.push({
@@ -194,12 +241,13 @@ export const badCachingRule: Rule = {
       });
     }
 
-    // --- Compression coverage (compressible responses only) ---
+    // --- Compression coverage (compressible responses only; info:
+    // perf/compression scores it) ---
     if (compressibleTotal > 0) {
       if (compressionRatio < opts.min_compression_ratio) {
         checks.push({
           name: "bad-caching-compression",
-          status: compressionRatio < 0.5 ? "fail" : "warn",
+          status: "info",
           message: `${compressibleTotal - compressibleCompressed}/${compressibleTotal} compressible pages served without gzip/Brotli`,
           value: `${Math.round(compressionRatio * 100)}%`,
           expected: `≥ ${Math.round(opts.min_compression_ratio * 100)}% of text responses compressed`,
@@ -212,7 +260,7 @@ export const badCachingRule: Rule = {
       } else {
         checks.push({
           name: "bad-caching-compression",
-          status: "pass",
+          status: "info",
           message: `${compressibleCompressed}/${compressibleTotal} compressible pages compressed`,
           value: `${Math.round(compressionRatio * 100)}%`,
         });

@@ -11,7 +11,7 @@
 // at ~140 MB resident and was OOM-killed (exit 137) at the last step of
 // install.sh on memory-capped machines (#2023).
 
-import { defineCommand, runMain } from "citty";
+import { defineCommand } from "citty";
 
 import type { UserSettings } from "@/self/types";
 
@@ -19,8 +19,9 @@ import { loadSettings } from "@/self/settings";
 import { setLogLevel } from "@/utils/logger";
 
 import { version } from "../../package.json";
+import { runCli } from "./run-cli";
 
-const main = defineCommand({
+export const main = defineCommand({
   meta: {
     name: "squirrel",
     version,
@@ -49,6 +50,7 @@ const main = defineCommand({
   // resident set of `squirrel self install` at ~140 MB and got the installer
   // OOM-killed (exit 137) on memory-capped machines (#2023).
   subCommands: {
+    setup: () => import("./commands/setup").then((m) => m.setup),
     audit: () => import("./commands/audit").then((m) => m.audit),
     auth: () => import("./commands/auth").then((m) => m.auth),
     crawl: () => import("./commands/crawl").then((m) => m.crawl),
@@ -61,6 +63,7 @@ const main = defineCommand({
     feedback: () => import("./commands/feedback").then((m) => m.feedback),
     keys: () => import("./commands/keys").then((m) => m.keys),
     mcp: () => import("./commands/mcp").then((m) => m.mcp),
+    channel: () => import("./commands/channel").then((m) => m.channel),
     self: () => import("./commands/self").then((m) => m.self),
     skills: () => import("./commands/skills").then((m) => m.skills),
   },
@@ -74,21 +77,26 @@ export function run(): void {
   }
 
   const effectiveSettings = settings.ok ? settings.data : undefined;
+  const cliOptions = {
+    version,
+    setupDone: Boolean(effectiveSettings?.setup_completed_at),
+  };
 
   if (!shouldRunBackgroundTasks(process.argv.slice(2))) {
     // Light path: nothing but the command. No updater, no telemetry, no
     // registration, so none of their modules are loaded.
-    void runMain(main);
+    void runCli(main, cliOptions);
     return;
   }
 
   // Failure-safe: the extras must never break the user's command. The
   // rejection handler covers the LOAD only (a two-argument then, so a throw
   // inside runWithStartupExtras cannot run the command a second time); the
-  // command itself reports its own errors through runMain.
+  // command itself reports its own errors through runCli.
   void import("./startup").then(
-    ({ runWithStartupExtras }) => runWithStartupExtras(main, effectiveSettings),
-    () => void runMain(main)
+    ({ runWithStartupExtras }) =>
+      runWithStartupExtras(main, effectiveSettings, cliOptions),
+    () => void runCli(main, cliOptions)
   );
 }
 
@@ -99,7 +107,7 @@ export function run(): void {
  * Skipped for simple commands and self install/update/uninstall (self install
  * resets settings, racing registerInstall; self update IS the updater —
  * including the detached --auto child — and must not spawn further checks or
- * installs), for `mcp` (JSON-RPC on stdout, nothing may pollute the stream),
+ * installs), for the detached `skills update --auto` refresh (same reason), for `mcp` and `channel` (JSON-RPC on stdout, nothing may pollute the stream),
  * for `self disk` (it MEASURES the logs directory, and the maintenance below
  * compresses and deletes logs — leaving it in lets the command change the
  * number it is about to print, and lets an update land mid-measurement), and
@@ -113,6 +121,14 @@ export function shouldRunBackgroundTasks(args: string[]): boolean {
     args[0] === "self" &&
     (args[1] === "install" || args[1] === "update" || args[1] === "uninstall");
   const isSelfDisk = args[0] === "self" && args[1] === "disk";
+  // The detached skills refresh a freshly auto-updated run starts. Like
+  // `self update --auto`, it is part of the updater: it must not apply or
+  // check for updates itself, and must not start another refresh.
+  const isSkillsAutoRefresh =
+    args[0] === "skills" && args[1] === "update" && args.includes("--auto");
+  // `setup --dry-run` promises to change nothing: no telemetry notice write,
+  // no install registration, no update check.
+  const isSetupDryRun = args[0] === "setup" && args.includes("--dry-run");
   const isSimpleCommand =
     args.length === 0 ||
     args.includes("--version") ||
@@ -121,7 +137,10 @@ export function shouldRunBackgroundTasks(args: string[]): boolean {
     args.includes("-h") ||
     isSelfInstallCommand ||
     isSelfDisk ||
-    args[0] === "mcp";
+    isSkillsAutoRefresh ||
+    isSetupDryRun ||
+    args[0] === "mcp" ||
+    args[0] === "channel";
 
   return !isSimpleCommand && !args.includes("--offline");
 }

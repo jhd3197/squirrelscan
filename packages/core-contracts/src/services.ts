@@ -83,6 +83,35 @@ export interface AuthorityResponse {
 export interface DeadLinksRequest {
   auditId?: string;
   urls: string[];
+  /**
+   * The signed-in CLI audit's registered run (#801): the batch's link checks
+   * are billed to it, 1 credit per distinct external link the cloud answers,
+   * at most one per page of its page cap. A call without one is free and, from
+   * 2026-11-12, refused to a CLI, which then checks its links locally.
+   */
+  runId?: string;
+}
+
+/**
+ * Why a link could not be verified (pub#821): bot protection refused the check
+ * (`blocked`), it timed out or failed to connect from the checker's network
+ * (`unreachable`), or it answered 404 once and waits for a second check to
+ * confirm it (`awaiting-confirmation`), a likely-broken link rather than a
+ * blocked one.
+ */
+export type UnverifiedReason = "blocked" | "unreachable" | "awaiting-confirmation";
+
+export const UNVERIFIED_REASONS: readonly UnverifiedReason[] = [
+  "blocked",
+  "unreachable",
+  "awaiting-confirmation",
+];
+
+/** `value` as an {@link UnverifiedReason}, or undefined for anything else (untrusted input). */
+export function parseUnverifiedReason(value: unknown): UnverifiedReason | undefined {
+  return typeof value === "string" && (UNVERIFIED_REASONS as readonly string[]).includes(value)
+    ? (value as UnverifiedReason)
+    : undefined;
 }
 
 export interface DeadLinkResult {
@@ -102,10 +131,35 @@ export interface DeadLinkResult {
    * Optional so older service responses keep parsing.
    */
   rateLimited?: boolean;
+  /**
+   * The checker could not verify the link either way (squirrelscan/repo#2818):
+   * bot protection refused it, it timed out or failed to connect from the
+   * checker's network, or it is a first 404 still waiting for its confirming
+   * check. Never a broken link: the rules list it with the WAF-blocked links
+   * as "status unverifiable". `status` and `redirectUrl` are then null, a
+   * refused 403 included, so a client that predates this field reads the link
+   * as unchecked rather than broken. Optional so older service responses keep
+   * parsing.
+   */
+  wafBlocked?: boolean;
+  /** The bot-protection vendor when the checker named one (`cloudflare`, `akamai`, ...), else `unknown`. */
+  wafProvider?: string;
+  /**
+   * Why the link is unverifiable, with `wafBlocked` (pub#821). Optional so
+   * older service responses, and a value this client does not know, keep
+   * parsing: the link then reads as plainly unverified.
+   */
+  unverifiedReason?: UnverifiedReason;
 }
 
 export interface DeadLinksResponse {
   results: DeadLinkResult[];
+  /**
+   * Credits this call debited (#2291): 1 per external destination a CLOUD AUDIT
+   * had not already paid for. Absent or 0 for a signed-in CLI's checks, which
+   * are free, and on older servers.
+   */
+  charged?: number;
 }
 
 // --- blocklist-check --------------------------------------------------------
@@ -293,6 +347,21 @@ export interface EditorSummaryRequest {
    * audience). Slimmed by the CLI; absent when no metadata was resolved.
    */
   siteProfile?: EditorSummarySiteProfile;
+  /**
+   * Checks this audit did not run (repo#2729): link checks off, or a crawl
+   * that did not follow links. The summary must say so rather than imply the
+   * site has no broken links. Absent when every check ran.
+   */
+  notChecked?: EditorSummaryNotCheckedInput[];
+}
+
+/** One check the audit did not run, for the summary prompt. */
+export interface EditorSummaryNotCheckedInput {
+  ruleId: string;
+  /** Rule display name, e.g. "Broken External Links". */
+  title: string;
+  /** Skip reason, e.g. "external-links-not-checked". */
+  reason: string;
 }
 
 /** Slim site-metadata context for the summary prompt (never the full profile). */
@@ -436,9 +505,13 @@ export interface RenderRequest {
   sourceHashes?: Record<string, string>;
 }
 
-/** One per-feature debit line for a render batch (render misses vs render_cached hits). #279 */
+/**
+ * One per-feature debit line for a render batch. #279. Inside an audit run every
+ * billed url is an `audit_page` (#2290); `render`/`render_cached` (misses vs
+ * cache hits) are standalone renders that belong to no run, or an older server.
+ */
 export interface RenderChargeLine {
-  feature: "render" | "render_cached";
+  feature: "render" | "render_cached" | "audit_page";
   units: number;
   credits: number;
 }

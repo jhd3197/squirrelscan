@@ -9,11 +9,11 @@
 
 import type { ArgsDef, CommandDef } from "citty";
 
-import { runMain } from "citty";
-
 import type { UserSettings } from "@/self/types";
 
 import { printAutoUpdateAppliedNotice } from "@/cli/banner";
+import { type RunCliOptions, runCli } from "@/cli/run-cli";
+import { maybeSpawnSkillsRefresh } from "@/self/agent-skills";
 import { registerInstall } from "@/self/register-install";
 import { showTelemetryNotice } from "@/self/telemetry";
 import {
@@ -30,7 +30,8 @@ import { rotateLogsIfNeeded } from "@/utils/log-rotation";
  */
 export function runWithStartupExtras<T extends ArgsDef>(
   main: CommandDef<T>,
-  settings: UserSettings | undefined
+  settings: UserSettings | undefined,
+  cliOptions: RunCliOptions
 ): void {
   // An update a previous run already discovered is applied BEFORE the command,
   // and the original argv re-executed on the new binary, so a fresh run always
@@ -41,16 +42,17 @@ export function runWithStartupExtras<T extends ArgsDef>(
     void applyPendingUpdateInForeground(settings)
       // Failure-safe: a broken update must never break the user's command.
       .catch(() => {})
-      .then(() => startCommand(main, settings));
+      .then(() => startCommand(main, settings, cliOptions));
     return;
   }
 
-  startCommand(main, settings);
+  startCommand(main, settings, cliOptions);
 }
 
 function startCommand<T extends ArgsDef>(
   main: CommandDef<T>,
-  settings: UserSettings | undefined
+  settings: UserSettings | undefined,
+  cliOptions: RunCliOptions
 ): void {
   // Non-blocking background tasks
   if (settings) showTelemetryNotice(settings);
@@ -64,16 +66,23 @@ function startCommand<T extends ArgsDef>(
   // ordinary run stays free of the await. printAutoUpdateAppliedNotice itself
   // only prints when this process IS the new version, and clears the marker.
   if (settings?.auto_update_applied) {
+    // The first run on a freshly auto-updated binary also brings the installed
+    // squirrelscan skills current, in a detached child the command never waits
+    // on. It only fires on the new version, the same run that clears the marker.
+    maybeSpawnSkillsRefresh(settings);
     void printAutoUpdateAppliedNotice(settings)
       .catch(() => {})
-      .then(() => runCommand(main));
+      .then(() => runCommand(main, cliOptions));
     return;
   }
-  runCommand(main);
+  runCommand(main, cliOptions);
 }
 
-function runCommand<T extends ArgsDef>(main: CommandDef<T>): void {
+function runCommand<T extends ArgsDef>(
+  main: CommandDef<T>,
+  cliOptions: RunCliOptions
+): void {
   // After the command settles, bound any in-process (Windows) auto-update so
   // a still-downloading binary can't hold the CLI open indefinitely (#1074).
-  void runMain(main).finally(() => void finishInlineAutoUpdate());
+  void runCli(main, cliOptions).finally(() => void finishInlineAutoUpdate());
 }

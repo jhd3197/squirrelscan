@@ -23,6 +23,8 @@ An accessible name comes from the link's text content, an `alt` on an image insi
 
 Severity warning, weight 4.
 
+When the page's links carry a link section (see [Page Classifier](/configuration/classifier)), each item says where its links sit and carries the counts in `meta.sections`: an empty anchor reads `https://example.com/pricing, linked in the footer`, and a generic anchor text reads `"Read more", linked in the page content and the navigation`, counting every link that uses it. A crawl whose links carry no section keeps the item as it was. Each item also carries `regions`, one page per section its links sit in, so an anchor repeated in the site header, footer, navigation or a sidebar on most pages is reported once for that region. See [findings in a shared page region](/reports#findings-in-a-shared-page-region).
+
 ## How to fix it
 
 ```html
@@ -65,8 +67,9 @@ disable = ["links/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["links/anchor-text"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
@@ -84,7 +87,7 @@ Links findings ship in every audit next to the SEO, performance and agent experi
 
 ## Check your site
 
-Run `squirrel audit https://example.com` and open the Links section of the report. Every unnamed link is listed with its destination and a markup snippet. Local audits are free.
+Run `squirrel audit https://example.com` and open the Links section of the report. Every unnamed link is listed with its destination and a markup snippet. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">

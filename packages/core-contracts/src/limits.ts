@@ -340,6 +340,8 @@ export const CRAWLER_WORKER = {
   // Pages rendered concurrently per browser per consumer invocation. 3→4 (#992):
   // conservative bump for throughput; Browser Rendering session limits still
   // apply account-wide, so the pool caps total concurrency regardless.
+  // No longer read by the hosted renderer: squirrelscan/repo#2480 replaced it
+  // with a measured pool shape of its own. Kept for anything pinned to it.
   queueConcurrency: 4,
   batchDelayMs: 1_000,
   fallbackAlarmMs: 30_000,
@@ -531,12 +533,36 @@ export const RESOLUTION_SIGNAL_LIMITS = {
   maxChecks: 2_000,
 } as const;
 
-// #1167: hard-clip fallback applied by the CLI publish degrade pass (publish.ts)
+// #2658: one byte budget for the two publish fields sized by pages CRAWLED rather
+// than by findings, which no per-check sample can bound: the compact resolution
+// signal (`resolutionSignalCompact`, see core-contracts/resolution.ts) and the
+// non-2xx `pageStatuses`. Measured together as serialized JSON bytes.
+//
+// 192 KiB of the 1 MiB published-report budget (#2655), REPORT_CAPS.signalMaxBytes.
+// The signal ships the crawled URLs deflated: on the real-shape fixture's checks,
+// 6 to 25 bytes a page with realistic URLs, so a typical site fits all 10,000
+// pages; random 63-byte paths cost about 40 and fit about 4,500. Past the budget
+// the builder drops keys or clips the page list, and both degrade to carrying
+// findings forward, never to a wrong resolve (rules/src/resolution.ts).
+export const RESOLUTION_PUBLISH_LIMITS = {
+  maxBytes: 192 * 1024,
+  // `pageStatuses`' share, clipped first so a site with thousands of redirects or
+  // 404s cannot crowd out the signal: ~400 entries of ordinary URLs. A 404/410 it
+  // clips is still named in the signal (its `removed` indexes), so it is staled.
+  maxPageStatusBytes: 32 * 1024,
+  // Inflated size of the signal's deflated payload. The builder never emits more
+  // and the decoder stops reading past it, so a small body cannot expand into a
+  // large allocation on the server.
+  maxInflatedBytes: 4 * 1024 * 1024,
+} as const;
+
+// #1167: hard-clip fallback applied by the cloud container's publish degrade pass
 // only when the primary-capped payload STILL exceeds maxPayloadBytes — should be
 // unreachable post-sampling, but guarantees a signalled clip over a 413. Tighter
 // than PUBLISH_LIMITS on every axis so the rebuilt body provably fits the 20MB gate.
 // Shape matches the rules pkg `PublishSampleLimits` so it drops straight into
-// sampleChecksForPublish / slimForPublish's degrade pass.
+// sampleChecksForPublish / that degrade pass. (The CLI publishes the capped
+// report since repo#2667 and has no degrade pass.)
 export const PUBLISH_DEGRADE_LIMITS = {
   maxPagesPerCheck: 25,
   maxItems: 10,
@@ -558,12 +584,156 @@ export const PUBLISH_DEGRADE_LIMITS = {
   maxPageStatusBytes: 4 * 1024 * 1024,
 } as const;
 
+// ── Published report cap (repo#2656) ────────────────────────────
+/**
+ * The largest a publish request body may be, envelope included, as UTF-8 bytes.
+ * One constant for every producer (CLI, cloud container) and every API route:
+ * a published report is a capped summary BY DESIGN, and full per-page detail
+ * stays where it already lives (the CLI's project database and `squirrel report`
+ * exports, the cloud findings store).
+ *
+ * The capper (`capReportForPublish`) holds the whole body to it whatever the
+ * crawl size: the scoring transport that grows with pages crawled (the
+ * resolution signal and `pageStatuses`) has its own fixed share,
+ * RESOLUTION_PUBLISH_LIMITS (repo#2658), and the rest of the report gets the rest.
+ *
+ * 1 MiB because the API isolate that parses and renders the body dies from about
+ * 2.8MB (repo#2634, zod clamping costs 20-25 MiB of heap per MiB of report).
+ */
+export const PUBLISHED_REPORT_MAX_BYTES = 1024 * 1024;
+
+/** One sample level of the report capper: what an issue class keeps. */
+export interface ReportCapTier {
+  /** Affected-page URLs kept per issue class (the rest → `details.pagesTruncated`). */
+  readonly pagesPerClass: number;
+  /** Items kept per issue class (the rest → `details.additional`). */
+  readonly itemsPerClass: number;
+  /** `sourcePages` kept per kept item. */
+  readonly sourcePagesPerItem: number;
+  /**
+   * UTF-16 code units kept of a check's message (and string `value`/`expected`),
+   * the unit the publish schema's string caps count. Not bytes: CJK text is up
+   * to 3 bytes a unit in UTF-8. The byte fitter measures real UTF-8 bytes, so
+   * this only shapes how much text each level keeps, never the size bound.
+   */
+  readonly messageChars: number;
+}
+
+/**
+ * What a published report keeps, per section (repo#2656). Applied by
+ * `capReportForPublish` (audit-engine), the one function both publish producers
+ * call. Every number is a tunable: change it here and both producers follow.
+ *
+ * The per-class sample is the shape on every real site: 10 affected pages and
+ * 5 items per (rule, check name, status, provenance) issue class, with the true
+ * counts beside them. Tuned on 187 real published reports, the largest and a
+ * random sample (repo#2656, a standalone simulation of these caps): p99 545 KiB,
+ * max 590 KiB, flat in pages (the 5,463-page one came out at 418 KiB).
+ *
+ * `tiers` are the sample levels a class can be given, largest first. Every class
+ * gets `tiers[0]` while the body fits. When it does not, the byte fitter fills
+ * breadth first: every class gets a counts row (the last level), then a small
+ * sample, then the full one, in priority order while the budget lasts, so the
+ * classes that matter most keep their sample and none vanishes. Past that it
+ * shrinks the display sections and drops the entity map, then admits counts
+ * rows by byte budget (see `capReportForPublish`), which is what makes the size
+ * bounded for any input rather than for the inputs measured.
+ */
+export const REPORT_CAPS = {
+  tiers: [
+    { pagesPerClass: 10, itemsPerClass: 5, sourcePagesPerItem: 1, messageChars: 500 },
+    { pagesPerClass: 3, itemsPerClass: 1, sourcePagesPerItem: 1, messageChars: 300 },
+    // Counts only: no page or item samples, just the class and its true totals.
+    { pagesPerClass: 0, itemsPerClass: 0, sourcePagesPerItem: 0, messageChars: 200 },
+  ] satisfies readonly ReportCapTier[],
+  /**
+   * Issue classes kept per rule. A rule past it keeps the classes that matter
+   * most (fail, then warn, then the rest, largest first) and stamps the dropped
+   * total on the last kept one as `details.checksTruncated`.
+   */
+  classesPerRule: 25,
+  /** Site-wide checks (`siteChecks`): affected pages and items kept per check. */
+  siteCheckPages: 10,
+  siteCheckItems: 10,
+  /** `resourceSizes`: rows kept per category, and `sourcePages` per row. */
+  resourceRowsPerCategory: 20,
+  resourceSourcePages: 3,
+  /** `robotsTxt.rules`: directives kept across all user-agent groups. */
+  robotsDirectives: 50,
+  /**
+   * `sitemaps`: discovered sitemaps kept, child sitemaps and URLs kept per
+   * sitemap. One real index listed 2,000 children (234 KiB).
+   */
+  sitemapEntries: 25,
+  sitemapChildren: 10,
+  sitemapUrls: 10,
+  /**
+   * The display sections at their minimum, for a body whose counts rows alone
+   * do not fit: summary lists, robots directives and sitemap URL statuses
+   * empty, these many sitemaps (no children) and resource rows per category
+   * (no `sourcePages`).
+   */
+  minimalSitemapEntries: 5,
+  minimalResourceRows: 5,
+  /** Serialized ceiling of the published entity map (UTF-16 units, as `projectEntityMap` measures). */
+  entityMapMaxBytes: 128 * 1024,
+  /**
+   * Bytes kept back inside {@link PUBLISHED_REPORT_MAX_BYTES} for the scoring
+   * transport that sampling cannot shrink: the compact resolution signal and
+   * `pageStatuses`, both sized by pages crawled. The same number as
+   * RESOLUTION_PUBLISH_LIMITS.maxBytes, which their builder fits them to
+   * (repo#2658). The capper fits everything else into the rest.
+   */
+  signalMaxBytes: RESOLUTION_PUBLISH_LIMITS.maxBytes,
+  /**
+   * `pageStatuses`' share of {@link signalMaxBytes}
+   * (RESOLUTION_PUBLISH_LIMITS.maxPageStatusBytes). Clipping it is safe in one
+   * direction only, the one taken: fewer carried findings get staled for a
+   * removed page, and they carry instead (see `clipPageStatusesToBytes`).
+   */
+  pageStatusesMaxBytes: RESOLUTION_PUBLISH_LIMITS.maxPageStatusBytes,
+  /**
+   * Bytes kept back for the request envelope around the report (visibility,
+   * linkage ids). With {@link signalMaxBytes}, leaves the report itself at
+   * least 816 KiB of the 1 MiB.
+   */
+  envelopeBytes: 16 * 1024,
+} as const;
+
 // ── Coverage Mode Page Limits ───────────────────────────────────
 export const COVERAGE_PAGE_LIMITS = {
   quick: 25,
   surface: 100,
   full: 500,
 } as const satisfies Record<CoverageMode, number>;
+
+/**
+ * Link checking bounds (repo#2729). Internal and external link checks are on at
+ * every level (`EXTERNAL_LINKS_DEFAULT_ON`), so each
+ * needs a ceiling an audit can never exceed.
+ *
+ * - `externalPerAuditMin`: an audit requests at most `max(pages, this)` distinct
+ *   external links, most-linked first (and any the caller asks to check first);
+ *   the rest are reported as not checked. Two real sites linked out to 37,740
+ *   and 42,228 distinct URLs in one audit, which is why there is a ceiling at
+ *   all; 200 covers the 90th percentile of audits that checked them (about 110).
+ *   This bounds REQUESTS. What a cloud audit is charged is bounded separately
+ *   and lower: 1 credit per link up to one per page of its budget
+ *   (`externalLinkBudget` in credits.ts), the rest checked free.
+ * - `internalTargetProbes`: status-only requests (HEAD, then GET) for internal
+ *   link targets the crawl did not fetch, most-linked first. Free: no render,
+ *   no rules, no page charge.
+ */
+export const LINK_CHECK_LIMITS = {
+  externalPerAuditMin: 200,
+  internalTargetProbes: 200,
+} as const;
+
+/** Distinct external links one audit may request: its page budget, at least `externalPerAuditMin`. */
+export function externalLinkCheckCap(pages: number): number {
+  const budget = Number.isFinite(pages) ? Math.trunc(pages) : 0;
+  return Math.max(LINK_CHECK_LIMITS.externalPerAuditMin, budget);
+}
 
 // Hard ceiling on a single crawl, applied by the CLI (resolvePageLimit) and by
 // every cloud dispatch path via REPORT_LIMITS.maxPages, which now equals it.

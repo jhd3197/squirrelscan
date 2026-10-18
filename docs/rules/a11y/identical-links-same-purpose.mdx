@@ -15,7 +15,7 @@ One check, `identical-links-same-purpose`, at severity warning. It reads every `
 
 Destinations are normalized before comparison: the `href` is lowercased, trailing slashes are stripped and the query string is dropped. So `/pricing`, `/pricing/` and `/pricing?ref=nav` all count as one destination.
 
-- Warn when one text maps to more than one destination. Report message: `N link text(s) lead to different destinations`. Items read `"learn more" → 3 different URLs`, capped at the first ten, carrying the suggestion `Make link text unique to differentiate destinations`.
+- Warn when one text maps to more than one destination. Report message: `N link text(s) lead to different destinations`. Items read `"learn more" → 3 different URLs`, up to ten with a count of the rest, carrying the suggestion `Make link text unique to differentiate destinations`.
 - Pass with `Identical link texts go to same destinations`.
 - Info with `No links found`.
 
@@ -59,8 +59,9 @@ disable = ["a11y/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["a11y/identical-links-same-purpose"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
@@ -79,7 +80,7 @@ Accessibility findings ship in every audit next to the SEO, performance and agen
 
 ## Check your site
 
-Run `squirrel audit https://example.com` and open the Accessibility section of the report. Each repeated phrase is listed with how many destinations it points at. Local audits are free.
+Run `squirrel audit https://example.com` and open the Accessibility section of the report. Each repeated phrase is listed with how many destinations it points at. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">

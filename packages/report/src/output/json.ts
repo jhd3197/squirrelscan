@@ -1,6 +1,7 @@
 // JSON report output
 
-import type { AuditFailureReasonCode } from "@squirrelscan/core-contracts";
+import type { AuditFailureReasonCode, RefusedFetch } from "@squirrelscan/core-contracts";
+import type { ResolvedAuditSettings } from "@squirrelscan/core-contracts/audit-levels";
 import type {
   AuditReport,
   AuditStatus,
@@ -8,6 +9,7 @@ import type {
   CheckResult,
   ComponentOccurrence,
   EntityMap,
+  ReportStructure,
 } from "../types";
 import type { ComponentFixGroup } from "../component-fix-groups";
 import type {
@@ -30,10 +32,21 @@ import { getScoreGrade } from "../scoring";
 import { getGroupName } from "../categories";
 import { groupIssuesByCategory, flattenIssuesBySeverity } from "../grouping";
 import { affectedPages } from "../affected-pages";
+import {
+  checkRegionScope,
+  itemLabel,
+  itemRegionScope,
+  regionScopeData,
+  type RegionScope,
+} from "../region-scope";
+import { checkPageTypeScope, pageTypeScopeData, type PageTypeScope } from "../page-type-scope";
 import { techIconUrl } from "../technologies";
 import { domainAgeYears, siteProfileRows } from "../site-metadata";
 import { editorSummaryView } from "../editor-summary";
 import { seedRedirect } from "../coverage";
+import { privateTargetLine, privateTargetSkippedRules } from "../private-target";
+import { notCheckedLine, notCheckedRules } from "../not-checked";
+import { collectSkippedChecks, type SkippedCheck } from "../skipped";
 
 /**
  * A fix group as it is SERIALIZED: identical to {@link ComponentFixGroup} except
@@ -130,6 +143,13 @@ interface SlimJsonReport {
      * site produce identical reports.
      */
     requestedMaxPages?: number;
+    /**
+     * `"time"` when the crawl time budget ended a cloud crawl early. Absent on a
+     * run that finished or hit the page cap.
+     */
+    stopReason?: "time";
+    /** The audit level and the settings it resolved to. Absent before audit levels. */
+    auditLevel?: ResolvedAuditSettings;
     /** Smart audits (#110): present only when `smart_audits` ran. */
     coverage?: {
       auditedPages: number;
@@ -153,9 +173,15 @@ interface SlimJsonReport {
    * the crawl, so an integration can answer "is this page count the whole
    * site?" without parsing `statusReason` prose.
    */
-  rateLimited?: { pages: number; hosts: string[] };
+  rateLimited?: { pages: number; hosts: string[]; unfetched?: number };
   /** Machine-readable class behind `statusReason` (#1822); absent pre-#1822. */
   statusReasonCode?: AuditFailureReasonCode;
+  /**
+   * Root fetches (robots.txt, sitemaps, llms.txt, Markdown) the site refused
+   *. Their absence is unknown, not confirmed. Present only when
+   * something was refused.
+   */
+  refusedFetches?: RefusedFetch[];
   score: {
     overall: number | null; // null ⇒ N/A (failed/0-page audit, #586)
     grade: string;
@@ -176,6 +202,12 @@ interface SlimJsonReport {
     passed: number;
     warnings: number;
     failed: number;
+    /**
+     * Pages a check skipped because it could not finish evaluating (#518): the
+     * sum of `pagesCount` over `skippedChecks`. Not part of `passed`,
+     * `warnings` or `failed`, and never scored.
+     */
+    skipped: number;
   };
   issues: Array<{
     ruleId: string;
@@ -221,11 +253,19 @@ interface SlimJsonReport {
       affectedPagesCount: number;
       affectedPagesHasMore: boolean;
       /**
-       * Every item and every sourcePage, unchanged. Items the human renderers
-       * collapse carry a `siteWide` flag so an agent gets the same collapse
-       * without re-deriving the threshold.
+       * What stands in for the check's page list: the shared region a check that only reads one is
+       * shown in (pub#846, `{ region, pages, regionPages, otherPages }`), or the page type every
+       * one of its pages is (pub#857, `{ pageType, pages, typePages }`).
        */
-      items?: Array<CheckItem & { siteWide?: { pages: number; of: number } }>;
+      scope?: RegionScope | PageTypeScope;
+      /**
+       * Every item and every sourcePage, unchanged. An item may carry the region it is shown in,
+       * `scope` (pub#846). Items the human renderers collapse carry a `siteWide` flag so an agent
+       * gets the same collapse without re-deriving the threshold.
+       */
+      items?: Array<
+        CheckItem & { scope?: RegionScope; siteWide?: { pages: number; of: number } }
+      >;
       details?: Record<string, unknown>;
       /**
        * Complete raw evidence, and the ONLY copy in this document: fix groups
@@ -253,6 +293,36 @@ interface SlimJsonReport {
       legacyValue?: string;
     }>;
   }>;
+  /**
+   * Evaluation gaps (#518): checks a rule skipped because a scan limit was hit,
+   * so "no issue" on those pages is not a clean result. Deliberately outside
+   * `issues`, which consumers treat as findings. Present only when non-empty.
+   */
+  skippedChecks?: SkippedCheck[];
+  /**
+   * Rules that do not apply to this audit's host (pub#629): the transport and
+   * delivery rules, skipped because the host is local or private-network. Not
+   * findings, not evaluation gaps, and never scored. Present only when a rule
+   * was skipped for that reason.
+   */
+  notApplicable?: {
+    reason: "private-target";
+    message: string;
+    rules: Array<{ ruleId: string; name: string }>;
+  };
+  /**
+   * Checks this audit did not run (repo#2729): external link checking was off,
+   * or the crawl did not follow links. NOT a pass: "no issue" for these rules
+   * means nothing was checked. `message` is the full line every format shows,
+   * including what to run instead. Never scored. Present only when non-empty.
+   */
+  notChecked?: Array<{
+    ruleId: string;
+    name: string;
+    check: string;
+    reason: string;
+    message: string;
+  }>;
   // Report-only — never part of the score. Present when the Pro cloud
   // editor-summary call ran (exec-email-shaped narrative + big-ticket items).
   editorSummary?: {
@@ -265,6 +335,10 @@ interface SlimJsonReport {
   // Report-only — never part of the score. The entity-map document (#2091),
   // emitted verbatim so it still validates against the core-contracts schema.
   entities?: EntityMap;
+  // Report-only — never part of the score (#2307). Where the audited pages' links sit and the
+  // page types the classifier gave them. Absent when no audited page carries either, which is
+  // every crawl stored before the page classifier existed.
+  structure?: ReportStructure;
   // Report-only — never part of the score. Present when cloud tech-detect ran.
   technologies?: {
     firstScan: boolean;
@@ -310,9 +384,12 @@ interface SlimJsonReport {
 
 function buildSlimReport(report: AuditReport, version: string): SlimJsonReport {
   const siteWide = siteWideContext(report);
-  const categoryIssues = groupIssuesByCategory(report.ruleResults);
+  const categoryIssues = groupIssuesByCategory(report.ruleResults, report.checkTallies);
   const es = editorSummaryView(report.editorSummary);
   const refusedSeedRedirect = seedRedirect(report);
+  const skippedChecks = collectSkippedChecks(report.ruleResults);
+  const privateTarget = privateTargetLine(report);
+  const notChecked = notCheckedRules(report);
   return {
     meta: {
       version,
@@ -336,7 +413,14 @@ function buildSlimReport(report: AuditReport, version: string): SlimJsonReport {
       ...(report.scanScope?.requestedMaxPages !== undefined
         ? { requestedMaxPages: report.scanScope.requestedMaxPages }
         : {}),
+      ...(report.scanScope?.stopReason !== undefined
+        ? { stopReason: report.scanScope.stopReason }
+        : {}),
       ...(report.coverage ? { coverage: report.coverage } : {}),
+      // The audit level and the settings it resolved to: `level` (a level's
+      // name, or `custom`), `basedOn`, `changes` and `settings`. Absent on
+      // reports written before audit levels.
+      ...(report.auditLevel ? { auditLevel: report.auditLevel } : {}),
       // #1990: how much of this audit's rules phase was replayed from a previous
       // audit rather than evaluated now. A replay and a fresh evaluation produce
       // identical findings by construction, so this is the only thing in the
@@ -354,6 +438,7 @@ function buildSlimReport(report: AuditReport, version: string): SlimJsonReport {
     ...(report.rateLimited && report.rateLimited.pages > 0
       ? { rateLimited: report.rateLimited }
       : {}),
+    ...(report.refusedFetches?.length ? { refusedFetches: report.refusedFetches } : {}),
     score: {
       // null ⇒ N/A (failed/0-page audit); preserved through save/reload (#586).
       overall: report.healthScore?.overall ?? null,
@@ -377,6 +462,7 @@ function buildSlimReport(report: AuditReport, version: string): SlimJsonReport {
       passed: report.passed,
       warnings: report.warnings,
       failed: report.failed,
+      skipped: skippedChecks.reduce((sum, s) => sum + s.pagesCount, 0),
     },
     // Same guard as every other format, validated rather than just cast: the
     // declared shape promises string fields, so a malformed stored summary omits
@@ -457,64 +543,104 @@ function buildSlimReport(report: AuditReport, version: string): SlimJsonReport {
           : {};
       })(),
       checks: rule.checks.map((check) => {
-      // #1023 R-F: affectedPages is a labeled sample; count is authoritative.
-      const ap = affectedPages(check);
-      return {
-        name: check.name,
-        status: check.status as "fail" | "warn",
-        message: check.message,
-        affectedPages: ap.sample,
-        affectedPagesCount: ap.count,
-        affectedPagesHasMore: ap.hasMore,
-        items: check.items?.map((item) => {
-          const info = siteWideItem(item, siteWide.total, siteWide.pageUrls);
-          return info ? { ...item, siteWide: { pages: info.pages, of: info.of } } : item;
-        }),
-        details: check.details,
-        ...(check.componentOccurrences?.length
-          ? (() => {
-              const packed = packComponentOccurrences(check.componentOccurrences);
-              return {
-                componentOccurrences: packed.occurrences,
-                componentShapes: {
-                  v: packed.v,
-                  shapes: packed.shapes,
-                  ...(packed.ladders?.length ? { ladders: packed.ladders } : {}),
-                },
-              };
-            })()
-          : {}),
-        ...(check.componentEvidence ? { componentEvidence: check.componentEvidence } : {}),
-        // #2341: the raw evidence, packed. The derived `siteResourceFixGroups`
-        // above are NOT what a re-import reads back — they are derived, and
-        // `report -i` re-derives them from this, so there is one source of
-        // truth rather than two that can disagree.
-        ...(check.siteResourceOccurrences?.length
-          ? {
-              siteResourceOccurrences: packSiteResourceOccurrences(
-                check.siteResourceOccurrences,
-              ),
+        // #1023 R-F: affectedPages is a labeled sample; count is authoritative.
+        const ap = affectedPages(check);
+        // pub#846: the region a check or item is shown in, beside the bounded page lists.
+        const regionScope = checkRegionScope(check, ap.count, report.structure);
+        const typeScope = regionScope
+          ? undefined
+          : checkPageTypeScope(check, ap.count, report.structure);
+        return {
+          name: check.name,
+          status: check.status as "fail" | "warn",
+          message: check.message,
+          affectedPages: ap.sample,
+          affectedPagesCount: ap.count,
+          affectedPagesHasMore: ap.hasMore,
+          ...(regionScope
+            ? { scope: regionScopeData(regionScope) }
+            : typeScope
+              ? { scope: pageTypeScopeData(typeScope) }
+              : {}),
+          items: check.items?.map((item) => {
+            const scope = itemRegionScope(item, report.structure);
+            let shown: CheckItem & { scope?: RegionScope } = item;
+            if (scope) {
+              // The label drops the section phrase `scope` now carries; `meta.sections` keeps it.
+              const label = itemLabel(item, scope);
+              shown = { ...item, scope: regionScopeData(scope) };
+              if (label === undefined) delete shown.label;
+              else shown.label = label;
             }
-          : {}),
-        ...(check.siteResourceEvidence
-          ? { siteResourceEvidence: check.siteResourceEvidence }
-          : {}),
-        ...(check.value ? { legacyValue: check.value } : {}),
-        // Smart audits (#110): provenance for findings carried across audits.
-        // (#1652) "unrendered" is tested FIRST and emits no `lastSeenAt` —
-        // no audit has rendered the page, so there is nothing it was last
-        // seen at, and calling it "carried" would invent a prior audit.
-        ...(check.unrenderedCount && check.unrenderedCount >= check.count
-          ? { provenance: "unrendered" as const }
-          : check.carriedCount && check.carriedCount >= check.count
+            const info = siteWideItem(item, siteWide.total, siteWide.pageUrls);
+            return info ? { ...shown, siteWide: { pages: info.pages, of: info.of } } : shown;
+          }),
+          details: check.details,
+          ...(check.componentOccurrences?.length
+            ? (() => {
+                const packed = packComponentOccurrences(check.componentOccurrences);
+                return {
+                  componentOccurrences: packed.occurrences,
+                  componentShapes: {
+                    v: packed.v,
+                    shapes: packed.shapes,
+                    ...(packed.ladders?.length ? { ladders: packed.ladders } : {}),
+                  },
+                };
+              })()
+            : {}),
+          ...(check.componentEvidence ? { componentEvidence: check.componentEvidence } : {}),
+          // #2341: the raw evidence, packed. The derived `siteResourceFixGroups`
+          // above are NOT what a re-import reads back — they are derived, and
+          // `report -i` re-derives them from this, so there is one source of
+          // truth rather than two that can disagree.
+          ...(check.siteResourceOccurrences?.length
             ? {
-                provenance: "carried" as const,
-                ...(check.lastSeenAt ? { lastSeenAt: check.lastSeenAt } : {}),
+                siteResourceOccurrences: packSiteResourceOccurrences(
+                  check.siteResourceOccurrences,
+                ),
               }
             : {}),
-      };
-  }),
+          ...(check.siteResourceEvidence
+            ? { siteResourceEvidence: check.siteResourceEvidence }
+            : {}),
+          ...(check.value ? { legacyValue: check.value } : {}),
+          // Smart audits (#110): provenance for findings carried across audits.
+          // (#1652) "unrendered" is tested FIRST and emits no `lastSeenAt` —
+          // no audit has rendered the page, so there is nothing it was last
+          // seen at, and calling it "carried" would invent a prior audit.
+          ...(check.unrenderedCount && check.unrenderedCount >= check.count
+            ? { provenance: "unrendered" as const }
+            : check.carriedCount && check.carriedCount >= check.count
+              ? {
+                  provenance: "carried" as const,
+                  ...(check.lastSeenAt ? { lastSeenAt: check.lastSeenAt } : {}),
+                }
+              : {}),
+        };
+      }),
     })),
+    ...(skippedChecks.length > 0 ? { skippedChecks } : {}),
+    ...(privateTarget
+      ? {
+          notApplicable: {
+            reason: "private-target" as const,
+            message: privateTarget,
+            rules: privateTargetSkippedRules(report).map((r) => ({ ruleId: r.id, name: r.name })),
+          },
+        }
+      : {}),
+    ...(notChecked.length > 0
+      ? {
+          notChecked: notChecked.map((r) => ({
+            ruleId: r.ruleId,
+            name: r.name,
+            check: r.check,
+            reason: r.reason,
+            message: notCheckedLine(r),
+          })),
+        }
+      : {}),
     ...(report.technologies && report.technologies.items.length > 0
       ? {
           technologies: {
@@ -533,6 +659,8 @@ function buildSlimReport(report: AuditReport, version: string): SlimJsonReport {
           },
         }
       : {}),
+    // Page structure (#2307): the report-level block as data. Report-only, never scored.
+    ...(report.structure ? { structure: report.structure } : {}),
     // Entities (#2091): the whole entity-map document, verbatim. Report-only
     // and never part of the score. Emitted as-is rather than reshaped so a
     // consumer can validate it against the core-contracts zod schema.

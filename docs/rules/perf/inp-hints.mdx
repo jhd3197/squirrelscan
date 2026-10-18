@@ -14,11 +14,15 @@ Third-party scripts are the usual source, because they are written for a differe
 The rule runs on every crawled page and emits one or two checks:
 
 - `inp-third-party`: warns with the message `N third-party scripts may impact INP` above five, reports at info status with `N third-party script(s) detected` from one to five, and passes with `No third-party scripts detected` at zero. Each script URL is listed as an item in the first two cases.
-- `inp-blocking-scripts`: warns with the message `N blocking scripts (consider async/defer)` when more than three `<script src>` elements have neither `async` nor `defer`. With three or fewer and at least one `<script src>` on the page it passes with `Script loading patterns look good`. A page with no external scripts emits nothing for this check, and a `src` that is present but empty is not counted as blocking.
+- `inp-blocking-scripts`: warns with the message `N blocking scripts (consider async/defer)` when more than three classic `<script src>` elements have neither `async` nor `defer`. With three or fewer and at least one `<script src>` on the page it passes with `Script loading patterns look good`. A page with no external scripts emits nothing for this check, and a `src` that is present but empty is not counted as blocking.
+
+A `type="module"` script counts as deferred, or as async when it has `async`. A classic script with `nomodule`, or a script whose `type` is not JavaScript (such as `text/plain` behind a consent banner), is never blocking, because a modern browser does not run it. Such a script still counts toward the third-party number, since a consent banner usually turns it into a running script later.
 
 A script counts as third-party only when its host differs from the page host and matches one of about twenty-five known analytics, advertising, support and monitoring domains, either exactly or as a subdomain. A script from an unlisted third-party host is not counted, so the number is a floor rather than a total.
 
 The signals come from a shared analysis of the page that six performance rules read, computed once per page.
+
+Elements inside `<noscript>` are skipped: a browser with scripting enabled reads `<noscript>` content as plain text, so nothing in it loads or renders. See [content inside noscript](/rules#content-inside-noscript).
 
 ## How to fix it
 
@@ -62,8 +66,9 @@ disable = ["perf/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["perf/inp-hints"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
@@ -81,7 +86,7 @@ Performance findings ship in every audit next to the SEO, security and agent exp
 
 ## Check your site
 
-Run `squirrel audit https://example.com` and open the Performance section of the report. Each page lists its third-party scripts and its blocking count. Local audits are free.
+Run `squirrel audit https://example.com` and open the Performance section of the report. Each page lists its third-party scripts and its blocking count. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">

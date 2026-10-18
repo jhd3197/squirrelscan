@@ -3,44 +3,38 @@
  */
 
 import type { WebsiteScheduleSummary } from "@squirrelscan/cloud-client";
-import type { ResolutionSignal } from "@squirrelscan/core-contracts";
 
 import { computeLockedRules } from "@squirrelscan/audit-engine";
-import { slimEntityMapForPublish } from "@squirrelscan/audit-engine/entity-map";
 import {
+  capReportForPublish,
+  PublishedReportTooLargeError,
+  type CappedReport,
+} from "@squirrelscan/audit-engine/publish-cap";
+import { clampItemString } from "@squirrelscan/core-contracts/clamp";
+import {
+  PUBLISHED_REPORT_MAX_BYTES,
   REPORT_LIMITS,
-  PUBLISH_LIMITS,
-  PUBLISH_DEGRADE_LIMITS,
 } from "@squirrelscan/core-contracts/limits";
-import {
-  buildResolutionSignal,
-  clampReportPagesToBudget,
-  degradeAndRebuild,
-  foldOverflowChecks,
-  sampleChecksForPublish,
-  DEFAULT_PUBLISH_SAMPLE,
-  type PublishSampleLimits,
-} from "@squirrelscan/rules";
-import { byteLength } from "@squirrelscan/utils/bytes";
 import { Effect } from "effect";
-import { existsSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync } from "node:fs";
 
 import type { AuditReport, CheckResult } from "@/types";
 
 import { hasEverPublished } from "@/cli/publish-nudge";
+import { REPORTS_BASE_URL } from "@/constants";
 import { type Result, ok, err, commandError } from "@/controllers/types";
 import { getGlobalContentStore } from "@/crawler/storage/content-store";
 import { SQLiteStorage } from "@/crawler/storage/sqlite";
 import { cliApi } from "@/lib/api-client";
 import { teamPlanRequiredMessage } from "@/lib/plan-messages";
+import { runPath } from "@/lib/run-tracker";
 import { isScheduleSummary } from "@/lib/schedule-notice";
+import { DEFAULT_API_URL, getApiUrl } from "@/self/api";
 import {
   API_TOKEN_ENV_VAR,
   envTokenRejectedMessage,
   resolveCredential,
 } from "@/self/credentials";
-import { getProjectsPath } from "@/self/paths";
 import { loadUserSettings, updateSettings } from "@/self/settings";
 
 import { version } from "../../../package.json";
@@ -120,6 +114,104 @@ interface ApiSuccessResponse {
 
 const PUBLISH_TIMEOUT_MS = 30_000;
 const PUBLISH_MAX_ATTEMPTS = 3;
+const RECOVERY_TIMEOUT_MS = 10_000;
+// The pre-POST snapshot runs on every publish, so it is bounded tightly: an
+// unreadable snapshot only disables recovery (fails closed), never the publish.
+const SNAPSHOT_TIMEOUT_MS = 3_000;
+
+/** The report still holds its crawled page list. */
+function hasCrawledPages(report: AuditReport): boolean {
+  return Array.isArray(report.pages) && report.pages.length > 0;
+}
+
+/**
+ * Any rule holds a page check: one with a `pageUrl`, or a folded aggregate of
+ * them. Reads an `--input` file as loaded, unvalidated, so it never throws on
+ * a malformed one (the capper then refuses that with a clear error).
+ */
+function hasPageChecks(report: AuditReport): boolean {
+  const rules = report.ruleResults;
+  if (!rules || typeof rules !== "object") return false;
+  for (const rule of Object.values(rules)) {
+    const checks: unknown = rule?.checks;
+    if (!Array.isArray(checks)) continue;
+    for (const check of checks as Array<
+      Partial<CheckResult> | null | undefined
+    >) {
+      if (check?.pageUrl) return true;
+      if (
+        check?.details?.aggregated === true &&
+        Array.isArray(check.pages) &&
+        check.pages.length > 0
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * What the user reads when a report is too large to publish, whether the
+ * capper refused it before the POST or the API refused the body (413).
+ */
+export function payloadTooLargeMessage(): string {
+  return `Report exceeds maximum allowed size (${PUBLISHED_REPORT_MAX_BYTES / 1024 / 1024}MB).\nTry reducing the number of pages audited.`;
+}
+
+/**
+ * Stamp the FIRST publish (#2182). Non-fatal by construction: the report IS
+ * published, and a failed settings write must not turn it into an error.
+ */
+function stampFirstPublish(): void {
+  const settings = loadUserSettings();
+  if (settings.ok && !hasEverPublished(settings.data)) {
+    updateSettings({ first_publish_at: new Date().toISOString() });
+  }
+}
+
+/**
+ * Read the `reportId` the server has linked to a run (`agent_runs.report_id`,
+ * set at publish). Returns undefined when the run cannot be read, null when it
+ * has no linked report. Uses the same base as the lifecycle calls: org API keys
+ * (`sq_`) are rejected on the userId-scoped route.
+ */
+async function readRunReportId(
+  runId: string,
+  token: string,
+  timeoutMs: number = RECOVERY_TIMEOUT_MS
+): Promise<string | null | undefined> {
+  try {
+    const run = await cliApi.request<{ reportId?: string | null }>(
+      runPath(runId),
+      { token, timeoutMs }
+    );
+    if (!run.ok) return undefined;
+    const reportId = run.data?.reportId;
+    return typeof reportId === "string" && reportId ? reportId : null;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * After a publish 5xx, decide whether the report landed anyway. A 5xx can be a
+ * worker kill AFTER the report was written and linked to the run, so a run
+ * whose `reportId` is set now is the answer, but only if it was NOT already set
+ * before this attempt: a re-publish on a run that already had a report would
+ * otherwise "recover" the OLD report. When the pre-publish state is unknown
+ * (`before === undefined`) we cannot tell, so we keep the failure. Never
+ * re-POSTs: a retry would mint a second report row and orphan its R2 objects.
+ */
+async function findLinkedReportId(
+  runId: string,
+  token: string,
+  before: string | null | undefined
+): Promise<string | null> {
+  if (before === undefined) return null;
+  const after = await readRunReportId(runId, token);
+  return after && after !== before ? after : null;
+}
 
 /**
  * Publish an audit report to the API
@@ -143,7 +235,15 @@ export async function publishReport(
 
   const visibility = options.visibility ?? "public";
 
-  const maxMB = REPORT_LIMITS.maxPayloadBytes / 1024 / 1024;
+  // Snapshot the run's linked report BEFORE the POST so a 5xx recovery can tell
+  // a report this attempt wrote from one a previous publish left behind. Started
+  // now so the round trip overlaps payload building; awaited just before the POST.
+  const reportIdBeforePromise: Promise<string | null | undefined> =
+    options.runId
+      ? readRunReportId(options.runId, credential.token, SNAPSHOT_TIMEOUT_MS)
+      : Promise.resolve(null);
+
+  const maxMB = PUBLISHED_REPORT_MAX_BYTES / 1024 / 1024;
   const linkage = {
     // Link to the pre-registered audit (#271) so publish updates that skeleton
     // rather than creating a duplicate DO audit, and keeps it on the registered
@@ -152,68 +252,56 @@ export async function publishReport(
     ...(options.runId ? { runId: options.runId } : {}),
     ...(options.websiteId ? { websiteId: options.websiteId } : {}),
   };
-  // #1185: the signal is built from PRE-sample data, so it's identical for the
-  // primary and degrade passes — build it once. Rebuilding it inside the
-  // degrade pass would redo O(rules × pages) work on exactly the pathological
-  // large-site path that triggered the degrade.
-  const precomputed = {
-    resolutionSignal: buildResolutionSignal(
-      report.ruleResults,
-      report.pages.map((p) => p.url)
-    ),
-  };
-  const wrapBody = (slimmed: ReturnType<typeof slimForPublish>): string =>
-    JSON.stringify({
-      report: slimmed,
-      visibility,
-      ...linkage,
-    });
 
-  // Slim the report before publishing — strip bulky data not needed for rendering,
-  // then SAMPLE every check to the primary publish caps (#1167). Keep the slimmed
-  // report so the degrade pass can re-sample IT harder in place rather than redo
-  // the O(rules × pages) slim from scratch.
-  const slimmed = slimForPublish(report, undefined, precomputed);
-  let body = wrapBody(slimmed);
-
-  // #1167/#1172 degrade pass: with the primary per-check sample caps in place a
-  // published report is O(rules × sample_cap) and can't realistically exceed the
-  // 20MB gate — but rather than hard-fail an AUTO-publish (the local report already
-  // succeeded + printed), re-sample the SLIMMED report with the harder
-  // PUBLISH_DEGRADE_LIMITS via the shared helper (worker-agent uses the same one)
-  // and warn. Only error if STILL over, which should be unreachable post-caps.
-  //
-  // Degrading the primary-slimmed report (vs re-slimming the original at the
-  // harder caps) is equivalent for every reachable input: pages/items kept are
-  // first-N, pagesTruncated is preserved-if-larger, and additional is additive
-  // (see degradeAndRebuild). It skips slimForPublish's clampReportPagesToBudget
-  // byte backstop on the degrade pass, which is safe: the primary slim already
-  // clamped total check pages ≤ its budget and the degrade sample only shrinks
-  // them further, so the re-slim can't 413 where this doesn't. The sole
-  // divergence is a pathological >budget-of-URLs report where the primary clamp
-  // clipped a check below the 25-page degrade cap — there this cites fewer (never
-  // more) affected-page URLs, with pagesTruncated carrying the true count. A
-  // strictly-safer clip, not a lost signal.
-  // #1275: gate on the UTF-8 WIRE size, not `body.length` (UTF-16 code units) —
-  // a multi-byte (CJK/emoji) report can exceed maxPayloadBytes in real bytes
-  // while its `.length` reads under it, so the degrade pass must key off bytes.
-  if (byteLength(body) > REPORT_LIMITS.maxPayloadBytes) {
-    degradeAndRebuild(slimmed, PUBLISH_DEGRADE_LIMITS);
-    body = wrapBody(slimmed);
-    options.onWarn?.(
-      `Report detail clipped to fit the ${maxMB}MB publish limit ` +
-        `(${PUBLISH_DEGRADE_LIMITS.maxPagesPerCheck} affected pages per finding).`
+  // A report with page checks but no crawled page list (a published or slimmed
+  // JSON loaded with `--input`) cannot be capped soundly: the capper drops its
+  // pass rows into tallies that the server reads only beside a resolution
+  // signal, which it builds from `pages[]`, so the score would collapse to the
+  // failures alone. Refused before any request.
+  if (!hasCrawledPages(report) && hasPageChecks(report)) {
+    return err(
+      commandError(
+        "PUBLISH_PREPARE_FAILED",
+        "This report has no crawled page list (an exported, published or slimmed copy), " +
+          "so it cannot be published without losing its score.\n" +
+          "Publish the audit from its project with `squirrel report <audit-id> --publish`, " +
+          "or re-run the audit to publish it."
+      )
     );
-    if (byteLength(body) > REPORT_LIMITS.maxPayloadBytes) {
-      const sizeMB = (byteLength(body) / 1024 / 1024).toFixed(2);
-      return err(
-        commandError(
-          "PAYLOAD_TOO_LARGE",
-          `Report size (${sizeMB}MB) exceeds maximum allowed (${maxMB}MB).\nTry reducing the number of pages audited.`
-        )
-      );
-    }
   }
+
+  // repo#2667: the published report is the engine's capped summary, at most
+  // PUBLISHED_REPORT_MAX_BYTES whatever the crawl size (the capper's own
+  // budget leaves room for this envelope). The full per-page detail stays in
+  // the local project database. The capper refuses only a report whose
+  // skeleton alone is over the budget, which no real shape comes near.
+  let slimmed: ReturnType<typeof slimForPublish>;
+  try {
+    slimmed = slimForPublish(report);
+  } catch (error) {
+    // Too large: the same message as the API's refusal of the body below.
+    if (error instanceof PublishedReportTooLargeError) {
+      return err(commandError("PAYLOAD_TOO_LARGE", payloadTooLargeMessage()));
+    }
+    // A stored report the capper cannot read (a malformed or much older one,
+    // republished with `squirrel report --publish`): say so and send nothing.
+    return err(
+      commandError(
+        "PUBLISH_PREPARE_FAILED",
+        `Could not prepare this report for publishing (${error instanceof Error ? error.message : String(error)}).\n` +
+          "It is still saved locally: view it with `squirrel report`."
+      )
+    );
+  }
+  if (slimmed.detail.tier > 0) {
+    options.onWarn?.(
+      `Published report samples reduced to fit the ${maxMB}MB ` +
+        "publish limit; the full detail stays local (`squirrel report --format json`)."
+    );
+  }
+  const body = JSON.stringify({ report: slimmed, visibility, ...linkage });
+
+  const reportIdBefore = await reportIdBeforePromise;
 
   try {
     // cliApi.fetch keeps publish's transport contract: a hard timeout + retry on
@@ -246,12 +334,7 @@ export async function publishReport(
       }
 
       if (response.status === 413) {
-        return err(
-          commandError(
-            "PAYLOAD_TOO_LARGE",
-            `Report exceeds maximum allowed size (${maxMB}MB).\nTry reducing the number of pages audited.`
-          )
-        );
+        return err(commandError("PAYLOAD_TOO_LARGE", payloadTooLargeMessage()));
       }
 
       // #1168: any server 5xx is a server-verifiable failure — classify it with a
@@ -261,6 +344,31 @@ export async function publishReport(
       // (e.g. PUBLISH_FAILED) that isn't in the refundable allowlist, so status
       // must win over the body for the refund classification.
       if (response.status >= 500) {
+        // #1340: the 5xx may have hit AFTER the report was written. Only runs
+        // registered at start (runId) can be checked; others keep the failure.
+        // Only the production API is recoverable: the link is built from the
+        // production reports host, and a staging or self-hosted API serves its
+        // reports from its own base, which the CLI cannot discover.
+        const recoveredId =
+          options.runId && getApiUrl() === DEFAULT_API_URL
+            ? await findLinkedReportId(
+                options.runId,
+                credential.token,
+                reportIdBefore
+              )
+            : null;
+        if (recoveredId) {
+          // Only the id is known: visibility is what we asked for, and the
+          // schedule notice / server-merged score are unavailable, so the caller
+          // keeps its local estimate (the run's own finalize handles refunds).
+          stampFirstPublish();
+          return ok({
+            id: recoveredId,
+            url: `${REPORTS_BASE_URL}/${recoveredId}`,
+            visibility,
+            createdAt: new Date().toISOString(),
+          });
+        }
         return err(
           commandError(
             "PUBLISH_SERVER_ERROR",
@@ -354,10 +462,7 @@ export async function publishReport(
     // Non-fatal by construction: the report IS published, and a settings write
     // that fails must not turn a successful publish into an error. The worst
     // case is one extra nudge line on a later run.
-    const settings = loadUserSettings();
-    if (settings.ok && !hasEverPublished(settings.data)) {
-      updateSettings({ first_publish_at: new Date().toISOString() });
-    }
+    stampFirstPublish();
 
     return ok({
       id: data.id,
@@ -383,68 +488,49 @@ export async function publishReport(
 }
 
 /**
- * Get all project storage paths
- */
-function getProjectStoragePaths(): string[] {
-  const projectsDir = getProjectsPath();
-  if (!existsSync(projectsDir)) return [];
-
-  return readdirSync(projectsDir, { withFileTypes: true })
-    .filter((d) => d.isDirectory())
-    .map((d) => join(projectsDir, d.name, "project.db"))
-    .filter((p) => existsSync(p));
-}
-
-/**
- * Save published report info to local storage for tracking
- * This allows showing published status in `squirrel report --list`
+ * Mark a crawl as published in its project's database, so `squirrel report
+ * --list` shows the hosted report next to it.
+ *
+ * `dbPath` is that project's `project.db`, which every caller already knows: the
+ * audit just wrote to it, or the report was loaded from it. #625: this used to
+ * open and initialise every database under `~/.squirrel/projects` until one held
+ * the crawl, so the end of an audit stalled on a large store (17,248 databases on
+ * one machine) after the report url had already printed.
+ *
+ * Non-fatal by construction, as before: the report IS published. A database that
+ * is missing, does not hold the crawl or fails to open only skips the local mark.
  */
 export async function savePublishedReportInfo(
+  dbPath: string,
   crawlId: string,
   reportId: string,
   url: string,
   visibility: ReportVisibility
 ): Promise<void> {
-  const dbPaths = getProjectStoragePaths();
+  if (!existsSync(dbPath)) return;
 
-  // Search for the crawlId in all project databases
-  for (const dbPath of dbPaths) {
-    if (!existsSync(dbPath)) continue;
-
-    const storage = new SQLiteStorage(dbPath, getGlobalContentStore());
-    try {
-      const found = await Effect.runPromise(
-        Effect.gen(function* () {
-          yield* storage.init();
-          const crawl = yield* storage.getCrawl(crawlId);
-          if (!crawl) {
-            return false;
-          }
-          // Found the crawl - save published info
-          yield* storage.savePublishedReport(
-            crawlId,
-            reportId,
-            url,
-            visibility,
-            new Date().toISOString()
-          );
-          return true;
-        })
-      );
-
-      if (found) {
-        await Effect.runPromise(
-          storage.close().pipe(Effect.catchAll(() => Effect.void))
+  const storage = new SQLiteStorage(dbPath, getGlobalContentStore());
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* storage.init();
+        const crawl = yield* storage.getCrawl(crawlId);
+        if (!crawl) return;
+        yield* storage.savePublishedReport(
+          crawlId,
+          reportId,
+          url,
+          visibility,
+          new Date().toISOString()
         );
-        return;
-      }
-    } catch {
-      // Continue to next database
-    } finally {
-      await Effect.runPromise(
-        storage.close().pipe(Effect.catchAll(() => Effect.void))
-      );
-    }
+      })
+    );
+  } catch {
+    // The publish succeeded; only the local "published" mark is lost.
+  } finally {
+    await Effect.runPromise(
+      storage.close().pipe(Effect.catchAll(() => Effect.void))
+    );
   }
 }
 
@@ -492,217 +578,60 @@ export function pickHomepageSummary(
   const title = home.meta?.title ?? home.og?.title ?? null;
   const description = home.meta?.description ?? home.og?.description ?? null;
   if (!title && !description) return undefined;
-  return { title, description };
+  // Site-controlled text, bounded as the API bounds it: the capper keeps the
+  // field whole, so an unbounded title alone could push a report past its budget.
+  return {
+    title:
+      title === null
+        ? null
+        : clampItemString(title, REPORT_LIMITS.maxMediumString),
+    description:
+      description === null
+        ? null
+        : clampItemString(description, REPORT_LIMITS.maxMetaDescriptionString),
+  };
 }
 
+/** What the CLI adds to a report before it is capped for publish. */
+type CliPublishReport = AuditReport & {
+  generatorVersion: string;
+  lockedRules: ReturnType<typeof computeLockedRules>;
+  homepage?: HomepageSummary;
+};
+
 /**
- * Strip bulky data from report before publishing to API.
+ * The report body the CLI publishes (repo#2667): the engine's capped summary,
+ * built by the same `capReportForPublish` the cloud container publishes with,
+ * so the two bodies cannot drift.
  *
- * Renderers only use ruleResults + healthScore + summary metadata.
- * The pages[] array (links, images, textContent, headers, checks per page)
- * is the main bloat source and is never rendered.
+ * The capper drops `pages[]`, the per-page pass rows (their counts ride in
+ * `checkTallies`, which the server rescores from), the raw resolution signal and
+ * the local `rulesCache`. It samples each issue class with its true counts,
+ * builds the compact signal and `pageStatuses` from the FULL report within their
+ * byte share, and stamps `detail` (`fullDetail: "local"`: the per-page detail is
+ * in this machine's project database). It never mutates `report`, so a
+ * `--format json` export of the same run keeps every row.
+ *
+ * What only the CLI knows rides along: its version for the report footer, the
+ * cloud-only rules it did not run (the report's upsell) and a home-page title
+ * and description, so the API can seed the website record. All three are read
+ * from the full report, before the capper drops its pages.
+ *
+ * Throws `PublishedReportTooLargeError` when even the report's skeleton does
+ * not fit the budget.
  */
 // Exported for tests (publish-slim.test.ts) — not part of the module's API.
-// `sampleLimits` selects the per-check SAMPLE caps (#1167): the default primary
-// caps, or PUBLISH_DEGRADE_LIMITS for the publish.ts degrade pass (a harder re-slim
-// when the primary-capped body still exceeds maxPayloadBytes).
 export function slimForPublish(
-  report: AuditReport,
-  sampleLimits: PublishSampleLimits = DEFAULT_PUBLISH_SAMPLE,
-  // Lets the caller build the (sampling-independent) signal once across the
-  // primary and degrade passes. Omit it and one is built here.
-  precomputed?: { resolutionSignal: ResolutionSignal | undefined }
-): Omit<AuditReport, "pages"> & {
-  pages: [];
-  homepage?: HomepageSummary;
-  resolutionSignal?: ResolutionSignal;
-} {
-  // #1185: build the UNSAMPLED resolution signal from the pre-sample rule
-  // results + the full crawled-page list, BEFORE sampling clips pages[] below
-  // — the server merge uses it to resolve findings on pages crawled clean this
-  // run that the sample would otherwise leave carried forever.
-  const resolutionSignal = precomputed
-    ? precomputed.resolutionSignal
-    : buildResolutionSignal(
-        report.ruleResults,
-        report.pages.map((p) => p.url)
-      );
-  // robots.txt content clamp helper (see below).
-  const truncate = (value: string | undefined, max: number) =>
-    value !== undefined && value.length > max ? value.slice(0, max) : value;
-
-  // Trim ruleResults: fold over-cap check arrays, then SAMPLE each check (#1167).
-  const ruleResults: Record<
-    string,
-    { meta: AuditReport["ruleResults"][string]["meta"]; checks: CheckResult[] }
-  > = {};
-  for (const [ruleId, result] of Object.entries(report.ruleResults)) {
-    // Fresh-audit reports arrive pre-folded (adapter), but reports rebuilt
-    // from storage (`squirrel report` republish) don't — fold here too so no
-    // publish path can overflow maxChecksPerRule into silent schema slicing
-    // (#910). Idempotent: under-cap arrays pass through untouched.
-    //
-    // sampleChecksForPublish (#1167) then bounds every check to a fixed SAMPLE:
-    // pages[] → maxPagesPerCheck (stamping details.pagesTruncated so the sample is
-    // non-authoritative for the smart-audits merge), items → maxItems (details.
-    // additional), and each item's id/label + sourcePages. Post-sampling the
-    // payload is O(rules × sample_cap), flat regardless of crawl size.
-    // Spread into a slimForPublish-OWNED array: the byte-budget backstop below
-    // may clone-replace an element, and sampleChecksForPublish/foldOverflowChecks
-    // can return the source report's own array when nothing overran — reslicing
-    // that in place would corrupt `report` for the degrade re-slim (#1167).
-    ruleResults[ruleId] = {
-      meta: result.meta,
-      checks: [
-        ...sampleChecksForPublish(
-          foldOverflowChecks(result.checks),
-          sampleLimits
-        ),
-      ],
-    };
-  }
-
-  // #918/#1167: byte-budget backstop. Post-sampling the largest pages[] is
-  // maxPagesPerCheck (100) so this should never engage, but a pathological
-  // rule count could still push pages[] bytes toward the 20MB gate — clip the
-  // largest arrays under a byte budget, preserving the true pre-sample count in
-  // details.pagesTruncated (a 413 rejects the WHOLE publish, strictly worse).
-  clampReportPagesToBudget(ruleResults);
-
-  // Trim summary arrays
-  const summary = {
-    missingTitles: report.summary.missingTitles.slice(
-      0,
-      PUBLISH_LIMITS.maxSummary
-    ),
-    missingDescriptions: report.summary.missingDescriptions.slice(
-      0,
-      PUBLISH_LIMITS.maxSummary
-    ),
-    missingOgTags: report.summary.missingOgTags.slice(
-      0,
-      PUBLISH_LIMITS.maxSummary
-    ),
-    missingTwitterCards: report.summary.missingTwitterCards.slice(
-      0,
-      PUBLISH_LIMITS.maxSummary
-    ),
-    missingSchemas: report.summary.missingSchemas.slice(
-      0,
-      PUBLISH_LIMITS.maxSummary
-    ),
-    missingAltText: report.summary.missingAltText.slice(
-      0,
-      PUBLISH_LIMITS.maxSummary
-    ),
-    multipleH1s: report.summary.multipleH1s.slice(0, PUBLISH_LIMITS.maxSummary),
-    thinContentPages: report.summary.thinContentPages.slice(
-      0,
-      PUBLISH_LIMITS.maxSummary
-    ),
-    urlIssues: report.summary.urlIssues.slice(0, PUBLISH_LIMITS.maxSummary),
-    redirectChains: report.summary.redirectChains.slice(
-      0,
-      PUBLISH_LIMITS.maxSummary
-    ),
-    securityIssues: report.summary.securityIssues.slice(
-      0,
-      PUBLISH_LIMITS.maxSummary
-    ),
-  };
-
-  // Trim sitemap URLs (can be 50,000+). Mega-site sitemap indexes can list
-  // thousands of children (techcrunch: 2057) — the API caps both the
-  // discovered list and each childSitemaps array at maxSitemapEntries.
-  const sitemaps = report.sitemaps
-    ? {
-        ...report.sitemaps,
-        discovered: report.sitemaps.discovered
-          .slice(0, REPORT_LIMITS.maxSitemapEntries)
-          .map((s) => ({
-            ...s,
-            urls: s.urls.slice(0, PUBLISH_LIMITS.maxSitemapUrls),
-            ...(s.childSitemaps
-              ? {
-                  childSitemaps: s.childSitemaps.slice(
-                    0,
-                    REPORT_LIMITS.maxSitemapEntries
-                  ),
-                }
-              : {}),
-          })),
-        orphanPages: report.sitemaps.orphanPages.slice(
-          0,
-          PUBLISH_LIMITS.maxSummary
-        ),
-        missingPages: report.sitemaps.missingPages.slice(
-          0,
-          PUBLISH_LIMITS.maxSummary
-        ),
-      }
-    : undefined;
-
-  // Trim siteChecks the same way (#1167): sitemap-orphans can carry 6000+ items
-  // and site-wide rules a huge pages[]; sampleChecksForPublish caps both + stamps
-  // the truncation markers so the merge treats the page list as a sample.
-  const siteChecks = sampleChecksForPublish(report.siteChecks, sampleLimits);
-
-  // robots.txt content is capped at the API's long-string limit — mega-sites
-  // (nytimes) ship robots files well past 5000 chars.
-  const robotsTxt = report.robotsTxt
-    ? {
-        ...report.robotsTxt,
-        content:
-          report.robotsTxt.content != null
-            ? truncate(report.robotsTxt.content, REPORT_LIMITS.maxLongString)!
-            : report.robotsTxt.content,
-      }
-    : report.robotsTxt;
-
-  // Smart-audits cloud (#195): the server-side finding merge needs to know which
-  // pages 404/410'd this run so it can STALE their carried findings rather than
-  // carry them forever. 200 pages are implied by their ruleResults checks, so we
-  // send ONLY non-2xx statuses — tiny, and adds NOTHING (omitted entirely) for a
-  // healthy site, so it can't regress the publish payload size when there are no
-  // broken pages. URLs are re-normalized server-side.
-  // REPORT_LIMITS.maxPages here and the API schema's REPORT_LIMITS.MAX_PAGES both
-  // resolve to the SAME core-contracts `maxPages` (the API object aliases it), so
-  // the cap can't drift out from under the publish schema's `.max(MAX_PAGES)`.
-  const pageStatuses = report.pages
-    .filter((p) => p.statusCode < 200 || p.statusCode >= 300)
-    .map((p) => ({ url: p.url, status: p.statusCode }))
-    .slice(0, REPORT_LIMITS.maxPages);
-
-  return {
-    ...report,
-    // #2091: the report carries the FULL entity map, because `-f json` is the
-    // canonical export. The published copy is bounded here instead — node and
-    // edge caps plus a serialized-byte budget, since property values are
-    // site-controlled strings and a count alone does not bound bytes.
-    ...(report.entityMap
-      ? { entityMap: slimEntityMapForPublish(report.entityMap) }
-      : {}),
-    pages: [], // Drop all page-level data — renderers use ruleResults only
-    // #1990 provenance describes how THIS machine produced the report (what
-    // replayed from its local cache), not the site. It has no meaning to a reader
-    // of the hosted report and no place in the publish schema, so it is dropped
-    // here rather than left to ride along on the spread above.
-    rulesCache: undefined,
-    generatorVersion: version, // stamp the CLI version for the report footer
-    lockedRules: computeLockedRules(report), // cloud/Pro checks not run → upsell
-    ...(pageStatuses.length > 0 ? { pageStatuses } : {}),
-    ...(resolutionSignal ? { resolutionSignal } : {}),
-    // ...but keep a tiny home-page title/description so the API can seed the
-    // website record (full pages[] is gone).
-    homepage: pickHomepageSummary(report),
-    siteChecks,
-    summary,
-    sitemaps,
-    robotsTxt,
-    sitemapUrlStatuses: report.sitemapUrlStatuses?.slice(
-      0,
-      PUBLISH_LIMITS.maxSitemapUrls
-    ),
-    ruleResults,
-  };
+  report: AuditReport
+): CappedReport<CliPublishReport> {
+  const homepage = pickHomepageSummary(report);
+  return capReportForPublish<CliPublishReport>(
+    {
+      ...report,
+      generatorVersion: version,
+      lockedRules: computeLockedRules(report),
+      ...(homepage ? { homepage } : {}),
+    },
+    { fullDetail: "local" }
+  );
 }

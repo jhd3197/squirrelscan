@@ -7,9 +7,22 @@ import {
   type UpgradeOffer,
 } from "@squirrelscan/cloud-client";
 import {
+  formatProbeBudget,
+  type ProbeFlags,
+  type ProbeResolution,
+  type ProbeRunContext,
+  resolveProbeIntensity,
+} from "@squirrelscan/config";
+import {
   auditStatusToLifecycle,
+  clampAuditPages,
   computeCost,
+  CREDIT_PRICING_VERSION,
+  estimateAuditCap,
+  externalLinkBudget,
+  minimumAuditCredits,
 } from "@squirrelscan/core-contracts";
+import { AUDIT_LEVEL_PRESETS } from "@squirrelscan/core-contracts/audit-levels";
 import { fullScanHint } from "@squirrelscan/report";
 import { defineCommand } from "citty";
 import { existsSync } from "node:fs";
@@ -20,6 +33,7 @@ import type { PreflightBalance } from "@/lib/balance";
 import type { UserSettings } from "@/self/types";
 import type { AuditOptions } from "@/types";
 
+import { decodeFailureLines, isDecodeFailure } from "@/audit/decode-failures";
 import {
   normalizeFailOnArgs,
   parseFailOn,
@@ -31,6 +45,7 @@ import {
   parseHeaders,
   redactHeaders,
 } from "@/audit/headers";
+import { localUnverifiedLinksNotice } from "@/audit/local-link-notice";
 import {
   generateConsoleReport,
   generateTextReport,
@@ -47,22 +62,30 @@ import {
   parseRuleFilters,
   resolveRulesConfig,
 } from "@/audit/rule-filter";
+import { preflightRuleOptions } from "@/audit/rule-options-preflight";
 import { findConfigFile, getGlobalConfigPath, loadConfig } from "@/config";
 import {
   DASHBOARD_URL,
   MAX_PAGES_CAP,
   MAX_CRAWL_CONCURRENCY,
-  COVERAGE_QUICK_MAX_PAGES,
-  COVERAGE_SURFACE_MAX_PAGES,
-  COVERAGE_FULL_MAX_PAGES,
   STATUS_REQUEST_TIMEOUT_MS,
 } from "@/constants";
-import { runAudit } from "@/controllers/audit";
+import {
+  auditedPageCount,
+  runAudit,
+  withAuditPageSettlement,
+} from "@/controllers/audit";
 import {
   publishReport,
   savePublishedReportInfo,
   type ReportVisibility,
 } from "@/controllers/report/publish";
+import { ErrorCodes } from "@/controllers/types";
+import { domainToProjectName, resolveProjectDbPath } from "@/crawler/storage";
+import {
+  checkAuditStores,
+  formatStoreProblems,
+} from "@/crawler/storage/store-check";
 import { formatBalance, isUnlimitedBalance } from "@/lib/balance";
 import {
   cloudRenderSkippedLines,
@@ -86,7 +109,11 @@ import { scheduleSummaryLine } from "@/lib/schedule-notice";
 import { syncTechnologies } from "@/lib/technology-sync";
 import {
   AUDIT_BASE_CREDITS,
+  AUDIT_PAGE_CREDITS,
   AUDIT_PRICING_LINE,
+  EXTERNAL_LINK_CREDITS,
+  LINK_PRICING_NOTICE,
+  MIN_AUDIT_CREDITS,
   offerPitchLines,
   proPitchLines,
   resetDateLabel,
@@ -115,6 +142,21 @@ import { getProjectNameContext, parseUserUrl } from "@/utils/url";
 
 import { version as packageVersion } from "../../../package.json";
 import {
+  AUDIT_LEVELS,
+  type AuditLevel,
+  configLevelOverrides,
+  defaultAuditLevel,
+  defaultSmartAudits,
+  levelBannerParts,
+  levelCoverageMode,
+  levelHelpList,
+  levelMaxPages,
+  parseAuditLevel,
+  readLevelFlag,
+  resolveLocalAuditLevel,
+  unknownLevelMessage,
+} from "../audit-level";
+import {
   printHeader,
   printUpdateNotification,
   printEndOfRunUpdateReminder,
@@ -124,14 +166,8 @@ import {
   printFooter,
   lockedRulesFooterLine,
 } from "../banner";
-import {
-  COVERAGE_MODES,
-  coverageMaxPages,
-  defaultCoverageMode,
-  defaultSmartAudits,
-  normalizeCoverageMode,
-} from "../coverage";
 import { printDatabaseLockWarningIfNeeded } from "../db-lock-warning";
+import { hasFlag, hasNegatedFlag } from "../flags";
 import { fmt, pageLimitHint } from "../format";
 import { createProgress } from "../progress";
 import { promptForProjectName } from "../prompt";
@@ -158,14 +194,16 @@ export interface CloudConsentEstimate {
   maxCredits: number;
   /** Unmetered plan (enterprise): the balance sentence reads "unlimited". */
   unlimited?: boolean;
+  /** The audit's external links go to the cloud link checker (pricing v12, #801). */
+  externalLinks?: boolean;
 }
 
-/** The single up-front spend disclosure (pricing v10): flat audit base + render
- * rate × page ceiling, everything else included. Accepting it skips the later
- * post-crawl prompt. */
+/** The single up-front spend disclosure (pricing v11, #2290): flat audit base
+ * + 2 per audited page up to the page ceiling, everything else included.
+ * Accepting it skips the later post-crawl prompt. */
 export function consentEstimateLine(est: CloudConsentEstimate): string {
   const base = computeCost("audit_base", 1);
-  const renderEst = computeCost("render", est.maxPages);
+  const pagesEst = computeCost("audit_page", est.maxPages);
   const cap =
     est.maxCredits > 0 ? `, up to ${est.maxCredits} credits/audit` : "";
   const bal = est.unlimited
@@ -174,71 +212,136 @@ export function consentEstimateLine(est: CloudConsentEstimate): string {
       ? ` Balance: ${est.balance.toLocaleString("en-US")} credits.`
       : "";
   const pages = est.maxPages === 1 ? "page" : "pages";
-  return `About ${base + renderEst} credits: ${base} audit base + ${renderEst} to render up to ${est.maxPages} ${pages}, all analysis included${cap}.${bal}`;
-}
-
-/** #1169 preflight affordability estimate + warning copy. */
-export interface PreflightAffordability {
-  /** Flat audit base (pricing v10). */
-  base: number;
-  /** Up-to-maxPages render cost — 0 when cloud rendering is off. */
-  renderCost: number;
-  /** base + renderCost — an UPPER bound (the crawl may find fewer pages). */
-  estimate: number;
-  /** balance < estimate → the org can't cover the planned audit. */
-  shortfall: boolean;
-  /** Two-line (uncoloured) warning when `shortfall`, else empty. */
-  warningLines: string[];
+  const links = est.externalLinks
+    ? ` + up to ${computeCost("external_link", externalLinkBudget(est.maxPages))} for external links (${EXTERNAL_LINK_CREDITS} each the cloud verifies, at most 1 per page)`
+    : "";
+  const total = estimateAuditCap({
+    maxPages: est.maxPages,
+    cloudExternalLinks: est.externalLinks === true,
+  });
+  return `About ${total} credits: ${base} audit base + ${pagesEst} for up to ${est.maxPages} audited ${pages} (${AUDIT_PAGE_CREDITS} each, however the page is fetched)${links}, all analysis included${cap}.${bal}`;
 }
 
 /**
- * #1169: predict a signed-in audit's up-front cost and whether the balance falls
- * short. A signed-in audit debits the flat base at register + a per-rendered-page
- * charge as pages render (render charge only when cloud rendering is on), so the
- * cost is trivially predictable: `base + min(maxPages) × render`. Pricing comes
- * from the shared v10 source, never hardcoded. Extracted from the command body so
- * the estimate math + message copy are unit-testable (mirrors consentEstimateLine).
+ * #801: whether this audit prints the one-time notice that a signed-in audit's
+ * cloud link checks now cost credits: it registers (so it is billed), it checks
+ * external links, and the notice has not been shown on this machine.
+ */
+export function linkPricingNoticeDue(opts: {
+  registers: boolean;
+  externalLinks: boolean;
+  shown: boolean;
+  /** This run printed the cost line, which already prices the links. */
+  disclosedThisRun: boolean;
+}): boolean {
+  return (
+    opts.registers &&
+    opts.externalLinks &&
+    !opts.shown &&
+    !opts.disclosedThisRun
+  );
+}
+
+/** #1169 / #2290 preflight: what the audit will cost and the page cap its credits can pay for. */
+export interface PreflightAffordability {
+  /** Flat audit base. */
+  base: number;
+  /** 2 credits per page of the (possibly clamped) page cap. */
+  pagesCost: number;
+  /** base + pagesCost — an UPPER bound (the crawl may find fewer pages). */
+  estimate: number;
+  /** The page cap to crawl with. 0 ⇒ not even one page is affordable. */
+  maxPages: number;
+  /** The cap came down from what was asked for. */
+  clamped: boolean;
+  /** What bound it, when clamped: the balance, or `[cloud] max_credits_per_audit`. */
+  limitedBy?: "balance" | "cap";
+  /** Two-line (uncoloured) notice when `clamped`, else empty. */
+  noticeLines: string[];
+}
+
+/**
+ * #1169 / #2290: fit a signed-in audit's page cap to what it can pay for.
+ *
+ * Pricing v11 charges every audited page, however it was fetched, so the cost
+ * is trivially predictable: `base + 2 × pages`. An audit priced past the balance
+ * (or past the user's own `[cloud] max_credits_per_audit`) used to run anyway
+ * and stop paying part-way; now the page cap comes DOWN to what the credits
+ * cover, and the run says so, rather than refusing an audit a smaller crawl
+ * could afford. The caller drops to local-only only when not even one page is
+ * affordable (`maxPages === 0`). Pricing comes from the shared source, never
+ * hardcoded. Extracted from the command body so the math + copy are
+ * unit-testable (mirrors consentEstimateLine).
  */
 export function computePreflightAffordability(opts: {
   balance: number;
   maxPages: number;
-  cloudRendering: "http" | "browser";
+  /** `[cloud] max_credits_per_audit`; 0 = no cap. */
+  maxCreditsPerAudit: number;
   topUpUrl: string;
   /**
-   * The plan is not metered against `balance` (enterprise). There is nothing to
-   * fall short of, so the estimate is still computed but never warned about.
-   * Absent = metered.
+   * The plan is not metered against `balance` (enterprise). The balance bounds
+   * nothing, so only the user's own credit cap can clamp. Absent = metered.
    */
   unlimited?: boolean;
   /**
    * #2183: when the monthly grant comes back (`balance.periodEnd`). Waiting is
-   * a real answer to a shortfall — an audit that would degrade halfway is often
-   * worth postponing — but only once it has a date on it.
+   * a real answer to a clamped audit, but only once it has a date on it.
    */
   resetAt?: string | null;
+  /**
+   * The audit's external links go to the cloud link checker (pricing v12,
+   * #801): each page of the cap also reserves one external link's credit.
+   */
+  cloudExternalLinks?: boolean;
 }): PreflightAffordability {
   const base = computeCost("audit_base", 1);
-  const renderCost =
-    opts.cloudRendering === "browser"
-      ? computeCost("render", opts.maxPages)
-      : 0;
-  const estimate = base + renderCost;
-  const shortfall = !opts.unlimited && opts.balance < estimate;
+  const links = opts.cloudExternalLinks === true;
+  const budget = clampAuditPages({
+    maxPages: opts.maxPages,
+    balance: opts.balance,
+    unlimited: opts.unlimited,
+    cap: opts.maxCreditsPerAudit,
+    cloudExternalLinks: links,
+  });
+  const pagesCost =
+    computeCost("audit_page", budget.maxPages) +
+    (links && budget.maxPages > 0
+      ? computeCost("external_link", externalLinkBudget(budget.maxPages))
+      : 0);
+  const estimate = base + pagesCost;
+  const pricing = links
+    ? `${base} base + ${AUDIT_PAGE_CREDITS} per audited page + up to ${EXTERNAL_LINK_CREDITS} per page for external links`
+    : `${base} base + ${AUDIT_PAGE_CREDITS} per audited page`;
+  const requested = budget.requestedMaxPages.toLocaleString("en-US");
+  const covered = budget.maxPages.toLocaleString("en-US");
+  const stopsAt = budget.maxPages === 1 ? "1 page" : `${covered} pages`;
   const resetOn = resetDateLabel(opts.resetAt);
-  const warningLines = shortfall
-    ? [
-        `⚠ This audit may cost up to ${estimate.toLocaleString("en-US")} credits ` +
-          `(${base} base + up to ${renderCost.toLocaleString("en-US")} to render ${opts.maxPages} pages), ` +
-          `but your balance is ${opts.balance.toLocaleString("en-US")}.`,
-        // #2183: the same four facts the other CLI walls carry. `topUpUrl` is
-        // the server's org-scoped link when there is one, so one click lands on
-        // checkout for the org that is short rather than the last-used one.
-        `  Charging stops when credits run out — later pages won't render.` +
-          (resetOn ? ` Credits reset ${resetOn}.` : "") +
-          ` Top up: ${opts.topUpUrl}`,
-      ]
-    : [];
-  return { base, renderCost, estimate, shortfall, warningLines };
+  let noticeLines: string[] = [];
+  if (budget.clamped && budget.limitedBy === "cap") {
+    noticeLines = [
+      `⚠ [cloud] max_credits_per_audit = ${opts.maxCreditsPerAudit.toLocaleString("en-US")} covers ${covered} of the ${requested} pages requested (${pricing}), so this audit stops at ${stopsAt}.`,
+      "  Raise max_credits_per_audit (0 = no cap) to audit more.",
+    ];
+  } else if (budget.clamped) {
+    noticeLines = [
+      `⚠ Your balance of ${opts.balance.toLocaleString("en-US")} credits covers ${covered} of the ${requested} pages requested (${pricing}), so this audit stops at ${stopsAt}.`,
+      // #2183: the same facts the other CLI walls carry. `topUpUrl` is the
+      // server's org-scoped link when there is one, so one click lands on
+      // checkout for the org that is short rather than the last-used one.
+      (resetOn ? `  Credits reset ${resetOn}.` : " ") +
+        ` Top up for a full audit: ${opts.topUpUrl}`,
+    ];
+  }
+  return {
+    base,
+    pagesCost,
+    estimate,
+    maxPages: budget.maxPages,
+    clamped: budget.clamped,
+    ...(budget.limitedBy ? { limitedBy: budget.limitedBy } : {}),
+    noticeLines,
+  };
 }
 
 /**
@@ -261,7 +364,14 @@ export function registerFailureLines(
    * honestly instead of pitching Pro at someone on a contracted plan, which is
    * both wrong and leaks an internal plan's existence into a sales pitch.
    */
-  unlimited = false
+  unlimited = false,
+  /**
+   * The account is already on a paid plan, so there is no plan to sell it. An
+   * absent offer from an OLD server still gets the Pro pitch (a free account
+   * is the likely case), but a paid account is pointed at a top-up instead of
+   * being pitched the plan it pays for.
+   */
+  paidPlan = false
 ): string[] {
   if (failure.code !== "INSUFFICIENT_CREDITS") {
     return [`⚠ Run not tracked in your dashboard: ${failure.message}`];
@@ -301,17 +411,21 @@ export function registerFailureLines(
     // The server's own offer when it sent one: its link already names the org
     // that hit the wall, so the upgrade is one click rather than a login, an
     // org switch and a hunt for billing.
-    ...offerPitchLines(failure.upgrade, "cli-audit"),
+    ...(paidPlan && !failure.upgrade
+      ? [`  Top up: ${fmt.cyan(upgradeUrl("cli-audit"))}`]
+      : offerPitchLines(failure.upgrade, "cli-audit")),
   ];
 }
 
 /**
  * Can this signed-in account start a CLOUD audit, given its balance preflight?
  *
- * Pricing v10 (#391): every cloud audit debits a flat base at registration, so a
- * balance below it cannot start one and the run drops to local-only (no
- * register, no cloud calls, no publish) rather than letting the server 402 the
- * register mid-crawl.
+ * Pricing v11 (#2290): every signed-in audit debits a flat base at registration
+ * plus 2 per audited page, so a balance below the base plus ONE page cannot
+ * start one and the run drops to local-only (no register, no cloud calls, no
+ * publish) rather than letting the server 402 the register mid-crawl. Anything
+ * above that runs, with its page cap fitted to the balance by
+ * computePreflightAffordability.
  *
  * An unmetered plan is EXEMPT. Its stored total is frozen and usually 0, and the
  * server records the debit rather than deducting it, so comparing the number
@@ -328,7 +442,7 @@ export function canStartCloudAudit(balance: {
   unlimited?: boolean;
 }): boolean {
   if (isUnlimitedBalance(balance)) return true;
-  return balance.total >= computeCost("audit_base", 1);
+  return balance.total >= minimumAuditCredits();
 }
 
 /** Warn once the balance drops below this share of the plan's monthly grant. */
@@ -340,7 +454,7 @@ const LOW_BALANCE_FRACTION = 0.2;
  *
  * Fires at 20% of the plan's monthly grant — while there are still credits to
  * spend and a decision to make — and again, more sharply, once the balance is
- * under the flat base and can buy nothing. Free plans get the Pro offer; paid
+ * under the smallest audit (base + one page) and can buy nothing. Free plans get the Pro offer; paid
  * plans get a top-up link, not a pitch for the plan they're already on.
  *
  * Exported for tests.
@@ -368,19 +482,19 @@ export function lowBalanceFooterLines(opts: {
   if (opts.unlimited) return [];
   if (balance == null || plan === "anonymous") return [];
 
-  const base = computeCost("audit_base", 1);
-  const spent = balance < base;
+  const minimum = MIN_AUDIT_CREDITS;
+  const spent = balance < minimum;
   // A plan with no monthly grant (Team pools per seat) has no share to measure
   // against, so it only warns once the balance can't buy an audit.
   const threshold =
     monthlyCredits > 0
       ? Math.floor(monthlyCredits * LOW_BALANCE_FRACTION)
-      : base;
+      : minimum;
   if (!spent && balance >= threshold) return [];
 
   const headline = spent
     ? fmt.yellow(
-        `${balance.toLocaleString("en-US")} credits left, below the ${base}-credit audit base: the next cloud audit can't start.`
+        `${balance.toLocaleString("en-US")} credits left, below the ${minimum} credits the smallest audit needs (${AUDIT_BASE_CREDITS} base + ${AUDIT_PAGE_CREDITS} for one page): the next cloud audit can't start.`
       )
     : fmt.yellow(
         `${balance.toLocaleString("en-US")} credits left. ${AUDIT_PRICING_LINE}`
@@ -402,22 +516,6 @@ export function lowBalanceFooterLines(opts: {
     ...resetLine,
     `  Top up: ${fmt.cyan(opts.upgrade?.url ?? upgradeUrl("cli-audit"))}`,
   ];
-}
-
-/**
- * #1169: whether to interactively prompt on a preflight shortfall. Requires BOTH
- * stdin AND stdout to be TTYs (a piped/redirected stdin makes readline hit EOF →
- * resolve false → a silent abort, so a non-interactive stdin must fall through to
- * warn-and-continue), and no `--yes`. Mirrors the coverage-mode / cloud-outage
- * prompts in this file (the older confirmCloudSpend checks stdout only — that
- * drift is tracked in #1171).
- */
-export function preflightPromptEligible(opts: {
-  stdinIsTTY: boolean;
-  stdoutIsTTY: boolean;
-  yes: boolean;
-}): boolean {
-  return opts.stdinIsTTY && opts.stdoutIsTTY && !opts.yes;
 }
 
 /**
@@ -444,18 +542,53 @@ export function phaseTimingsFromError(
 }
 
 /**
+ * The balance to print after a signed-in audit (#2290), from the freshest read
+ * the run made. The controller's post-services read (`prefetchRead`) already
+ * reflects the crawl's render charges, so only the end-of-run page settlement
+ * comes off it. Without one (quick coverage skips the prefetch), the register
+ * response's balance is all there is, and it predates EVERYTHING but the base:
+ * every later charge comes off it. An unmetered balance is frozen, so nothing
+ * comes off at all. Exported for tests.
+ */
+export function estimateBalanceAfter(opts: {
+  prefetchRead: number | null;
+  afterBase: number | null;
+  baseCharged: number;
+  totalSpent: number;
+  settled: number;
+  unlimited?: boolean;
+}): number | null {
+  if (opts.unlimited) return opts.prefetchRead ?? opts.afterBase;
+  if (opts.prefetchRead != null)
+    return Math.max(0, opts.prefetchRead - opts.settled);
+  if (opts.afterBase != null)
+    return Math.max(0, opts.afterBase - (opts.totalSpent - opts.baseCharged));
+  return null;
+}
+
+/**
  * The post-audit cloud-spend disclosure line: total + per-service breakdown +
  * remaining balance. The breakdown reflects the ACTUAL server charges (pricing
- * v10: audit base + renders; folded services charge nothing). Exported for
- * tests. #279
+ * v11: audit base + 2 per audited page; folded services charge nothing), and
+ * names the page count so the arithmetic is checkable at a glance. Exported for
+ * tests. #279 #2290
  */
 export function formatCloudSpendSummary(spend: {
-  lines: Array<{ service: string; credits: number }>;
+  lines: Array<{
+    service: string;
+    credits: number;
+    feature?: string;
+    units?: number;
+  }>;
   totalSpent: number;
   balanceAfter: number | null;
 }): string {
   const byService = spend.lines
-    .map((l) => `${l.service} ${l.credits}`)
+    .map((l) =>
+      l.feature === "audit_page" && l.units != null
+        ? `${l.units} audited ${l.units === 1 ? "page" : "pages"} ${l.credits}`
+        : `${l.service} ${l.credits}`
+    )
     .join(", ");
   const balance =
     spend.balanceAfter != null ? ` · balance ~${spend.balanceAfter}` : "";
@@ -524,6 +657,8 @@ export interface CloudRenderingDecision {
   /** User accepted the cost-disclosing prompt AND a per-audit cap bounds it →
    * caller may skip the prefetch confirm. False for legacy/uncapped/--render. */
   consented: boolean;
+  /** The cost line was printed this run (#801: it prices the links too). */
+  disclosed?: boolean;
 }
 
 /**
@@ -595,17 +730,26 @@ export async function resolveCloudRendering(opts: {
     log(
       fmt.dim(
         `Cloud audits are on for your account. ${consentEstimateLine(estimate)}${
-          capped ? ` Disable with --http or [cloud] rendering = "http".` : ""
+          // #2290: --http skips the browser, not the page charge.
+          capped
+            ? ` Skip the cloud browser with --http, or audit locally for free with --offline.`
+            : ""
         }`
       )
     );
-    const saved = persist({ cloud_spend_ack: true });
+    // #801: the line just priced the links, so the one-time link notice is
+    // not owed on top of it.
+    const saved = persist({
+      cloud_spend_ack: true,
+      ...(estimate.externalLinks ? { link_pricing_notice_shown: true } : {}),
+    });
     if (!saved.ok) {
       logger.debug(
         "could not persist cloud_spend_ack; will re-notify next run"
       );
-      return { mode: "browser", consented: false };
+      return { mode: "browser", consented: false, disclosed: true };
     }
+    return { mode: "browser", consented: capped, disclosed: true };
   }
   return { mode: "browser", consented: capped };
 }
@@ -641,7 +785,7 @@ export function resolvePublishDecision(opts: {
   signedIn: boolean;
   offline: boolean;
   explicitPublish: boolean; // args.publish
-  noPublish: boolean; // args["no-publish"]
+  noPublish: boolean; // --no-publish, read from argv (see cli/flags.ts)
   configPublish: boolean; // config.cloud.publish
   // #1066: a --rule-include/--rule-exclude run produces a partial report
   // (fewer categories, no partial marker on the publish payload yet — #1082
@@ -668,26 +812,130 @@ export function resolvePublishDecision(opts: {
 }
 
 /**
+ * A boolean flag's value as citty delivers it: undefined when absent, and an
+ * array when the flag is repeated, in which case the last one wins.
+ */
+export function lastFlagValue(
+  value: boolean | boolean[] | undefined
+): boolean | undefined {
+  return Array.isArray(value) ? value.at(-1) : value;
+}
+
+/**
+ * The probing flags as citty delivered them. Booleans repeat into arrays (the
+ * last wins, like --disable-discovery-probes); a repeated `--probe` arrives as
+ * an array of strings, and the last one wins too.
+ */
+export function probeFlagsFromArgs(args: Record<string, unknown>): ProbeFlags {
+  const lastString = (value: unknown): string | undefined =>
+    Array.isArray(value)
+      ? (value.at(-1) as string | undefined)
+      : typeof value === "string"
+        ? value
+        : undefined;
+  return {
+    probe: lastString(args.probe),
+    passive: lastFlagValue(args.passive as boolean | boolean[] | undefined),
+    aggressive: lastFlagValue(
+      args.aggressive as boolean | boolean[] | undefined
+    ),
+    pentest: lastFlagValue(args.pentest as boolean | boolean[] | undefined),
+    probeBudget: lastString(args["probe-budget"]),
+  };
+}
+
+/**
+ * Resolve probing intensity for a local CLI run (see resolveProbeIntensity in
+ * @squirrelscan/config, which the hosted runner shares). Mirrors
+ * resolveExplicitRenderMode: flags > config > the audit level's probe setting
+ * > context default. A local run is never locked; the cloud inputs are the
+ * hosted caller's to supply.
+ */
+export function resolveLocalProbeIntensity(opts: {
+  flags: ProbeFlags;
+  config: {
+    crawler: { disable_discovery_probes?: boolean };
+    security?: {
+      probe?: "passive" | "active" | "aggressive";
+      budget?: string | number;
+    };
+  };
+  /** An account is behind the run (any plan, or signed in with the API unreachable). */
+  signedIn: boolean;
+  /** --disable-discovery-probes[=false]; undefined → config decides. */
+  disableDiscoveryProbes?: boolean;
+  /** The raw level flag, so --pentest can refuse a level other than full. */
+  coverage?: string;
+  /** The level the run resolved to; its probe setting is the default. */
+  level?: AuditLevel;
+}): ProbeResolution {
+  const context: ProbeRunContext = {
+    surface: "local",
+    signedIn: opts.signedIn,
+    discoveryProbesDisabled:
+      opts.disableDiscoveryProbes ??
+      opts.config.crawler.disable_discovery_probes === true,
+  };
+  const levelProbe =
+    opts.level === undefined
+      ? undefined
+      : AUDIT_LEVEL_PRESETS[opts.level].probe;
+  return resolveProbeIntensity({
+    flags: opts.flags,
+    config: opts.config.security,
+    context,
+    coverage: opts.coverage,
+    // No level defaults to aggressive (core-contracts pins it), so this never drops a value.
+    ...(levelProbe !== undefined && levelProbe !== "aggressive"
+      ? { levelDefault: levelProbe }
+      : {}),
+  });
+}
+
+/** The run-banner line and notes for a resolved probing level. */
+export function probeBannerLines(probe: {
+  level: "passive" | "active" | "aggressive";
+  budgetMs: number;
+}): { value: string; note?: string } {
+  if (probe.level === "passive") {
+    return { value: "passive · no requests beyond the crawl" };
+  }
+  const value = `${probe.level} · budget ${formatProbeBudget(probe.budgetMs)}`;
+  if (probe.level !== "aggressive") return { value };
+  return {
+    value,
+    note: "Aggressive probing requests robots-disallowed paths on purpose and sends many requests that return 404, which can trip a WAF. Only run it against sites you own or are authorized to test.",
+  };
+}
+
+/**
  * Validate mutually-exclusive audit flags. Returns a human-readable error to
  * print (then exit 1), or null when the combination is valid.
  */
 export function validateAuditFlags(args: {
   offline?: boolean;
   publish?: boolean;
-  no_publish?: boolean;
   noPublish?: boolean;
   render?: boolean;
   http?: boolean;
+  externalLinks?: boolean;
+  noExternalLinks?: boolean;
 }): string | null {
-  const noPublish = args.no_publish || args.noPublish;
   // --offline conflicts with flags that require the cloud API.
   if (args.offline && (args.publish || args.render)) {
     const conflicting = args.publish ? "--publish" : "--render";
     return `--offline cannot be combined with ${conflicting} (requires login and cloud access)`;
   }
   // --no-publish (skip publishing) contradicts --publish (force publishing).
-  if (noPublish && args.publish) {
+  if (args.noPublish && args.publish) {
     return "--no-publish cannot be combined with --publish";
+  }
+  // repo#2729: an offline audit never requests other sites.
+  if (args.offline && args.externalLinks) {
+    return "--offline cannot be combined with --external-links (an offline audit does not request other sites)";
+  }
+  if (args.noExternalLinks && args.externalLinks) {
+    return "--no-external-links cannot be combined with --external-links";
   }
   // --render and --http are opposite overrides; refuse the contradiction
   // rather than silently picking one.
@@ -740,7 +988,7 @@ export const audit = defineCommand({
     "max-pages": {
       type: "string",
       alias: "m",
-      description: `Maximum pages to crawl (default: coverage mode — quick ${COVERAGE_QUICK_MAX_PAGES}, surface ${COVERAGE_SURFACE_MAX_PAGES}, full ${COVERAGE_FULL_MAX_PAGES}; cap ${MAX_PAGES_CAP})`,
+      description: `Maximum pages to crawl (default by level: ${AUDIT_LEVELS.map((l) => `${l} ${levelMaxPages(l)}`).join(", ")}; cap ${MAX_PAGES_CAP})`,
     },
     "max-depth": {
       type: "string",
@@ -757,11 +1005,14 @@ export const audit = defineCommand({
       description:
         "Max concurrent requests per host (overrides [crawler] per_host_concurrency; suppresses the localhost fast path)",
     },
+    level: {
+      type: "string",
+      description: `Audit level (default: quick if signed out, surface if signed in): ${levelHelpList()}. Flags such as --max-pages, --render-mode and --probe change single settings`,
+    },
     coverage: {
       type: "string",
       alias: "C",
-      description:
-        "Coverage mode (default: quick if signed out, surface if signed in): quick (fast/local/free), surface (one per pattern), full (comprehensive)",
+      description: "Old name for --level, still accepted (fast = quick)",
     },
     format: {
       type: "string",
@@ -817,6 +1068,8 @@ export const audit = defineCommand({
       description:
         "Publish report to reports.squirrelscan.com (now the default when signed in)",
     },
+    // Declared for help and completions only: citty delivers --no-publish as
+    // publish: false and never sets this arg, so run() reads it from rawArgs.
     "no-publish": {
       type: "boolean",
       description:
@@ -846,7 +1099,32 @@ export const audit = defineCommand({
     offline: {
       type: "boolean",
       description:
-        "Run fully offline: skip cloud features, publishing, and telemetry",
+        "Run fully offline: skip cloud features, publishing, telemetry, and checks of other sites",
+    },
+    // repo#2729: internal and external link checks are on at every level
+    // (pub#823). --external-links turns external ones back on over
+    // `[external_links] enabled = false`. Read from rawArgs like --publish /
+    // --no-publish.
+    "external-links": {
+      type: "boolean",
+      description:
+        "Check links to other sites this run, even where the config turns them off",
+    },
+    "no-external-links": {
+      type: "boolean",
+      description:
+        "Do not check links to other sites this run (same as [external_links] enabled = false)",
+    },
+    "no-internal-links": {
+      type: "boolean",
+      description:
+        "Do not status-check internal link targets the crawl did not fetch (same as [internal_links] enabled = false)",
+    },
+    // #2307: the bundled page classifier fills in link sections the markup leaves unknown.
+    "no-classifier": {
+      type: "boolean",
+      description:
+        "Do not run the page classifier: link sections come from page markup only (same as [classifier] enabled = false)",
     },
     visibility: {
       type: "string",
@@ -874,13 +1152,41 @@ export const audit = defineCommand({
       description:
         "Skip these rule categories or rules (repeatable or comma-separated), e.g. images,social. Adds to [rules] disable for this run",
     },
+    "disable-discovery-probes": {
+      type: "boolean",
+      description:
+        "Skip the pre-crawl discovery probes (llms.txt, /.well-known/*, /swagger.json, ...) for this run; overrides [crawler] disable_discovery_probes (=false sends them)",
+    },
+    probe: {
+      type: "string",
+      alias: "P",
+      description:
+        "Probing intensity: passive (no requests beyond the crawl) | active (quiet probes that look like normal traffic) | aggressive (loud probes, can trip a WAF). Default: active if signed in, passive if not. Overrides [security] probe",
+    },
+    passive: {
+      type: "boolean",
+      description: "Shortcut for --probe passive",
+    },
+    aggressive: {
+      type: "boolean",
+      description: "Shortcut for --probe aggressive",
+    },
+    "probe-budget": {
+      type: "string",
+      description:
+        "Wall-clock cap for all probing in this run, e.g. 30s, 2m (default: 30s active, 2m aggressive; max 1h). Overrides [security] budget",
+    },
+    pentest: {
+      type: "boolean",
+      description: "Shortcut for --level full --probe aggressive",
+    },
     summary: {
       type: "boolean",
       description:
-        "Print only the score, category breakdown, and issue counts — no per-issue detail (console format only)",
+        "Print only the score, category breakdown, and issue counts, with no per-issue detail (console format only)",
     },
   },
-  async run({ args }) {
+  async run({ args, rawArgs }) {
     // Configure logging before any output
     configureLogger({ debug: args.debug, trace: args.trace });
 
@@ -901,9 +1207,37 @@ export const audit = defineCommand({
       arch: process.arch,
     });
 
+    // From argv, not args: citty never sets args["no-publish"], and once
+    // --no-publish is passed its publish value depends on argv order, so any
+    // --publish/-p token alongside it counts as the conflict.
+    const noPublish = hasNegatedFlag(rawArgs, "publish");
+    // The same for the external link switches (repo#2729): with
+    // --no-external-links in argv any positive token is the conflict. Alone,
+    // `--external-links=false` (or `--external-links false`, which citty
+    // reads as the value) parses as false, so it is an off switch.
+    //
+    //   argv                                      on     off    result
+    //   --external-links                          true   false  on
+    //   --external-links=false / --external-links false
+    //                                             false  true   off
+    //   --no-external-links                       false  true   off
+    //   --external-links and --no-external-links  true   true   refused
+    //   (neither)                                 false  false  level / config
+    const externalLinksNegated = hasNegatedFlag(rawArgs, "external-links");
+    const externalLinksPositive = hasFlag(rawArgs, "external-links");
+    const externalLinksOn =
+      externalLinksPositive &&
+      (externalLinksNegated || args["external-links"] !== false);
+    const externalLinksOff =
+      externalLinksNegated ||
+      (externalLinksPositive && args["external-links"] === false);
     const flagError = validateAuditFlags({
       ...args,
-      no_publish: args["no-publish"],
+      publish:
+        !!args.publish || (noPublish && hasFlag(rawArgs, "publish", ["p"])),
+      noPublish,
+      externalLinks: externalLinksOn,
+      noExternalLinks: externalLinksOff,
     });
     if (flagError) {
       console.error(flagError);
@@ -948,6 +1282,52 @@ export const audit = defineCommand({
     }
     const ruleFilterActive =
       ruleFilter.enable.length > 0 || ruleFilter.disable.length > 0;
+
+    // --disable-discovery-probes (#409): a plain boolean, so citty delivers
+    // true, or false for `=false` (which turns the probes back on over a config
+    // that disables them). A repeated flag arrives as an array; the last wins.
+    const disableDiscoveryProbes = lastFlagValue(
+      args["disable-discovery-probes"] as boolean | boolean[] | undefined
+    );
+
+    // Probing flags: refuse an unknown level, a bad budget or contradicting
+    // shortcuts before any network work. The level itself resolves below, once
+    // the account status (which picks the default) is known; this context is
+    // only for validation and cannot fail on its own.
+    // --level, or its old name --coverage / -C. Read before the probing
+    // check, which needs it to refuse --pentest with a level other than full.
+    const levelFlag = readLevelFlag(args);
+    if (!levelFlag.ok) {
+      console.error(`${fmt.red("Error:")} ${levelFlag.error}`);
+      process.exitCode = 1;
+      return;
+    }
+
+    const probeFlags = probeFlagsFromArgs(args);
+    const probeFlagCheck = resolveProbeIntensity({
+      flags: probeFlags,
+      context: { surface: "local", signedIn: false },
+      // A repeated -C never gets here: readLevelFlag refused it above.
+      coverage: levelFlag.raw,
+    });
+    if (!probeFlagCheck.ok) {
+      console.error(`${fmt.red("Error:")} ${probeFlagCheck.error}`);
+      process.exitCode = 1;
+      return;
+    }
+
+    // A level named on the command line must be one, before any network work.
+    // Only the DEFAULT level waits for the account check below.
+    if (
+      levelFlag.raw !== undefined &&
+      parseAuditLevel(levelFlag.raw) === null
+    ) {
+      console.error(
+        `${fmt.red("Error:")} ${unknownLevelMessage(levelFlag.raw)}`
+      );
+      process.exitCode = 1;
+      return;
+    }
 
     // --summary is console-only (#1067) — a machine format has no per-issue
     // detail to trim, so a non-console format + --summary is a user error.
@@ -1024,6 +1404,27 @@ export const audit = defineCommand({
             return;
           }
         }
+      }
+
+      // A rule option of the wrong type fails the audit once its rule runs,
+      // after the crawl and the run registration: stop before either, naming
+      // the table and the key. Options that change nothing only warn. pub#510
+      const optionsCheck = preflightRuleOptions(
+        config.rule_options,
+        resolveRulesConfig(config.rules, ruleFilter)
+      );
+      for (const warning of optionsCheck.warnings) {
+        console.error(fmt.yellow(`Warning: ${warning}`));
+      }
+      if (optionsCheck.errors.length > 0) {
+        for (const error of optionsCheck.errors) {
+          console.error(`${fmt.red("Error:")} ${error}`);
+        }
+        console.error(
+          "Check every rule option with `squirrel config validate`."
+        );
+        process.exitCode = 1;
+        return;
       }
 
       // Route progress messages to stderr for non-console formats to keep stdout
@@ -1109,23 +1510,23 @@ export const audit = defineCommand({
           reportBranding = branding;
           upgradeOffer = upgrade ?? null;
           creditsResetAt = balance.periodEnd ?? null;
-          // Pricing v10 (#391): every cloud audit debits a flat base at
-          // registration. A balance below it can't start one — run local-only
-          // (no register, no cloud calls, no publish) instead of letting the
-          // server 402 the register mid-crawl.
+          // Pricing v11 (#2290): every signed-in audit debits a flat base at
+          // registration plus 2 per audited page. A balance below the base plus
+          // one page can't start one — run local-only (no register, no cloud
+          // calls, no publish) instead of letting the server 402 the register
+          // mid-crawl. Above that, the page cap is fitted to the balance below.
           //
           // An unmetered plan is exempt: its stored total is frozen (often 0)
           // and the server never refuses the debit, so comparing it here would
           // silently drop an enterprise org to local-only every run (#1588 is
           // the same failure mode with a real empty balance).
-          const auditBase = computeCost("audit_base", 1);
           if (!canStartCloudAudit(balance)) {
             // #2183: the org-targeted link when the server sent one. This is
             // the CLI's most-seen credit wall — the run never registers, so it
             // never collects the 402 that carries the same offer.
             kv(
               "Account",
-              `${accountLabel} · ${fmt.yellow(`${balance.total.toLocaleString("en-US")} credits — below the ${auditBase}-credit audit base, running local-only`)} · upgrade: ${fmt.cyan(upgrade?.url ?? upgradeUrl("cli-audit"))}`
+              `${accountLabel} · ${fmt.yellow(`${balance.total.toLocaleString("en-US")} credits — below the ${MIN_AUDIT_CREDITS} a one-page audit needs, running local-only`)} · ${accountPlan === "paid" && !upgrade ? "top up" : "upgrade"}: ${fmt.cyan(upgrade?.url ?? upgradeUrl("cli-audit"))}`
             );
           } else {
             signedIn = true;
@@ -1174,25 +1575,26 @@ export const audit = defineCommand({
         kv("Dashboard", fmt.cyan(DASHBOARD_URL));
       }
 
-      // Resolve coverage mode: CLI flag > config override > auth-aware default.
-      // Any signed-in plan (free OR paid) defaults to `surface` (cloud rules +
-      // editor summary on a page sample, pro-parity demo #684); only anonymous
-      // defaults to `quick` (fast, no cloud, no spend). The CLI `--coverage`/`-C` flag is an unvalidated free string
-      // (citty has no enum), so normalize + validate it (see normalizeCoverageMode).
-      // An unknown value would otherwise make the page budget `undefined` → a NaN
-      // cap → an unbounded crawl (every `pages.length >= NaN` check is false).
-      // Transient outage: keep the signed-in user's coverage (no spend while cloud is down); expired token stays anon.
-      const coverageAccountPlan =
+      // Resolve the audit level: --level / -C > --pentest (full) > [crawler]
+      // coverage > auth-aware default. Any signed-in plan (free OR paid)
+      // defaults to `surface` (cloud checks + editor summary on a page sample,
+      // pro-parity demo #684); only anonymous defaults to `quick` (local, no
+      // account needed). A signed-in quick run is billed like any level. The
+      // flag is a free string (citty has no enum), so it is
+      // parsed (see audit-level.ts): an unknown value would otherwise make the
+      // page budget `undefined`, a NaN cap and an unbounded crawl.
+      // Transient outage: keep the signed-in user's level (no spend while cloud is down); expired token stays anon.
+      const levelAccountPlan =
         cloudOutage === "unreachable" ? "paid" : accountPlan;
-      const coverageInput = (
-        args.coverage ??
+      const levelInput =
+        levelFlag.raw ??
+        (probeFlags.pentest ? "full" : undefined) ??
         config.crawler.coverage ??
-        defaultCoverageMode(coverageAccountPlan)
-      ).toString();
-      const coverageMode = normalizeCoverageMode(coverageInput);
-      if (coverageMode === null) {
+        defaultAuditLevel(levelAccountPlan);
+      const level = parseAuditLevel(levelInput);
+      if (level === null) {
         console.error(
-          `${fmt.red("Error:")} unknown coverage mode '${coverageInput}'. Valid: ${COVERAGE_MODES.join(", ")} (or 'fast' = quick).`
+          `${fmt.red("Error:")} ${unknownLevelMessage(levelInput)}`
         );
         process.exitCode = 1;
         return;
@@ -1203,6 +1605,25 @@ export const audit = defineCommand({
       // lives in defaultSmartAudits (coverage.ts) with its own tests.
       const smartAudits =
         config.smart_audits ?? defaultSmartAudits(accountPlan, cloudOutage);
+
+      // Probing intensity: --probe > --passive/--aggressive/--pentest >
+      // [security] probe > the level's probe setting (quick passive, surface
+      // and full active). Disabled discovery probes force passive.
+      const probeResolution = resolveLocalProbeIntensity({
+        flags: probeFlags,
+        config,
+        signedIn: levelAccountPlan !== "anonymous",
+        disableDiscoveryProbes,
+        coverage: levelFlag.raw,
+        level,
+      });
+      if (!probeResolution.ok) {
+        console.error(`${fmt.red("Error:")} ${probeResolution.error}`);
+        process.exitCode = 1;
+        return;
+      }
+      const probing = probeResolution.value;
+      for (const notice of probing.notices) console.error(fmt.yellow(notice));
 
       // Validate --render-mode early (before any cloud work).
       const renderModeArg =
@@ -1221,14 +1642,21 @@ export const audit = defineCommand({
         process.exitCode = 1;
         return;
       }
+      // The render setting the user chose (flags > [cloud] render > [cloud]
+      // rendering), or undefined for the level's own. Resolved here, not at
+      // the consent step below, because the banner has to say when it changes
+      // the level.
+      const requestedRenderMode = resolveExplicitRenderMode(
+        { http: args.http, render: args.render, renderMode: renderModeArg },
+        config
+      );
 
-      // CLI --max-pages > config max_pages (if non-default) > coverage mode default
-      const configMaxPagesIsDefault = config.crawler.max_pages === 100;
+      // CLI --max-pages > config max_pages (if non-default) > the level's page
+      // budget. The config's settings over the level, read once.
+      const configOverrides = configLevelOverrides(config);
       const requestedMaxPages = args["max-pages"]
         ? Number.parseInt(args["max-pages"], 10)
-        : configMaxPagesIsDefault
-          ? coverageMaxPages(coverageMode)
-          : config.crawler.max_pages;
+        : (configOverrides.pages ?? levelMaxPages(level));
       // A non-numeric --max-pages (e.g. "abc") parses to NaN; reject it rather
       // than silently crawling unbounded (NaN fails every `>= maxPages` check).
       if (
@@ -1246,9 +1674,31 @@ export const audit = defineCommand({
       // notice in cli/format.ts only fires when a crawl reaches the cap — so a
       // 10,000-page request against a 4,000-page site was never mentioned.
       const pageLimit = resolvePageLimit(requestedMaxPages);
-      const maxPages = pageLimit.effective;
+      // `let`: the credit preflight below may fit it to the balance (#2290).
+      let maxPages = pageLimit.effective;
       const clampNotice = pageLimitNotice(pageLimit);
       if (clampNotice) console.error(fmt.yellow(clampNotice));
+
+      // The audit level with every setting the user chose laid over it; a
+      // chosen value that differs from the level's makes the run custom.
+      // `[external_links] enabled` is a choice only when it is false: true is
+      // the schema default `squirrel init` writes into every config, and it
+      // would otherwise switch the quick level's link checks on for everyone.
+      // --external-links and --no-external-links beat the config (repo#2729).
+      const auditLevel = resolveLocalAuditLevel(level, {
+        pages: maxPages,
+        ...(requestedRenderMode !== undefined
+          ? { render: requestedRenderMode }
+          : {}),
+        ...(externalLinksOn || externalLinksOff
+          ? { externalLinks: externalLinksOn }
+          : configOverrides.externalLinks !== undefined
+            ? { externalLinks: configOverrides.externalLinks }
+            : {}),
+        probe: probing.level,
+      });
+      // The crawler's word for the strategy: quick, surface or full.
+      const coverageMode = levelCoverageMode(auditLevel);
 
       // CLI --max-depth > config crawler.max_depth > unset (unlimited).
       let maxDepth: number | undefined;
@@ -1328,6 +1778,7 @@ export const audit = defineCommand({
         debug: args.debug,
         projectName,
         coverageMode,
+        auditLevel,
         smartAudits,
         offline: args.offline,
         ...(concurrency !== undefined ? { concurrency } : {}),
@@ -1341,12 +1792,25 @@ export const audit = defineCommand({
         ...(ruleFilter.disable.length > 0
           ? { ruleExclude: ruleFilter.disable }
           : {}),
+        ...(disableDiscoveryProbes !== undefined
+          ? { disableDiscoveryProbes }
+          : {}),
+        probe: { level: probing.level, budgetMs: probing.budgetMs },
       };
 
       // Preamble — aligned key/value block (Account, and Dashboard when online,
       // already printed above during status resolution; kv defined there).
       kv("Auditing", fmt.bold(options.url));
-      kv("Coverage", `${coverageMode} ${fmt.dim(`· max ${maxPages} pages`)}`);
+      const levelBanner = levelBannerParts(auditLevel);
+      kv(
+        "Level",
+        levelBanner.detail
+          ? `${levelBanner.level} ${fmt.dim(levelBanner.detail)}`
+          : levelBanner.level
+      );
+      const probeBanner = probeBannerLines(probing);
+      kv("Probing", probeBanner.value);
+      if (probeBanner.note) log(fmt.yellow(probeBanner.note));
       // loadConfig falls back to defaults when the path doesn't exist — the
       // label must say so rather than print a missing (e.g. mistyped) path.
       kv(
@@ -1361,6 +1825,29 @@ export const audit = defineCommand({
         kv("Headers", redactHeaders(options.headers));
       }
       log("");
+
+      // #403: a local store this process cannot write (owned by root after a
+      // sudo run, blocked by an agent's sandbox, a directory, a damaged file)
+      // otherwise fails at the first page, or drops every page and ends "No
+      // pages were crawled". Checked before the run is registered, so a broken
+      // store charges nothing and leaves no failed run behind.
+      const storeUrl = parseUserUrl(args.url);
+      // The project the audit stores into, named the way runAudit names it. The
+      // publish step below marks the report in this project's database only.
+      const storeProject = storeUrl.ok
+        ? (options.projectName ?? domainToProjectName(storeUrl.url))
+        : undefined;
+      const storeProblems = storeProject
+        ? checkAuditStores(storeProject, {
+            linkCache: !args.offline && auditLevel.settings.externalLinks,
+          })
+        : [];
+      if (storeProblems.length > 0) {
+        commandResult = "error";
+        log(`✗ ${formatStoreProblems(storeProblems)}`);
+        process.exitCode = 1;
+        return;
+      }
 
       // Chrome for a human watching, so always stderr regardless of format —
       // never `log`, which follows stdout for console runs (#819). Merged
@@ -1434,15 +1921,84 @@ export const audit = defineCommand({
       // charge and a failure they cannot fix.
       const nonPublicHost = nonPublicHostLabel(args.url);
 
+      // #1169 / #2290: fit the page cap to what this audit can pay for. Pricing
+      // v11 charges 2 credits for EVERY audited page, however it was fetched,
+      // so an audit priced past the balance (or past the user's own
+      // `[cloud] max_credits_per_audit`) would run out part-way. The cap comes
+      // down to what the credits cover and the run says so, rather than
+      // refusing an audit a smaller crawl could afford. Decided before the
+      // consent line below so the estimate it quotes is the clamped one.
+      //
+      // Only when the run will actually register (and so be charged). #1841:
+      // never for a local/private host, which does not register — left in, a
+      // low-balance user auditing localhost got a top-up warning for money
+      // nothing was going to take.
+      // #801: the cloud checks (and bills) this audit's external links only
+      // when the level checks them AND has the cloud checks on: quick with
+      // --external-links checks them on this machine, free.
+      const cloudLinkChecks =
+        auditLevel.settings.externalLinks && auditLevel.settings.cloudChecks;
+      let creditClamp:
+        | {
+            requestedMaxPages: number;
+            effectiveMaxPages: number;
+            limitedBy: "balance" | "cap";
+          }
+        | undefined;
+      if (
+        startingBalance != null &&
+        resolveRegisterDecision({
+          signedIn,
+          offline: !!args.offline,
+          nonPublicHost: !!nonPublicHost,
+        })
+      ) {
+        const preflight = computePreflightAffordability({
+          balance: startingBalance,
+          maxPages,
+          maxCreditsPerAudit: config.cloud.max_credits_per_audit,
+          // #2183: the server's org-scoped link when the preflight read one.
+          topUpUrl: upgradeOffer?.url ?? upgradeUrl("cli-audit"),
+          unlimited: unlimitedCredits,
+          resetAt: creditsResetAt,
+          // #801: the cloud bills this audit's link checks, so each page of
+          // the cap reserves one external link's credit too.
+          cloudExternalLinks: cloudLinkChecks,
+        });
+        if (preflight.maxPages === 0) {
+          // The user's own cap forbids any charged audit at all, or (#801) the
+          // balance covers a page but not its external link: run the free
+          // local audit instead.
+          const needed = minimumAuditCredits(cloudLinkChecks);
+          log("");
+          log(
+            fmt.yellow(
+              preflight.limitedBy === "balance"
+                ? `⚠ Your balance of ${startingBalance.toLocaleString("en-US")} credits is below the ${needed} credits a one-page audit with external link checks needs, running local-only.`
+                : `⚠ [cloud] max_credits_per_audit = ${config.cloud.max_credits_per_audit} is below the ${needed} credits a one-page audit needs, running local-only.`
+            )
+          );
+          signedIn = false;
+        } else if (preflight.clamped && preflight.limitedBy) {
+          creditClamp = {
+            requestedMaxPages: maxPages,
+            effectiveMaxPages: preflight.maxPages,
+            limitedBy: preflight.limitedBy,
+          };
+          maxPages = preflight.maxPages;
+          options.maxPages = maxPages;
+          log("");
+          log(fmt.yellow(preflight.noticeLines[0]!));
+          log(fmt.dim(preflight.noticeLines[1]!));
+        }
+      }
+
       // Resolve the render strategy (#294). `off`/`auto`/`all` is funneled into
       // the existing http/browser consent decision (off→http, auto|all→browser)
       // so the spend-consent flow is unchanged; the auto-vs-all *strategy* is
       // passed separately to the controller (hybrid vs render-all). Unset →
-      // coverage-driven default, decided in the controller.
-      const requestedRenderMode = resolveExplicitRenderMode(
-        { http: args.http, render: args.render, renderMode: renderModeArg },
-        config
-      );
+      // the level's render setting (quick auto, surface and full all).
+      // `requestedRenderMode` was resolved with the level, above.
       // Rendering debits on SUBMIT and the crawler-worker then refuses the
       // host outright ("Refusing to render a non-public host"), so an
       // unpreflighted --render against localhost is a charge for a guaranteed
@@ -1469,93 +2025,68 @@ export const audit = defineCommand({
           `[cloud] rendering = "${config.cloud.rendering}" is deprecated; prefer render = "${config.cloud.rendering === "http" ? "off" : "all"}"`
         );
       }
+      const levelRender = auditLevel.settings.render;
       const renderStrategy =
         explicitRenderMode === "auto" || explicitRenderMode === "all"
           ? explicitRenderMode
-          : undefined;
+          : explicitRenderMode === undefined &&
+              (levelRender === "auto" || levelRender === "all")
+            ? levelRender
+            : undefined;
 
-      const { mode: cloudRendering, consented: cloudConsented } =
-        await resolveCloudRendering({
-          // Mirror the resolved on/off into the existing flag inputs so
-          // --render-mode and [cloud].render route through the unchanged path.
-          args: {
-            ...args,
-            http: explicitRenderMode === "off",
-            render:
-              explicitRenderMode === "auto" || explicitRenderMode === "all",
-          },
-          configRendering:
-            explicitRenderMode === "off"
-              ? "http"
-              : explicitRenderMode
-                ? "browser"
-                : config.cloud.rendering,
-          signedIn,
-          consent: effectiveSettings?.cloud_render_consent,
-          spendAck: effectiveSettings?.cloud_spend_ack,
-          log,
-          // Cost shown up front so the user can decline before the crawl.
-          estimate: {
-            maxPages,
-            balance: startingBalance,
-            maxCredits: config.cloud.max_credits_per_audit,
-            unlimited: unlimitedCredits,
-          },
-        });
-
-      // #1169: preflight affordability check. A signed-in audit debits the flat
-      // base at register + a per-rendered-page charge as pages render, so an org
-      // whose balance can't cover the planned audit would otherwise only find out
-      // mid-run (charging stops / coverage degrades). Predict it up front:
-      // estimate = base + up-to-maxPages renders (render charge only when cloud
-      // rendering is on). plannedPages is an UPPER bound (the crawl may find fewer),
-      // so it's worded "up to". TTY → prompt continue/abort; non-TTY/--yes → warn +
-      // continue (never block CI). Pricing comes from the shared source, not hardcoded.
-      //
-      // #1841: never for a local/private host. That run does not register, so
-      // there is no base debit, and it does not render in the cloud, so there
-      // are no page charges — the whole estimate is zero. Left in, a
-      // low-balance user auditing localhost got a top-up warning and a
-      // default-No prompt for money nothing was going to take, and pressing
-      // Enter abandoned a free audit.
-      if (signedIn && startingBalance != null && !nonPublicHost) {
-        const preflight = computePreflightAffordability({
-          balance: startingBalance,
+      const {
+        mode: cloudRendering,
+        consented: cloudConsented,
+        disclosed: costDisclosed,
+      } = await resolveCloudRendering({
+        // Mirror the resolved on/off into the existing flag inputs so
+        // --render-mode and [cloud].render route through the unchanged path.
+        args: {
+          ...args,
+          http: explicitRenderMode === "off",
+          render: explicitRenderMode === "auto" || explicitRenderMode === "all",
+        },
+        configRendering:
+          explicitRenderMode === "off"
+            ? "http"
+            : explicitRenderMode
+              ? "browser"
+              : config.cloud.rendering,
+        signedIn,
+        consent: effectiveSettings?.cloud_render_consent,
+        spendAck: effectiveSettings?.cloud_spend_ack,
+        log,
+        // Cost shown up front so the user can decline before the crawl.
+        estimate: {
           maxPages,
-          cloudRendering,
-          // #2183: the server's org-scoped link when the preflight read one.
-          topUpUrl: upgradeOffer?.url ?? upgradeUrl("cli-audit"),
+          balance: startingBalance,
+          maxCredits: config.cloud.max_credits_per_audit,
           unlimited: unlimitedCredits,
-          resetAt: creditsResetAt,
-        });
-        if (preflight.shortfall) {
-          log("");
-          log(fmt.yellow(preflight.warningLines[0]!));
-          log(fmt.dim(preflight.warningLines[1]!));
-          const canPrompt = preflightPromptEligible({
-            stdinIsTTY: !!process.stdin.isTTY,
-            stdoutIsTTY: !!process.stdout.isTTY,
-            yes: !!args.yes,
-          });
-          if (canPrompt) {
-            const { createInterface } = await import("node:readline");
-            const rl = createInterface({
-              input: process.stdin,
-              output: process.stdout,
-            });
-            const proceed = await new Promise<boolean>((resolve) => {
-              rl.on("close", () => resolve(false));
-              rl.on("error", () => resolve(false));
-              rl.question("Continue anyway? [y/N] ", (answer) => {
-                resolve(/^y(es)?$/i.test(answer.trim()));
-              });
-            }).finally(() => rl.close());
-            if (!proceed) {
-              log("Aborted. No credits were charged.");
-              return;
-            }
-          }
-        }
+          externalLinks: cloudLinkChecks,
+        },
+      });
+
+      // #801: from pricing v12 the cloud bills a signed-in audit's link checks;
+      // every earlier release said they were free. Said once, on the first
+      // audit that will be billed for them, unless this run's cost line (which
+      // prices them) was just printed. Every rendering choice reaches here:
+      // --http, --render, a config render setting or a stored decline skip the
+      // cost line, never this notice.
+      if (
+        linkPricingNoticeDue({
+          registers: resolveRegisterDecision({
+            signedIn,
+            offline: !!args.offline,
+            nonPublicHost: !!nonPublicHost,
+          }),
+          externalLinks: cloudLinkChecks,
+          shown: effectiveSettings?.link_pricing_notice_shown === true,
+          disclosedThisRun: costDisclosed === true,
+        })
+      ) {
+        log(fmt.dim(LINK_PRICING_NOTICE));
+        // Non-fatal: a failed write just shows the notice again next run.
+        updateSettings({ link_pricing_notice_shown: true });
       }
 
       const startTime = Date.now();
@@ -1592,8 +2123,17 @@ export const audit = defineCommand({
                 config: {
                   maxPages,
                   coverageMode,
+                  // The level and every setting it resolved to, so the
+                  // dashboard can say what this run was.
+                  auditLevel,
                   cliVersion: packageVersion,
                   runner: runnerInfo,
+                  // #2290: the pricing this binary quotes and settles under, so
+                  // the server can tell a v11 client from an older one.
+                  pricingVersion: CREDIT_PRICING_VERSION,
+                  // #2290: the page cap came down to fit the credits; recorded
+                  // so the dashboard can say why this audit is smaller.
+                  ...(creditClamp ? { creditClamp } : {}),
                 },
               },
               (failure) => {
@@ -1607,30 +2147,44 @@ export const audit = defineCommand({
       let trackedRunId: string | null = null;
       // Base path resolved once at register; reused so the lifecycle stays consistent.
       let trackedBase: string | undefined;
-      void registerPromise.then((run) => {
-        if (run) {
+      // Kept, not fired and forgotten: the terminal PATCH waits for this one
+      // (see createRunFinalizer), or an audit that fails before it lands is
+      // flipped back to running and reaped as stalled an hour later.
+      const runningPromise = registerPromise
+        .then(async (run) => {
+          if (!run) return;
           trackedRunId = run.runId;
           trackedBase = run.lifecycleBase;
-          void markRunning(
+          await markRunning(
             run.runId,
             new Date(startTime).toISOString(),
             run.lifecycleBase
           );
-        }
-      });
+        })
+        .catch(() => {});
 
       // #332: one guarded finalizer for every exit path (--no-publish, error, Ctrl-C, crash) so none leaves the run pending to be reaped.
-      finalizeTracked = createRunFinalizer(registerPromise);
+      finalizeTracked = createRunFinalizer(registerPromise, runningPromise);
 
       // #332: on interrupt, await a "cancelled" PATCH before re-raising so it lands instead of being reaped as a failure.
       const onSignal = (signal: NodeJS.Signals): void => {
+        // SIGHUP means the terminal is gone: a write to it fails with EIO,
+        // and an unhandled stream error (the progress spinner keeps writing)
+        // would take the process down before the PATCH lands. Say nothing,
+        // and let the streams fail quietly until the signal is re-raised.
+        const canWrite = signal !== "SIGHUP";
+        if (!canWrite) {
+          process.stdout.on("error", () => {});
+          process.stderr.on("error", () => {});
+        }
         // Note the cancel so the user isn't left wondering during the PATCH (stderr keeps piped stdout clean).
-        if (trackedRunId) process.stderr.write("\nCancelling run…\n");
+        if (canWrite && trackedRunId)
+          process.stderr.write("\nCancelling run…\n");
         // #1583: the crawl is checkpointed in the project's SQLite store, so the
         // pages fetched so far survive this exit — but nothing ever said so, and
         // a user who has just lost a 450-page crawl reasonably assumes it is gone
         // and starts over. Name the exact command while the context is on screen.
-        if (lastPagesFetched > 0) {
+        if (canWrite && lastPagesFetched > 0) {
           process.stderr.write(
             `${lastPagesFetched} pages are saved. Resume with:\n  squirrel audit ${args.url} --resume\n`
           );
@@ -1652,15 +2206,20 @@ export const audit = defineCommand({
         const emitter = process as NodeJS.EventEmitter;
         emitter.off("SIGINT", onSignal);
         emitter.off("SIGTERM", onSignal);
+        emitter.off("SIGHUP", onSignal);
       };
       process.once("SIGINT", onSignal);
       process.once("SIGTERM", onSignal);
+      // Closing the terminal (or its window on Windows) aborts the audit as
+      // surely as Ctrl-C does; without this the run was left to be reaped.
+      process.once("SIGHUP", onSignal);
 
       // #271 phase 5: coarse page-progress, throttled to ≤1/s. `crawlPagesFailed`
       // is tallied from the raw crawler events (onEvent) since onProgress only
       // carries the processed count.
       let lastProgressAt = 0;
       let crawlPagesFailed = 0;
+      const decodeFailures: string[] = [];
       const PROGRESS_MIN_INTERVAL_MS = 1_000;
 
       // #1583: newest counts seen from the crawl, kept OUTSIDE onProgress so the
@@ -1742,8 +2301,15 @@ export const audit = defineCommand({
           ...options,
           confirmCloudSpend,
           // #1134: resolver so render debits during the crawl are tagged with the
-          // async-registered run id (null until register resolves a beat in).
-          getRunId: () => trackedRunId ?? undefined,
+          // async-registered run id. #2290: it WAITS for register to settle
+          // (bounded by register's own timeout): under pricing v11 a render
+          // that went out untagged is billed as a standalone render AND its
+          // page again when the run settles. No register (signed out, offline,
+          // local host) resolves null at once, so those runs wait for nothing.
+          getRunId: async () =>
+            trackedRunId ??
+            (await registerPromise.catch(() => null))?.runId ??
+            undefined,
           // Skips ONLY the capped, pre-disclosed prefetch confirm; the controller
           // keeps confirmCloudSpend for uncapped dead-links. The cap check is
           // already baked into `cloudConsented` (resolveCloudRendering).
@@ -1754,8 +2320,20 @@ export const audit = defineCommand({
           // authed default (cloud rendering) after one-time consent.
           cloudRendering,
           // Render strategy when rendering is on: auto = HTTP-first hybrid,
-          // all = render every page. Undefined → controller's coverage default.
+          // all = render every page. The level's setting unless overridden.
           renderStrategy,
+          // The level's external link checks unless a flag or [external_links]
+          // enabled in the config file says otherwise (--offline still turns
+          // them off).
+          externalLinksEnabled: auditLevel.settings.externalLinks,
+          // repo#2729: the internal link probe, on unless switched off.
+          ...(hasNegatedFlag(rawArgs, "internal-links")
+            ? { internalLinksEnabled: false }
+            : {}),
+          // #2307: the page classifier, on unless switched off.
+          ...(hasNegatedFlag(rawArgs, "classifier")
+            ? { classifierEnabled: false }
+            : {}),
           // Retention (#1912) deleted some of this project's audit history, so
           // say so. stderr unconditionally: this is the one line that tells a
           // user their older reports are gone, and putting it on stdout would
@@ -1781,6 +2359,8 @@ export const audit = defineCommand({
                 break;
               case "page:failed":
                 crawlPagesFailed++;
+                if (isDecodeFailure(event.error))
+                  decodeFailures.push(event.error);
                 break;
             }
           },
@@ -1866,6 +2446,8 @@ export const audit = defineCommand({
         progress.stop();
       }
 
+      for (const line of decodeFailureLines(decodeFailures)) log(line);
+
       // #271: register ran concurrently with the crawl above; resolve it now (it
       // settled long ago in the common case, so this await is instant) for the
       // terminal PATCH + publish linkage. Best-effort → null on failure.
@@ -1881,7 +2463,8 @@ export const audit = defineCommand({
       if (registerWarning && !registeredRun) {
         for (const line of registerFailureLines(
           registerWarning,
-          unlimitedCredits
+          unlimitedCredits,
+          accountPlan === "paid"
         ))
           log(line);
       }
@@ -1897,7 +2480,12 @@ export const audit = defineCommand({
           status: "failed",
           completedAt: new Date().toISOString(),
           completionReason: "error",
-          error: result.error.message,
+          // #403: a store-check failure names local paths; the run's error
+          // gets the class, the terminal above gets the paths.
+          error:
+            result.error.code === ErrorCodes.FILE_WRITE_ERROR
+              ? "Audit failed: a local store could not be written"
+              : result.error.message,
           // #871: a failed run has no `report` (the success path's carrier
           // for phaseTimingsMs, see finalizeCompleted below) — runAudit's
           // error path plumbs the same partial breakdown through
@@ -1913,22 +2501,43 @@ export const audit = defineCommand({
       // Pricing v10 (#391): the audit base was debited at register, outside the
       // controller's spend accounting — fold it into the disclosed spend so the
       // summary/footer match the ledger (#876).
+      //
+      // Pricing v11 (#2290): and so is the page settlement the server charges
+      // when this run completes — every audited page the crawl did NOT already
+      // pay for through a render. Mirrored here so the printed total, the
+      // published report and the ledger agree. Not for an invalid audit
+      // (down/403/0-page): that run finalizes failed, which settles nothing and
+      // refunds the base.
       if (registeredRun?.baseCharged) {
         const prior = report.cloudSpend;
+        const withBase = [
+          {
+            service: "audit-base",
+            feature: "audit_base",
+            units: 1,
+            credits: registeredRun.baseCharged,
+          },
+          ...(prior?.lines ?? []),
+        ];
+        const lines =
+          auditStatusToLifecycle(report.status) === "failed"
+            ? withBase
+            : withAuditPageSettlement(withBase, auditedPageCount(report));
+        const totalSpent = lines.reduce((sum, l) => sum + l.credits, 0);
+        // The settlement lands after every balance read this run made.
+        const settled =
+          totalSpent - withBase.reduce((sum, l) => sum + l.credits, 0);
         report.cloudSpend = {
-          lines: [
-            {
-              service: "audit-base",
-              feature: "audit_base",
-              units: 1,
-              credits: registeredRun.baseCharged,
-            },
-            ...(prior?.lines ?? []),
-          ],
-          totalSpent: (prior?.totalSpent ?? 0) + registeredRun.baseCharged,
-          // Prefer the controller's post-services balance read; the register
-          // response balance only covers the base debit.
-          balanceAfter: prior?.balanceAfter ?? registeredRun.balanceAfterBase,
+          lines,
+          totalSpent,
+          balanceAfter: estimateBalanceAfter({
+            prefetchRead: prior?.balanceAfter ?? null,
+            afterBase: registeredRun.balanceAfterBase,
+            baseCharged: registeredRun.baseCharged,
+            totalSpent,
+            settled,
+            unlimited: unlimitedCredits,
+          }),
         };
       }
       // #368: stamp the account tier so the published report's locked-rules
@@ -1937,8 +2546,9 @@ export const audit = defineCommand({
       // #368: stamp the resolved cloud mode so an explicit --http opt-out reads as
       // a deliberate choice, not a "cloud temporarily unavailable" failure.
       report.cloudMode = cloudRendering;
-      // #747: stamp the coverage mode so a quick run's locked cloud rules read as
-      // a coverage choice ("re-run with -C surface/full"), never a cloud outage.
+      // #747: stamp the level so a quick run's locked cloud rules read as a
+      // level choice ("re-run at the surface or full level"), never a cloud
+      // outage. The controller stamped `auditLevel` (the full snapshot).
       report.coverageMode = coverageMode;
 
       // #1179: the server's AUTHORITATIVE post-merge score/issues from a
@@ -1998,6 +2608,8 @@ export const audit = defineCommand({
           // without prod-DB forensics; includes `publish` (timed below) since
           // that phase runs in this file, after runAudit() returns.
           phaseTimingsMs: report.phaseTimingsMs,
+          // #2290: what the server settles the page charge on.
+          pagesAudited: auditedPageCount(report),
         });
       };
       const durationSec = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -2021,7 +2633,8 @@ export const audit = defineCommand({
       // basis), so == maxPages means the cap stopped the crawl. #124
       const limitHint = pageLimitHint(
         report.pages.length >= maxPages,
-        maxPages
+        maxPages,
+        auditLevel.settings.crawlStrategy === "all"
       );
       if (limitHint) log(fmt.yellow(limitHint));
       // #1180: when the cap didn't bind but the union score still carries
@@ -2049,6 +2662,13 @@ export const audit = defineCommand({
           log(`⚠ ${label} failed (${f.detail})`);
         }
       }
+      const unverifiedNotice = localUnverifiedLinksNotice(report, {
+        signedIn,
+        hasAccount: Boolean(accountLabel),
+        // pub#823: Quick checks links only from this machine, signed in too.
+        cloudLevel: auditLevel.settings.cloudChecks,
+      });
+      if (unverifiedNotice) log(fmt.yellow(`⚠ ${unverifiedNotice}`));
       log("");
 
       // Audit is stored in SQLite database
@@ -2112,7 +2732,7 @@ export const audit = defineCommand({
         signedIn,
         offline: !!args.offline,
         explicitPublish: !!args.publish,
-        noPublish: !!args["no-publish"],
+        noPublish,
         configPublish: config.cloud.publish,
         ruleFilterActive,
         nonPublicHost: !!nonPublicHost,
@@ -2137,7 +2757,7 @@ export const audit = defineCommand({
           signedIn,
           offline: !!args.offline,
           explicitPublish: !!args.publish,
-          noPublish: !!args["no-publish"],
+          noPublish,
           configPublish: config.cloud.publish,
           ruleFilterActive,
           nonPublicHost: false,
@@ -2151,7 +2771,7 @@ export const audit = defineCommand({
         signedIn,
         offline: !!args.offline,
         explicitPublish: !!args.publish,
-        noPublish: !!args["no-publish"],
+        noPublish,
         configPublish: config.cloud.publish,
         ruleFilterActive: false,
         nonPublicHost: !!nonPublicHost,
@@ -2268,8 +2888,9 @@ export const audit = defineCommand({
             );
             if (scheduleLine) log(scheduleLine);
 
-            if (report.crawlId) {
+            if (report.crawlId && storeProject) {
               await savePublishedReportInfo(
+                resolveProjectDbPath(storeProject),
                 report.crawlId,
                 publishResult.data.id,
                 publishResult.data.url,

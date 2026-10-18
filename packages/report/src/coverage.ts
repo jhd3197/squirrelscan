@@ -2,9 +2,38 @@
 // Shared across CLI console + report renderers. No-op when `smart_audits` is
 // off (the report carries no `coverage` and no carried checks).
 
+import type { CheckTally } from "@squirrelscan/core-contracts";
+import {
+  AUDIT_LEVEL_COPY,
+  AUDIT_SETTING_COPY,
+} from "@squirrelscan/core-contracts/audit-levels";
+
 import type { AuditReport, CheckItem } from "./types";
 import type { GroupedCheck } from "./grouping";
 import { checkAffectedPages } from "./affected-pages";
+
+/**
+ * One-line audit level summary, e.g.
+ *   "Audit level: Surface."
+ *   "Audit level: Custom, based on Surface (changed: Pages, Rendering)."
+ * Returns null for reports written before audit levels (no `auditLevel`).
+ */
+export function auditLevelLine(report: AuditReport): string | null {
+  const a = report.auditLevel;
+  if (!a) return null;
+  // A stored or fetched report can carry anything: only known names print, and a
+  // snapshot with an unknown level is left out rather than throwing or echoing it.
+  const level = Object.hasOwn(AUDIT_LEVEL_COPY, a.level) ? AUDIT_LEVEL_COPY[a.level] : null;
+  if (!level) return null;
+  if (a.level !== "custom") return `Audit level: ${level.label}.`;
+  if (!Object.hasOwn(AUDIT_LEVEL_COPY, a.basedOn)) return null;
+  const changed = a.changes
+    .filter((key) => Object.hasOwn(AUDIT_SETTING_COPY, key))
+    .map((key) => AUDIT_SETTING_COPY[key].label)
+    .join(", ");
+  const basedOn = AUDIT_LEVEL_COPY[a.basedOn].label;
+  return `Audit level: ${AUDIT_LEVEL_COPY.custom.label}, based on ${basedOn}${changed ? ` (changed: ${changed})` : ""}.`;
+}
 
 /**
  * One-line coverage summary, e.g.
@@ -73,25 +102,75 @@ export function scanScopeLine(report: AuditReport): string | null {
   // The UNCLAMPED wording is byte-for-byte what it has always been — a comma
   // only appears where the sentence now has two clauses to separate.
   const clamped = clampedPageLimit(s);
+  // A time stop is its own clause: the page limit was NOT what ended the crawl,
+  // so "reached" would be false and a bare "page limit N" would read as a
+  // complete audit of fewer pages.
+  const timeStop = s.stopReason === "time" && !s.capped ? ", stopped early on time" : "";
   const limit = clamped
-    ? `page limit ${clamped.effective} of ${clamped.requested} requested${s.capped ? ", reached" : ""}`
-    : `page limit ${s.maxPages}${s.capped ? " reached" : ""}`;
+    ? `page limit ${clamped.effective} of ${clamped.requested} requested${s.capped ? ", reached" : ""}${timeStop}`
+    : `page limit ${s.maxPages}${s.capped ? " reached" : ""}${timeStop}`;
   const cap = s.maxPages !== undefined ? ` (${limit})` : "";
   return `Scan: ${s.pagesCrawled} page${s.pagesCrawled === 1 ? "" : "s"} crawled from ${origin}${version}${cap}.`;
 }
 
 /**
+ * A non-negative whole number off report JSON, or `fallback`. The stamp is read
+ * from stored or fetched reports of any origin, so a field that is not a finite
+ * number (a string, NaN, an object) must not reach the copy.
+ */
+function stampCount(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : fallback;
+}
+
+/**
+ * A capped published report's note (squirrelscan/repo#2661): every list in it
+ * is a sample beside the true counts, so say so once and say where the full
+ * per-page list is. Null for a report that is not capped, which is every
+ * report the CLI renders from its own project database and every report
+ * published before capping, so their output is unchanged.
+ *
+ * The same sentence the cloud's own views print (the dashboard, MCP and the
+ * API's markdown, in the private repo's `published-report-detail`). The cloud
+ * findings store is not served, so a cloud audit is pointed at the CLI.
+ */
+export function publishedReportNote(report: Pick<AuditReport, "detail">): string | null {
+  const d = report.detail;
+  if (d?.capped !== true) return null;
+  const pages = stampCount(d.caps?.pagesPerClass, 10);
+  const items = stampCount(d.caps?.itemsPerClass, 5);
+  const where =
+    d.fullDetail === "local"
+      ? "The complete list is in the project on the machine that ran the audit: `squirrel report --format json` there prints every page."
+      : "The complete list is not stored with this report: audit the site with the squirrel CLI and run `squirrel report --format json` for every page.";
+  // Issues the byte budget left out entirely are counted in the score only.
+  const dropped = stampCount(d.classesDropped, 0);
+  const droppedText =
+    dropped > 0
+      ? ` ${dropped.toLocaleString("en-US")} more ${dropped === 1 ? "issue" : "issues"} did not fit and ${dropped === 1 ? "is" : "are"} counted in the score only.`
+      : "";
+  return (
+    `This published report is a summary: each issue lists up to ${pages} example ` +
+    `${pages === 1 ? "page" : "pages"} and ${items} ${items === 1 ? "item" : "items"} ` +
+    `beside its true counts.${droppedText} ${where}`
+  );
+}
+
+/**
  * Full-scan hint (#1180): shown when the score does not rest on a full fresh
- * crawl — either the page limit stopped the crawl (`scanScope.capped`) or the
- * smart-audit union carried pages not re-checked this run. Returns null when
- * the scan was complete.
+ * crawl — the page limit stopped the crawl (`scanScope.capped`), the crawl time
+ * budget ran out (`scanScope.stopReason === "time"`), or the smart-audit union
+ * carried pages not re-checked this run. Returns null when the scan was
+ * complete.
  */
 export function fullScanHint(report: AuditReport): string | null {
   const s = report.scanScope;
   const c = report.coverage;
   const capped = s?.capped ?? false;
+  const timeStopped = s?.stopReason === "time";
   const partialUnion = c ? c.auditedPages < c.knownPages : false;
-  if (!capped && !partialUnion) return null;
+  if (!capped && !timeStopped && !partialUnion) return null;
   // Remediation copy branches by origin: --max-pages is a CLI flag; a cloud
   // audit's page budget lives in the website settings / audit trigger.
   const cloud = s?.origin === "cloud";
@@ -101,6 +180,12 @@ export function fullScanHint(report: AuditReport): string | null {
   // Deliberately neutral about what to do instead — the answer differs by
   // surface, and this renderer is shared by the CLI and the hosted report.
   const clamped = s ? clampedPageLimit(s) : null;
+  // A throttled run's gap is pages the host would not serve, and its
+  // score carries nothing for them. The carried-forward sentence below would
+  // tell a first-run reader the opposite, so it is not used here.
+  if (partialUnion && c && (report.rateLimited?.unfetched ?? 0) > 0) {
+    return `Partial scan: ${c.auditedPages} of ${c.knownPages} known pages were audited this run; the host rate limited the crawl, so the rest were never fetched. Re-run later, or crawl more slowly, for a full-site score.`;
+  }
   if (partialUnion && c) {
     const target = c.knownPages > (s?.maxPages ?? 0) ? String(c.knownPages) : null;
     const remedy = clamped
@@ -110,6 +195,11 @@ export function fullScanHint(report: AuditReport): string | null {
         : `Re-run with ${target ? `--max-pages ${target}` : "a higher --max-pages"}`;
     const tail = clamped ? "." : " for a fully fresh full-site score.";
     return `Partial scan: ${c.auditedPages} of ${c.knownPages} known pages were re-checked this run; the score carries earlier results for the rest. ${remedy}${tail}`;
+  }
+  // A page-limit stop keeps its own wording below: raising the limit is the fix
+  // there, and it is not the fix for a crawl that ran out of time.
+  if (timeStopped && !capped) {
+    return "Partial scan: the crawl ran out of time before reaching every page, so the site may have more pages than this score covers.";
   }
   if (clamped) {
     return `Partial scan: the page limit stopped the crawl, so the site may have more pages than this score covers. This run was limited to ${clamped.effective} of the ${clamped.requested} pages requested, so raising the limit alone will not extend it.`;
@@ -418,9 +508,16 @@ export interface MixedProvenanceCheck {
  * page. Such a page isn't actually clean, so it's excluded from the "checked
  * clean" count (only counted toward "pending re-check"); the two counts in
  * the rendered message are always disjoint.
+ *
+ * A capped published report (squirrelscan/repo#2657) lists no pass rows, so its
+ * fresh passes are only in the rule's `checkTallies`, passed here as
+ * `freshTally`. They are counts per check name, not pages, so the note still
+ * fires from them but without a clean-page count: "Fixed on all pages checked
+ * this run; N pages pending re-check."
  */
 export function ruleMixedProvenanceNote(
   checks: ReadonlyArray<MixedProvenanceCheck>,
+  freshTally?: Readonly<Record<string, CheckTally>>,
 ): string | undefined {
   const freshPassPages = new Set<string>();
   const carriedIssuePages = new Set<string>();
@@ -442,12 +539,28 @@ export function ruleMixedProvenanceNote(
       else for (const p of pages) freshIssuePages.add(p);
     }
   }
+  const pending = carriedIssuePages.size;
+  const pendingText = `${pending} page${pending === 1 ? "" : "s"} pending re-check.`;
+  if (freshPassPages.size === 0 && freshTally) {
+    let passed = 0;
+    let issues = 0;
+    for (const tally of Object.values(freshTally)) {
+      passed += tally.passed ?? 0;
+      issues += (tally.warnings ?? 0) + (tally.failed ?? 0);
+    }
+    if (passed === 0 || pending === 0 || issues > 0 || freshIssuePages.size > 0) return undefined;
+    return `Fixed on all pages checked this run; ${pendingText}`;
+  }
   // Disjoint the two buckets: a page counted as a carried issue can't also
   // count toward "checked clean", even if some other check passed it fresh.
   const trulyClean = [...freshPassPages].filter((p) => !carriedIssuePages.has(p)).length;
-  if (trulyClean === 0 || carriedIssuePages.size === 0 || freshIssuePages.size > 0) {
+  if (trulyClean === 0 || pending === 0 || freshIssuePages.size > 0) {
     return undefined;
   }
-  const pending = carriedIssuePages.size;
-  return `Fixed on all ${trulyClean} page${trulyClean === 1 ? "" : "s"} checked this run; ${pending} page${pending === 1 ? "" : "s"} pending re-check.`;
+  return `Fixed on all ${trulyClean} page${trulyClean === 1 ? "" : "s"} checked this run; ${pendingText}`;
+}
+
+/** Trailing note for the rate-limit line; empty when nothing is unfetched. */
+export function unfetchedNote(unfetched: number | undefined): string {
+  return unfetched && unfetched > 0 ? `; ${unfetched} more discovered but not fetched` : "";
 }

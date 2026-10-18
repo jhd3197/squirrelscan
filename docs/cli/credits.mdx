@@ -42,10 +42,11 @@ Balance: 2340 credits (2000 monthly + 340 purchased)
          monthly credits reset 2026-07-08
 
 Pricing:
-  audit                 50 base + 2 per rendered page
+  audit                 50 base + 2 per audited page
                            (analysis, tech detection, publishing included)
+  external links         1 per link the cloud verifies for an audit, at most 1 per page
+                           (internal links, and links checked from your machine, are free)
   content_gaps          25 per run
-  issue_enrich           3 per issue
   keyword_gaps          25 per run
 
 Top up: https://app.squirrelscan.com/upgrade?plan=pro&interval=month&org=01J0ORGEXAMPLE0000000000A&src=cli
@@ -57,12 +58,15 @@ On the free plan the output ends with the Pro offer instead:
   Pro: $19/month (or $190/year) for 3,000 credits a month
   Also unlocks daily audits on every site, faster crawls, and up to 2,000 pages per audit.
   Upgrade: https://app.squirrelscan.com/upgrade?plan=pro&interval=month&org=01J0ORGEXAMPLE0000000000A&src=cli
+  Compare plans: https://squirrelscan.com/pricing?src=cli-credits
   Or run `squirrel credits --upgrade`.
 ```
 
-A balance below 50 credits cannot start any cloud audit, since every audit
-charges a flat 50 credit base before a page renders. `squirrel credits` calls
-that out rather than showing a positive number you cannot spend.
+A balance below 52 credits cannot start any signed-in audit, since the
+smallest one is the flat 50 credit base plus 2 for its first page.
+`squirrel credits` calls that out rather than showing a positive number you
+cannot spend. Above that, a balance too small for a full audit shrinks the
+audit's page limit instead of refusing it. See [Credits and pricing](/cloud/credits).
 
 JSON output:
 

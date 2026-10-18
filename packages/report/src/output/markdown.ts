@@ -4,7 +4,7 @@ import type { ReportBranding } from "@squirrelscan/core-contracts";
 import type { AuditReport } from "../types";
 import { AUDIT_FAILURE_NEXT_STEP } from "@squirrelscan/core-contracts/failure-reason";
 import { cacheReasonsLabel, cacheStatsSummaryLine } from "../cache-stats";
-import { reportFailureReasonCode } from "../failure-notice";
+import { refusedFetchLines, reportFailureReasonCode } from "../failure-notice";
 import { getScoreGrade } from "../scoring";
 import { REPORT_SOURCE_PAGES_PREVIEW, REPORT_PAGES_HARD_CAP } from "../constants";
 import { fixRollupLine, fixUnits, ruleFixCoverage } from "../component-presentation";
@@ -17,7 +17,28 @@ import {
 import { uncoveredItems } from "../component-presentation";
 import { formatSiteWideItem, siteWideContext, siteWideItem } from "../site-wide-items";
 import { groupIssuesByCategory, flattenIssuesBySeverity } from "../grouping";
+import {
+  affectedPagesSuffix,
+  hasItemSources,
+  itemSourceView,
+  moreSourcePages,
+  sourceRowText,
+} from "../item-sources";
+import {
+  checkPagesScopedAway,
+  checkScopeLine,
+  itemLabel,
+  regionScopeLine,
+} from "../region-scope";
 import { entityMarkdownSection } from "../entities";
+import {
+  structureChromeLine,
+  structureDegradedLine,
+  structurePageTypesLine,
+  structureRows,
+  structureNumber,
+  structureTotalsLine,
+} from "../structure";
 import { groupTechnologies, techChangeSummary, techIconUrl } from "../technologies";
 import { SITE_PROFILE_NOTE, siteProfileFlags, siteProfileRows } from "../site-metadata";
 import { EDITOR_SUMMARY_NOTE, editorSummaryView } from "../editor-summary";
@@ -28,18 +49,31 @@ import {
   fetchFallbacksLine,
   fullScanHint,
   scanScopeLine,
+  publishedReportNote,
+  auditLevelLine,
   seedRedirectLine,
   ruleCarriedRollupLine,
+  unfetchedNote,
 } from "../coverage";
 import {
   affectedPages,
   ruleAffectedPageCount,
   ruleCarriedPageCount,
   isRedundantPageItem,
+  itemsNotListed,
+  itemsNotListedLine,
 } from "../affected-pages";
 import { formatReportDate } from "../utils";
 import { getPathname } from "../url";
 import { lockedRulesMessage } from "../locked-rules";
+import { privateTargetLine } from "../private-target";
+import { notCheckedDetailLines } from "../not-checked";
+
+/** repo#2661: ", N more not listed" when the report left items out of a check. */
+function notListedSuffix(check: Parameters<typeof itemsNotListed>[0]): string {
+  const left = itemsNotListed(check);
+  return left > 0 ? `, ${left.toLocaleString("en-US")} more not listed` : "";
+}
 
 export interface MarkdownRenderOptions {
   /** Roll up groups that are one repair (default true). */
@@ -101,6 +135,17 @@ function escapeMarkdownInline(value: string): string {
   return output.join("");
 }
 
+/**
+ * An item label as markdown link text or plain text. A label can embed a page URL the audited site
+ * controls, and a URL such as `https://example.com/?q=![t](https://evil.example/p.png)` would
+ * render a remote image. Brackets, backslashes and angle brackets are escaped, which stops a nested
+ * link, image or raw tag and leaves every other character, parentheses and underscores included,
+ * as it was.
+ */
+function escapeItemLabel(value: string): string {
+  return value.replace(/[\\\[\]<>]/g, (char) => `\\${char}`);
+}
+
 function siteProfileMarkdownValue(value: string, rawUrl?: string): string {
   const label = escapeMarkdownTableCell(value, true);
   if (!rawUrl) return label;
@@ -125,6 +170,119 @@ function formatRateLimitedHosts(hosts: string[]): string {
   return `${hosts.slice(0, 2).join(", ")} and ${hosts.length - 2} other host(s)`;
 }
 
+/**
+ * A not-checked notice as list-item content. It opens with a rule name, which a stored report can
+ * set to anything, so a name like `1` or `# x` would open a nested list or a heading. The
+ * block-opening character is escaped; the rest goes through the inline escaper.
+ */
+function escapeListItem(value: string): string {
+  const text = escapeMarkdownInline(value);
+  return text.replace(/^(\d+)([.)])/, "$1\\$2").replace(/^([#>+-])/, "\\$1");
+}
+
+/**
+ * The scope and coverage notes that qualify the score, one plain list item each. They used to run
+ * under the title; they are run metadata, so they close the report instead.
+ */
+function scanDetailLines(report: AuditReport): string[] {
+  const out: string[] = [];
+  // #1829: coverage lost to throttling.
+  if (report.rateLimited && report.rateLimited.pages > 0) {
+    out.push(
+      `Rate limited: ${report.rateLimited.pages} page(s) not verified (${formatRateLimitedHosts(report.rateLimited.hosts)})${unfetchedNote(report.rateLimited.unfetched)}`,
+    );
+  }
+  // #1418: the seed redirected off its own site and the crawler refused to follow it, so the URL at
+  // the top is not where the redirect pointed. Escaped: the redirect target is a string the audited
+  // site chose.
+  const seedRedirect = seedRedirectLine(report);
+  if (seedRedirect) out.push(escapeMarkdownInline(seedRedirect));
+  const scope = scanScopeLine(report);
+  if (scope) out.push(scope);
+  // repo#2661: a capped published report lists samples; say so, and where the rest is. Not
+  // escaped: the note is our own text and its backticks are meant as code.
+  const capped = publishedReportNote(report);
+  if (capped) out.push(capped);
+  const level = auditLevelLine(report);
+  if (level) out.push(level);
+  const cov = coverageLine(report);
+  if (cov) out.push(cov);
+  // pub#629: the score's other basis line, the rules a private host skipped.
+  const privateTarget = privateTargetLine(report);
+  if (privateTarget) out.push(privateTarget);
+  const hint = fullScanHint(report);
+  if (hint) out.push(hint);
+  const fallbacks = fetchFallbacksLine(report);
+  if (fallbacks) out.push(fallbacks);
+  return out;
+}
+
+/** The Page structure block (#2307), as lines under a "###" heading. Empty without a block. */
+function structureLines(report: AuditReport): string[] {
+  const structure = report.structure;
+  if (!structure) return [];
+  const lines: string[] = ["### Page structure", ""];
+  const typesLine = structurePageTypesLine(structure);
+  if (typesLine) {
+    lines.push(typesLine);
+    lines.push("");
+  }
+  const rows = structureRows(structure);
+  if (rows.length > 0) {
+    lines.push("| Section | Pages | Links |");
+    lines.push("|---------|------:|------:|");
+    for (const row of rows) {
+      lines.push(
+        `| ${row.section} | ${structureNumber(row.pages)} | ${structureNumber(row.links)} |`,
+      );
+    }
+    lines.push("");
+  }
+  const totals = structureTotalsLine(structure);
+  if (totals) {
+    lines.push(totals);
+    lines.push("");
+  }
+  const chromeLine = structureChromeLine(structure);
+  if (chromeLine) {
+    lines.push(chromeLine);
+    lines.push("");
+  }
+  const degradedLine = structureDegradedLine(structure);
+  if (degradedLine) {
+    lines.push(degradedLine);
+    lines.push("");
+  }
+  return lines;
+}
+
+/**
+ * Report detail: the last section of the report. What this audit did not check (so a skipped check
+ * never reads as clean), the page structure, then the scope and coverage notes. Empty when there is
+ * nothing to say, so a report with none of these ends where it always did.
+ */
+function reportDetailLines(report: AuditReport): string[] {
+  const notChecked = notCheckedDetailLines(report);
+  const structure = structureLines(report);
+  const scan = scanDetailLines(report);
+  if (notChecked.length === 0 && structure.length === 0 && scan.length === 0) return [];
+
+  const lines: string[] = ["## Report detail", ""];
+  if (notChecked.length > 0) {
+    lines.push("### Not checked", "");
+    // Escaped: a published report's messages come from whoever published it.
+    for (const line of notChecked) lines.push(`- ${escapeListItem(line)}`);
+    lines.push("");
+  }
+  lines.push(...structure);
+  if (scan.length > 0) {
+    lines.push("### Scan details", "");
+    for (const line of scan) lines.push(`- ${line}`);
+    lines.push("");
+  }
+  return lines;
+}
+
 export function renderMarkdown(report: AuditReport, options?: MarkdownRenderOptions): string {
   const lines: string[] = [];
   const siteWide = siteWideContext(report, options?.siteWideCollapse !== false);
@@ -142,33 +300,6 @@ export function renderMarkdown(report: AuditReport, options?: MarkdownRenderOpti
   lines.push(`**URL:** ${report.baseUrl}  `);
   lines.push(`**Date:** ${formatReportDate(report.timestamp)}  `);
   lines.push(`**Pages:** ${report.totalPages}  `);
-  // #1829: the caveat on the page count above — coverage lost to throttling.
-  if (report.rateLimited && report.rateLimited.pages > 0) {
-    lines.push(
-      `**Rate limited:** ${report.rateLimited.pages} page(s) not verified (${formatRateLimitedHosts(report.rateLimited.hosts)})  `,
-    );
-  }
-  // #1418: the seed redirected off its own site and the crawler refused to
-  // follow it, so the URL above is not where the redirect pointed. Escaped:
-  // the redirect target is a string the audited site chose. Deliberately a
-  // plain line and not a `>` blockquote — CommonMark lazy continuation would
-  // pull every metadata line below it inside the quote.
-  const seedRedirect = seedRedirectLine(report);
-  if (seedRedirect) lines.push(`${escapeMarkdownInline(seedRedirect)}  `);
-  const scope = scanScopeLine(report);
-  if (scope) lines.push(`${scope}  `);
-  const cov = coverageLine(report);
-  if (cov) lines.push(`**${cov}**  `);
-  // #190: a plain line for the same reason the seed-redirect disclosure above
-  // is one. This used to be `> ${hint}`, and a blockquote CAN interrupt an open
-  // paragraph, so the quote opened mid-metadata and CommonMark lazy
-  // continuation swallowed every line under it — a partial scan rendered its
-  // recovery note and its generator version as part of the warning. Text and
-  // HTML both render this hint as a plain line; markdown was the odd one out.
-  const hint = fullScanHint(report);
-  if (hint) lines.push(`${hint}  `);
-  const fallbacks = fetchFallbacksLine(report);
-  if (fallbacks) lines.push(`${fallbacks}  `);
   if (version) lines.push(`**Version:** ${version}`);
   lines.push("");
 
@@ -238,6 +369,15 @@ export function renderMarkdown(report: AuditReport, options?: MarkdownRenderOpti
         lines.push("");
       }
       lines.push(AUDIT_FAILURE_NEXT_STEP[code]);
+    }
+    // Name what was refused, so a missing robots.txt or sitemap reads as
+    // "the site would not say" and never as "the site has none".
+    const refused = refusedFetchLines(report);
+    if (refused.length > 0) {
+      lines.push("");
+      lines.push("Refused by the site (not checked, so not reported as missing):");
+      lines.push("");
+      for (const line of refused) lines.push(`- ${escapeMarkdownInline(line)}`);
     }
     lines.push("");
   } else if (report.healthScore) {
@@ -330,7 +470,7 @@ export function renderMarkdown(report: AuditReport, options?: MarkdownRenderOpti
   lines.push("---");
   lines.push("");
 
-  const categoryIssues = groupIssuesByCategory(report.ruleResults);
+  const categoryIssues = groupIssuesByCategory(report.ruleResults, report.checkTallies);
 
   if (categoryIssues.length > 0) {
     lines.push("## Issues");
@@ -428,7 +568,13 @@ export function renderMarkdown(report: AuditReport, options?: MarkdownRenderOpti
       lines.push("|-------|--------|---------|");
       for (const check of rule.checks) {
         const statusIcon = check.status === "fail" ? "X" : "!";
-        const escapedMessage = escapeMarkdownTableCell(check.message + carriedTag(check));
+        // pub#837: a check whose items are links says how many pages carry them.
+        const pagesNote = hasItemSources(check)
+          ? affectedPagesSuffix(check, affectedPages(check).count)
+          : "";
+        const escapedMessage = escapeMarkdownTableCell(
+          check.message + pagesNote + carriedTag(check),
+        );
         lines.push(`| ${check.name} | ${statusIcon} ${check.status} | ${escapedMessage} |`);
       }
       lines.push("");
@@ -452,7 +598,17 @@ export function renderMarkdown(report: AuditReport, options?: MarkdownRenderOpti
             : coverage.mode === "partial"
               ? ap.sample.filter((page) => coverage.uncoveredPages.includes(page))
               : ap.sample;
-        if (uncovered.length > 0) {
+        // pub#846: a check that sits in one shared region names it instead of listing its
+        // pages, and so does a check whose findings are scoped to regions.
+        // pub#857: and so does a check on every page of one page type.
+        const checkScope = checkScopeLine(check, ap.count, report.structure);
+        if (checkScope) {
+          lines.push(`**${check.name}:** ${checkScope}`);
+          lines.push("");
+        } else if (
+          uncovered.length > 0 &&
+          !checkPagesScopedAway(check, ap.count, report.structure)
+        ) {
           const materialized =
             uncovered.length > REPORT_PAGES_HARD_CAP
               ? uncovered.slice(0, REPORT_PAGES_HARD_CAP)
@@ -495,16 +651,18 @@ export function renderMarkdown(report: AuditReport, options?: MarkdownRenderOpti
         );
         if (visibleItems && visibleItems.length > 0) {
           lines.push(
-            `<details><summary><strong>${check.name}:</strong> ${visibleItems.length} item(s)</summary>`,
+            `<details><summary><strong>${check.name}:</strong> ${visibleItems.length} item(s)${notListedSuffix(check)}</summary>`,
           );
           lines.push("");
           for (const item of visibleItems) {
-            const label = item.label ?? item.id;
+            const view = itemSourceView(item, report.structure);
+            // pub#846: a scoped item's label drops the section phrase its region line says.
+            const label = escapeItemLabel(itemLabel(item, view.scope) ?? item.id);
             const isUrl =
               item.id.startsWith("http://") ||
               item.id.startsWith("https://") ||
               item.id.startsWith("/");
-            const display = isUrl ? `[${label}](${item.id})` : label;
+            const display = isUrl ? `[${label}](${escapeMarkdownDestination(item.id)})` : label;
             const siteWideInfo = siteWideItem(item, siteWide.total, siteWide.pageUrls);
             if (siteWideInfo) {
               lines.push(
@@ -513,22 +671,29 @@ export function renderMarkdown(report: AuditReport, options?: MarkdownRenderOpti
               continue;
             }
             lines.push(`- ${display}`);
-            if (item.sourcePages && item.sourcePages.length > 0) {
-              for (const src of item.sourcePages.slice(0, REPORT_SOURCE_PAGES_PREVIEW)) {
-                lines.push(`  - from: [${getPathname(src) || "/"}](${src})`);
-              }
-              if (item.sourcePages.length > REPORT_SOURCE_PAGES_PREVIEW) {
-                // The capped preview here is just for per-item context —
-                // the full, interactive list is the unified page block
-                // above, which already covers this item's sourcePages.
-                lines.push(
-                  `  - +${item.sourcePages.length - REPORT_SOURCE_PAGES_PREVIEW} more (see full list above)`,
-                );
-              }
+            // pub#837: each page once, with its links and where they sit. A long list says
+            // how many pages it leaves out; the page block above lists the check's pages,
+            // not this item's, so it is not pointed at. pub#846: an item scoped to a region
+            // names it, and lists only the pages it is on outside it.
+            if (view.scope) lines.push(`  - ${regionScopeLine(view.scope)}`);
+            const shown = view.rows.slice(0, REPORT_SOURCE_PAGES_PREVIEW);
+            for (const row of shown) {
+              lines.push(
+                `  - from: ${sourceRowText(
+                  `[${escapeItemLabel(getPathname(row.page) || "/")}](${escapeMarkdownDestination(row.page)})`,
+                  row.detail,
+                )}`,
+              );
             }
+            const hidden = Math.max(0, view.total - shown.length);
+            if (hidden > 0) lines.push(`  - ${moreSourcePages(hidden)}`);
           }
           lines.push("");
           lines.push("</details>");
+          lines.push("");
+        } else if (coverage.mode !== "full" && itemsNotListed(check) > 0) {
+          // A fully covered rule's groups already account for every item.
+          lines.push(`**${check.name}:** ${itemsNotListedLine(itemsNotListed(check))}`);
           lines.push("");
         }
       }
@@ -571,6 +736,10 @@ export function renderMarkdown(report: AuditReport, options?: MarkdownRenderOpti
       lines.push("");
     }
   }
+
+  // Report detail: the last section, after every finding. What this audit did not check, the
+  // page structure, and the scope and coverage notes that qualify the score.
+  lines.push(...reportDetailLines(report));
 
   // White-label drops the squirrelscan "Generated by" credit line entirely.
   if (!whiteLabel) {

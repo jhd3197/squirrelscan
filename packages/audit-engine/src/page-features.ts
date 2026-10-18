@@ -16,6 +16,7 @@
 //     v1 would score. (4xx/5xx pages, which v1 appends as EMPTY_PARSED_PAGE with
 //     empty headers, are E-E's universe-assembly concern, not this function's.)
 
+import { extractPageStructure } from "@squirrelscan/report/structure";
 import { detectWafChallengePage } from "@squirrelscan/waf-detect";
 import { extractNapSignal, getRichResultTypes, isPageIndexable } from "@squirrelscan/utils";
 
@@ -114,6 +115,9 @@ export function extractPageFeatures(
   // page, resolved against the SAME base URL (`site.pages[].url` is this exact
   // value), so the stored assets and the re-derived ones are identical.
   const chrome = extractSiteChromeSignal(parsed, page.normalizedUrl);
+  // #2307: link sections and the classifier's page type, for the report's page structure block.
+  // Undefined (and so left out of the scalars) for a parse that has neither.
+  const structure = extractPageStructure(parsed);
 
   return {
     normalizedUrl: page.normalizedUrl,
@@ -154,5 +158,28 @@ export function extractPageFeatures(
     faviconHref: chrome.faviconHref,
     themeColor: chrome.themeColor,
     ogImage: chrome.ogImage,
+    // #489: bounded at parse time. Absent on parsed data stored before the
+    // field existed (crawl reuse replays the old record), which stores as null
+    // and exempts nothing, so the duplicate rules fall back to their old answer.
+    hreflangAlternates: parsed.hreflangAlternates?.length ? parsed.hreflangAlternates : null,
+    // #2343: the report's own per-page scalars, taken here because this is the
+    // one pass that holds the DOM. Recovering them later meant re-parsing every
+    // stored page a second time.
+    // Optional-chained for the same reason `content`/`schemas` above are: a
+    // production ParsedPage always carries these, but the goldens hand in
+    // hand-built partials, and a report scalar is not worth throwing over.
+    reportScalars: {
+      metaRobots: parsed.meta.robots,
+      ogTitle: parsed.og?.title ?? null,
+      ogDescription: parsed.og?.description ?? null,
+      ogUrl: parsed.og?.url ?? null,
+      ogType: parsed.og?.type ?? null,
+      ogSiteName: parsed.og?.siteName ?? null,
+      ogImage: parsed.og?.image ?? null,
+      twitterCard: parsed.twitter?.card ?? null,
+      h1Count: parsed.h1?.count ?? 0,
+      thinContent: parsed.content?.isThinContent ?? false,
+      ...(structure ? { structure } : {}),
+    },
   };
 }

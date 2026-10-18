@@ -2,6 +2,10 @@
 
 import type { CheckResult, Rule, RuleContext, RuleResult } from "../types";
 
+import { refusedCheck, refusedFor } from "../refused";
+
+import { notCheckedCheck } from "./discovery-probe-state";
+
 export const markdownResponseRule: Rule = {
   meta: {
     id: "ax/markdown-response",
@@ -14,6 +18,7 @@ export const markdownResponseRule: Rule = {
     scope: "site",
     severity: "info",
     weight: 1,
+    discoveryProbes: ["markdown"],
   },
 
   run(ctx: RuleContext): RuleResult {
@@ -21,7 +26,13 @@ export const markdownResponseRule: Rule = {
     const md = ctx.site?.markdownResponse;
 
     if (!md) {
-      checks.push({ name: "markdown-response", status: "info", message: "markdown probe data not available" });
+      // A refused request is not an absent Markdown response.
+      const refused = refusedFor(ctx.site, "markdown");
+      checks.push(
+        refused.length > 0
+          ? refusedCheck("markdown-response", "Markdown response", refused)
+          : notCheckedCheck("markdown-response", "Markdown response", undefined, "no-result"),
+      );
       return { checks };
     }
 

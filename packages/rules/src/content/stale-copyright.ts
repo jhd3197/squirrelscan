@@ -175,6 +175,9 @@ export const staleCopyrightRule: Rule = {
             message: `Footer copyright year is ${year}, behind the current year ${currentYear}`,
             value: year,
             expected: currentYear,
+            // pub#846: the year is read from the site footer only, so the report can say "in the
+            // site footer, on 49 of 53 pages" instead of listing every page.
+            details: { region: "footer" },
             // The legacy detection intentionally judges the newest copyright
             // assertion across all footer regions. Attach evidence only for
             // elements that assert THAT selected value, so older suppressed

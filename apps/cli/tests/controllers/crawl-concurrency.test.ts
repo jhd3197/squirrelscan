@@ -5,6 +5,7 @@
 import type { DocumentFetcher } from "@squirrelscan/fetchers";
 
 import { CloudConfigSchema, getDefaultConfig } from "@squirrelscan/config";
+import { PLANS } from "@squirrelscan/core-contracts/plans";
 import { describe, expect, test } from "bun:test";
 
 import {
@@ -145,6 +146,34 @@ describe("resolveCrawlConcurrency", () => {
     expect(result.concurrency).toBe(1);
   });
 
+  // #409: the discovery probes are plain HTTP, not render jobs. Clamped with
+  // the pages, a free plan sent all 28 one at a time and the later ones fell
+  // past the preamble budget on a slow host.
+  test("discovery probes keep the configured per-host limits on a free-plan render crawl", () => {
+    const config = getDefaultConfig();
+    config.crawler.per_host_concurrency = 4;
+    config.crawler.per_host_delay_ms = 120;
+
+    const result = resolveCrawlConcurrency(
+      config,
+      fetcherWithId("cloud-render"),
+      1
+    );
+    expect(result.perHostConcurrency).toBe(1);
+    expect(result.perHostDelayMs).toBe(0);
+    expect(result.discoveryProbePerHost).toEqual({
+      concurrency: 4,
+      delayMs: 120,
+    });
+  });
+
+  test("plain HTTP crawls leave the probes on the page limits", () => {
+    const config = getDefaultConfig();
+    expect(
+      resolveCrawlConcurrency(config, undefined).discoveryProbePerHost
+    ).toBeUndefined();
+  });
+
   test("plan limit above configured value is a no-op", () => {
     const config = getDefaultConfig();
     config.cloud.render_concurrency = 5;
@@ -224,15 +253,17 @@ describe("deriveUserSetConcurrency", () => {
 });
 
 describe("renderConcurrencyUpsellHint", () => {
-  test("free plan hints at Pro's concurrency", () => {
+  // Plans render 1 / 5 / 10 pages at once, per audit (squirrelscan/repo#2480):
+  // read from PLANS so the hint can never sell a number the plan does not have.
+  test("free plan hints at Pro's pages rendered at once", () => {
     expect(renderConcurrencyUpsellHint("free")).toBe(
-      " — upgrade to Pro for 5 concurrent renders"
+      ` — upgrade to Pro for ${PLANS.starter.renderConcurrency} pages rendered at once, per audit`
     );
   });
 
-  test('pro plan (planId "starter") hints at Team\'s concurrency', () => {
+  test('pro plan (planId "starter") hints at Team\'s pages rendered at once', () => {
     expect(renderConcurrencyUpsellHint("starter")).toBe(
-      " — upgrade to Team for 10 concurrent renders"
+      ` — upgrade to Team for ${PLANS.team.renderConcurrency} pages rendered at once, per audit`
     );
   });
 

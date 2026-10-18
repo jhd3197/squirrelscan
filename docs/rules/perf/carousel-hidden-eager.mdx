@@ -19,6 +19,8 @@ An image is flagged only when all of this holds: it is not `loading="lazy"`, it 
 
 Hidden means `aria-hidden="true"`, a `hidden` attribute, or an inline style containing `display:none` or `visibility:hidden`. A class that hides an element through an external stylesheet is not detected, so the rule only sees the inline case. A page with no parsed document emits nothing at all.
 
+Elements inside `<noscript>` are skipped: a browser with scripting enabled reads `<noscript>` content as plain text, so nothing in it loads or renders. See [content inside noscript](/rules#content-inside-noscript).
+
 ## How to fix it
 
 ```html
@@ -60,8 +62,9 @@ disable = ["perf/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["perf/carousel-hidden-eager"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
@@ -79,7 +82,7 @@ Performance findings ship in every audit next to the SEO, security and agent exp
 
 ## Check your site
 
-Run `squirrel audit https://example.com` and open the Performance section of the report. Every eager image in a hidden slide is listed by URL. Local audits are free.
+Run `squirrel audit https://example.com` and open the Performance section of the report. Every eager image in a hidden slide is listed by URL. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">

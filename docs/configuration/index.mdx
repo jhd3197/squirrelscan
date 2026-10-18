@@ -147,9 +147,11 @@ Project configuration is stored in `squirrel.toml` using TOML format.
 | `[crawler]` | Crawl limits, delays, patterns | [Crawler Settings](/configuration/crawler) |
 | `[rules]` | Enable/disable audit rules | [Rules Configuration](/configuration/rules) |
 | `[external_links]` | External link checking | [External Links](/configuration/external-links) |
+| `[classifier]` | The bundled page classifier that names where on a page a link sits | [Page Classifier](/configuration/classifier) |
 | `[output]` | Default output format | [Output Settings](/configuration/output) |
 | `[storage]` | How many audits a project keeps on disk | [Storage Settings](/configuration/storage) |
 | `[cloud]` | Cloud features, spend limits, rendering | [Cloud Settings](/configuration/cloud) |
+| `[security]` | Probing intensity and the probing time budget | [Security configuration](/configuration/security) |
 | `[rule_options.*]` | Per-rule configuration | [Rule Options](/configuration/rule-options) |
 | `smart_audits` | Carry issues across partial re-audits (top-level boolean) | [Smart Audits](#smart-audits) |
 
@@ -328,7 +330,7 @@ squirrel config set crawler.max_pages 200 --dry-run
 
 ### Validate configuration
 
-Check for errors:
+Check for errors, including a `[rule_options]` table that names no rule, an option the rule does not take, or a value of the wrong type (see [what happens to a mistake](/configuration/rule-options#what-happens-to-a-mistake)):
 
 ```bash
 squirrel config validate

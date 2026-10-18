@@ -2,12 +2,15 @@ import { describe, expect, test } from "bun:test";
 
 import {
   consentEstimateLine,
+  linkPricingNoticeDue,
+  estimateBalanceAfter,
   formatCloudSpendSummary,
   phaseTimingsFromError,
   resolveCloudRendering,
   resolveExplicitRenderMode,
   validateAuditFlags,
 } from "../../src/cli/commands/audit";
+import { LINK_PRICING_NOTICE } from "../../src/lib/upgrade";
 
 describe("phaseTimingsFromError (#871)", () => {
   test("extracts phaseTimingsMs from a well-formed CommandError.details", () => {
@@ -62,7 +65,87 @@ describe("phaseTimingsFromError (#871)", () => {
   });
 });
 
+describe("estimateBalanceAfter (#2290)", () => {
+  test("a post-services read only loses the end-of-run settlement", () => {
+    // Read after the crawl's renders: 100 − 50 base − 2 prepaid = 48, then 36
+    // settled for 18 more pages.
+    expect(
+      estimateBalanceAfter({
+        prefetchRead: 48,
+        afterBase: 50,
+        baseCharged: 50,
+        totalSpent: 88,
+        settled: 36,
+      })
+    ).toBe(12);
+  });
+
+  test("with only the register read, every charge after the base comes off", () => {
+    // Quick coverage skips the prefetch read: 100 → 50 after base, then 2
+    // prepaid and 36 settled.
+    expect(
+      estimateBalanceAfter({
+        prefetchRead: null,
+        afterBase: 50,
+        baseCharged: 50,
+        totalSpent: 88,
+        settled: 36,
+      })
+    ).toBe(12);
+  });
+
+  test("never negative, null when nothing was read, frozen when unmetered", () => {
+    expect(
+      estimateBalanceAfter({
+        prefetchRead: 10,
+        afterBase: null,
+        baseCharged: 50,
+        totalSpent: 100,
+        settled: 40,
+      })
+    ).toBe(0);
+    expect(
+      estimateBalanceAfter({
+        prefetchRead: null,
+        afterBase: null,
+        baseCharged: 50,
+        totalSpent: 88,
+        settled: 38,
+      })
+    ).toBeNull();
+    expect(
+      estimateBalanceAfter({
+        prefetchRead: null,
+        afterBase: 0,
+        baseCharged: 50,
+        totalSpent: 88,
+        settled: 38,
+        unlimited: true,
+      })
+    ).toBe(0);
+  });
+});
+
 describe("formatCloudSpendSummary", () => {
+  test("names the audited page count so the arithmetic is checkable (#2290)", () => {
+    const line = formatCloudSpendSummary({
+      lines: [
+        { service: "audit-base", feature: "audit_base", units: 1, credits: 50 },
+        {
+          service: "audit-pages",
+          feature: "audit_page",
+          units: 19,
+          credits: 38,
+        },
+      ],
+      totalSpent: 88,
+      balanceAfter: 412,
+    });
+    expect(line).toBe(
+      "☁ Cloud credits used: 88 (audit-base 50, 19 audited pages 38) · balance ~412"
+    );
+  });
+
   test("a render cache hit shows the render_cached (1cr) line, matching the ledger #279", () => {
     const line = formatCloudSpendSummary({
       lines: [{ service: "render_cached", credits: 1 }],
@@ -263,7 +346,11 @@ describe("login implies cloud consent (#368)", () => {
       })
     );
     // No blocking prompt — cloud on by default, prefetch confirm skipped (capped).
-    expect(decision).toEqual({ mode: "browser", consented: true });
+    expect(decision).toEqual({
+      mode: "browser",
+      consented: true,
+      disclosed: true,
+    });
     expect(updates).toEqual([{ cloud_spend_ack: true }]);
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain("100 credits"); // 50 base + computeCost("render", 25)
@@ -311,7 +398,11 @@ describe("login implies cloud consent (#368)", () => {
       })
     );
     // Uncapped ⇒ the prefetch confirm still guards unbounded spend.
-    expect(decision).toEqual({ mode: "browser", consented: false });
+    expect(decision).toEqual({
+      mode: "browser",
+      consented: false,
+      disclosed: true,
+    });
     expect(lines[0]).toContain("70 credits"); // 50 base + 2 × 10
     expect(lines[0]).not.toContain("Disable with");
     // Ack is still persisted; a later capped run then skips the confirm.
@@ -322,23 +413,45 @@ describe("login implies cloud consent (#368)", () => {
     const decision = await resolveCloudRendering(
       opts({ spendAck: null, persist: () => ({ ok: false }) })
     );
-    expect(decision).toEqual({ mode: "browser", consented: false });
+    expect(decision).toEqual({
+      mode: "browser",
+      consented: false,
+      disclosed: true,
+    });
   });
 });
 
 describe("consentEstimateLine (#191 up-front cost)", () => {
-  test("shows base + render cost, page ceiling, cap, and balance", () => {
+  test("shows base + per-page cost, page ceiling, cap, and balance", () => {
     const line = consentEstimateLine({
       maxPages: 25,
       balance: 17000,
       maxCredits: 1000,
     });
-    // Pricing v10: 50 audit base + computeCost("render", 25) = 2 × 25.
+    // Pricing v11 (#2290): 50 audit base + computeCost("audit_page", 25) = 2 × 25.
     expect(line).toContain("100 credits");
     expect(line).toContain("50 audit base");
-    expect(line).toContain("up to 25 pages");
+    expect(line).toContain("up to 25 audited pages");
+    expect(line).toContain("however the page is fetched");
     expect(line).toContain("up to 1000 credits/audit");
     expect(line).toContain("17,000"); // locale-formatted balance
+    expect(line).not.toContain("cloud browser");
+    // No external link reserve unless the audit's links go to the cloud.
+    expect(line).not.toContain("external links");
+  });
+
+  test("#801: an audit whose links the cloud checks reserves one link per page", () => {
+    const line = consentEstimateLine({
+      maxPages: 25,
+      balance: 17000,
+      maxCredits: 1000,
+      externalLinks: true,
+    });
+    // 50 base + 2 × 25 pages + 1 × 25 links.
+    expect(line).toContain("About 125 credits");
+    expect(line).toContain(
+      "up to 25 for external links (1 each the cloud verifies, at most 1 per page)"
+    );
   });
 
   test("omits the cap note when uncapped (max_credits_per_audit = 0)", () => {
@@ -368,8 +481,8 @@ describe("consentEstimateLine (#191 up-front cost)", () => {
       balance: null,
       maxCredits: 0,
     });
-    expect(line).toContain("up to 1 page,");
-    expect(line).not.toContain("1 pages");
+    expect(line).toContain("up to 1 audited page (");
+    expect(line).not.toContain("1 audited pages");
   });
 });
 
@@ -393,10 +506,6 @@ describe("validateAuditFlags", () => {
   });
 
   test("--no-publish + --publish is rejected", () => {
-    expect(validateAuditFlags({ no_publish: true, publish: true })).toBe(
-      "--no-publish cannot be combined with --publish"
-    );
-    // citty camelCase key is accepted too
     expect(validateAuditFlags({ noPublish: true, publish: true })).toBe(
       "--no-publish cannot be combined with --publish"
     );
@@ -406,7 +515,80 @@ describe("validateAuditFlags", () => {
     expect(validateAuditFlags({ render: true })).toBeNull();
     expect(validateAuditFlags({ http: true })).toBeNull();
     expect(validateAuditFlags({ offline: true })).toBeNull();
-    expect(validateAuditFlags({ no_publish: true })).toBeNull();
+    expect(validateAuditFlags({ noPublish: true })).toBeNull();
     expect(validateAuditFlags({})).toBeNull();
+  });
+});
+
+describe("the one-time link pricing notice (#801)", () => {
+  const due = (
+    over: Partial<Parameters<typeof linkPricingNoticeDue>[0]> = {}
+  ) =>
+    linkPricingNoticeDue({
+      registers: true,
+      externalLinks: true,
+      shown: false,
+      disclosedThisRun: false,
+      ...over,
+    });
+
+  test("only for an audit that registers and has the cloud check its links, once", () => {
+    expect(due()).toBe(true);
+    expect(due({ shown: true })).toBe(false);
+    expect(due({ externalLinks: false })).toBe(false);
+    expect(due({ registers: false })).toBe(false);
+  });
+
+  test("not when this run printed the cost line, which already prices the links", () => {
+    expect(due({ disclosedThisRun: true })).toBe(false);
+  });
+
+  test("a run that skips the cost line (--http, --render, a config render, a decline) still gets the notice", async () => {
+    // Only the first-time disclosure says `disclosed`; every other way through
+    // resolveCloudRendering leaves the notice owed.
+    const first = await resolveCloudRendering(opts({ spendAck: undefined }));
+    expect(first.disclosed).toBe(true);
+    for (const over of [
+      { args: { http: true } },
+      { args: { render: true } },
+      { configRendering: "browser" as const },
+      { consent: "declined" as const },
+      { spendAck: true },
+    ]) {
+      const decision = await resolveCloudRendering(opts(over));
+      expect(decision.disclosed).toBeUndefined();
+      expect(due({ disclosedThisRun: decision.disclosed === true })).toBe(true);
+    }
+  });
+
+  test("the consent line that priced the links also marks the notice shown", async () => {
+    const updates: Partial<Record<string, unknown>>[] = [];
+    await resolveCloudRendering(
+      opts({
+        spendAck: undefined,
+        estimate: {
+          maxPages: 25,
+          balance: 1000,
+          maxCredits: 1000,
+          externalLinks: true,
+        },
+        persist: (u) => (updates.push(u), { ok: true }),
+      })
+    );
+    expect(updates).toEqual([
+      { cloud_spend_ack: true, link_pricing_notice_shown: true },
+    ]);
+  });
+
+  test("names the price, its cap and the way out, and never offers --offline (which checks no links)", () => {
+    expect(LINK_PRICING_NOTICE).toContain(
+      "1 per external link the cloud verifies for this audit"
+    );
+    expect(LINK_PRICING_NOTICE).toContain(
+      "at most 1 per page of the audit's page limit"
+    );
+    expect(LINK_PRICING_NOTICE).not.toContain("audited page");
+    expect(LINK_PRICING_NOTICE).toContain("--no-external-links");
+    expect(LINK_PRICING_NOTICE).not.toContain("--offline");
   });
 });

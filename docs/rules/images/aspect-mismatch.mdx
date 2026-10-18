@@ -18,6 +18,8 @@ The rule runs on every crawled page over every `img[style]`, so an image with no
 
 An image is skipped when its inline style sets `object-fit` to `cover`, `contain`, `scale-down` or `none`, or when its `class` attribute contains one of `object-cover`, `object-contain`, `object-scale-down` or `object-none`. External stylesheets cannot be read, so a utility class is the only signal available for class-based `object-fit`.
 
+Elements inside `<noscript>` are skipped: a browser with scripting enabled reads `<noscript>` content as plain text, so nothing in it loads or renders. See [content inside noscript](/rules#content-inside-noscript).
+
 ## How to fix it
 
 ```html
@@ -70,13 +72,14 @@ disable = ["images/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["images/aspect-mismatch"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
 - [images/dimensions](/rules/images/dimensions): the attributes this rule compares against.
-- [images/responsive-size](/rules/images/responsive-size): thumbnail-sized images with no srcset or picture markup.
+- [images/responsive-size](/rules/images/responsive-size): thumbnail-sized images whose files are heavier than their displayed size needs.
 - [perf/cls-hints](/rules/perf/cls-hints): the layout shift the same attributes prevent.
 - [images/srcset](/rules/images/srcset): serving a file that matches the rendered box.
 
@@ -89,7 +92,7 @@ Images findings ship in every audit next to the SEO, performance and agent exper
 
 ## Check your site
 
-Run `squirrel audit https://example.com` and open the Images section of the report. Each mismatch is listed with both ratios and a markup snippet. Local audits are free.
+Run `squirrel audit https://example.com` and open the Images section of the report. Each mismatch is listed with both ratios and a markup snippet. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">

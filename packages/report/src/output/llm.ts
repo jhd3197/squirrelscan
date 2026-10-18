@@ -4,10 +4,33 @@ import type { AuditReport, CheckItem } from "../types";
 import { getScoreGrade } from "../scoring";
 import { getGroupName } from "../categories";
 import { groupIssuesByCategory, flattenIssuesBySeverity } from "../grouping";
-import { ruleAffectedPages, ruleAffectedRollup, ruleCarriedPageCount } from "../affected-pages";
+import {
+  affectedPages,
+  ruleAffectedPages,
+  ruleAffectedRollup,
+  ruleCarriedPageCount,
+} from "../affected-pages";
+import {
+  affectedPagesSuffix,
+  hasItemSources,
+  itemSourceView,
+  moreSourcePages,
+  sourceRowText,
+} from "../item-sources";
+import {
+  checkPagesScopedAway,
+  checkScopeLine,
+  itemLabel,
+  regionScopeLine,
+} from "../region-scope";
+
+/** "in the site footer, ..." from "In the site footer, ...", to sit inside a sentence. */
+const lowerFirst = (text: string): string => text.charAt(0).toLowerCase() + text.slice(1);
 import { getDocsUrl } from "../docs";
 import { domainAgeYears } from "../site-metadata";
 import { lockedRulesMessage } from "../locked-rules";
+import { privateTargetLine, privateTargetSkippedRules } from "../private-target";
+import { notCheckedLine, notCheckedRules } from "../not-checked";
 import { editorSummaryView } from "../editor-summary";
 import {
   ENTITY_FINDING_LIMIT,
@@ -21,7 +44,15 @@ import {
   primaryEntities,
   stableIdPercent,
 } from "../entities";
-import { seedRedirect } from "../coverage";
+import {
+  structureChromeLine,
+  structureDegradedLine,
+  structureAttr,
+  structurePageTypesLine,
+  structureSectionName,
+  structureTotalsLine,
+} from "../structure";
+import { publishedReportNote, seedRedirect } from "../coverage";
 import { describeSlot, fixRollupLine, fixUnits, ruleFixCoverage } from "../component-presentation";
 import {
   ruleSiteResourceCoverage,
@@ -37,7 +68,7 @@ import { LLM_REPORT } from "@squirrelscan/core-contracts/limits";
 import { formatSiteWideItem, siteWideContext, siteWideItem } from "../site-wide-items";
 import { stripControlChars } from "@squirrelscan/core-contracts/control-chars";
 import { AUDIT_FAILURE_NEXT_STEP_THIRD } from "@squirrelscan/core-contracts/failure-reason";
-import { reportFailureReasonCode } from "../failure-notice";
+import { refusedFetchLines, reportFailureReasonCode } from "../failure-notice";
 
 export interface LlmRenderOptions {
   /** Roll up groups that are one repair (default true). */
@@ -150,12 +181,19 @@ export function renderLlm(report: AuditReport, options?: LlmRenderOptions): stri
   // "are these numbers the whole site?" applies to a completed run too.
   if (report.rateLimited && report.rateLimited.pages > 0) {
     const hosts = report.rateLimited.hosts.join(", ");
+    const unfetched = report.rateLimited.unfetched ?? 0;
+    const unfetchedAttr = unfetched > 0 ? ` unfetched="${unfetched}"` : "";
     lines.push(
-      `<rate-limited pages="${report.rateLimited.pages}" hosts="${escapeXml(hosts)}">`,
+      `<rate-limited pages="${report.rateLimited.pages}"${unfetchedAttr} hosts="${escapeXml(hosts)}">`,
     );
     lines.push(
       `${indent(1)}${report.rateLimited.pages} page(s) could not be verified because the host rate limited the crawler (429/430). Their status is UNKNOWN, not broken, and they were excluded from scoring. Do not report them as dead links.`,
     );
+    if (unfetched > 0) {
+      lines.push(
+        `${indent(1)}${unfetched} more URL(s) were discovered but never fetched. The pages above and these are missing from the audit, so the site is larger than the page count suggests.`,
+      );
+    }
     lines.push("</rate-limited>");
   }
 
@@ -196,6 +234,18 @@ export function renderLlm(report: AuditReport, options?: LlmRenderOptions): stri
       );
     }
     lines.push("</status>");
+  }
+
+  // Root fetches the site refused. Their absence is UNKNOWN, so an agent
+  // must not turn them into "add a robots.txt" or "add a sitemap" fixes.
+  const refused = refusedFetchLines(report);
+  if (refused.length > 0) {
+    lines.push("<refused-fetches>");
+    lines.push(
+      `${indent(1)}The site refused these requests, so whether the resources exist is UNKNOWN. Do not report them as missing.`,
+    );
+    for (const line of refused) lines.push(`${indent(1)}<fetch>${escapeXml(line)}</fetch>`);
+    lines.push("</refused-fetches>");
   }
 
   // null ⇒ N/A (failed/0-page audit) — never coerce to 0/"F" (#586).
@@ -244,8 +294,28 @@ export function renderLlm(report: AuditReport, options?: LlmRenderOptions): stri
       s.requestedMaxPages !== undefined
         ? ` requested-max-pages="${s.requestedMaxPages}"`
         : "";
+    // Present only on a time stop: the crawl budget, not the page limit, ended it.
+    const stop = s.stopReason ? ` stop-reason="${s.stopReason}"` : "";
     lines.push(
-      `<scan-scope origin="${s.origin}" crawled="${s.pagesCrawled}"${cap}${requested} capped="${s.capped}"/>`,
+      `<scan-scope origin="${s.origin}" crawled="${s.pagesCrawled}"${cap}${requested} capped="${s.capped}"${stop}/>`,
+    );
+  }
+
+  // repo#2661: a capped published report lists a sample of each issue's pages
+  // and items beside the true counts. Escaped like every other value here: the
+  // numbers in it come off the report's own JSON.
+  const capped = publishedReportNote(report);
+  if (capped) lines.push(`<published-summary>${escapeXml(capped)}</published-summary>`);
+
+  // The audit level, so an agent knows what kind of audit the score rests on
+  // and which settings were changed from the level (a custom audit). The
+  // changed setting keys are the core-contracts AuditSettings names.
+  if (report.auditLevel) {
+    const a = report.auditLevel;
+    // Escaped like every other attribute here: the snapshot can come from a
+    // stored or fetched report, and this output is read by an agent.
+    lines.push(
+      `<audit-level level="${escapeXml(String(a.level))}" based-on="${escapeXml(String(a.basedOn))}" changes="${escapeXml(a.changes.map(String).join(","))}" pages="${Number(a.settings.pages)}"/>`,
     );
   }
 
@@ -336,7 +406,7 @@ export function renderLlm(report: AuditReport, options?: LlmRenderOptions): stri
     lines.push("</technologies>");
   }
 
-  const categoryIssues = groupIssuesByCategory(report.ruleResults);
+  const categoryIssues = groupIssuesByCategory(report.ruleResults, report.checkTallies);
 
   if (categoryIssues.length > 0) {
     lines.push("<issues>");
@@ -386,7 +456,14 @@ export function renderLlm(report: AuditReport, options?: LlmRenderOptions): stri
         `${indent(1)}<rule id="${escapeXml(rule.id)}" severity="${rule.severity}" category="${escapeXml(rule.categoryName)}" group="${escapeXml(rule.group)}"${rule.subcategory ? ` subcategory="${escapeXml(rule.subcategory)}"` : ""} status="${ruleStatus}"${carriedAttr} docs="${escapeXml(docsUrl)}">`,
       );
   
-      const messages = rule.checks.map((c) => c.message).filter((m) => m);
+      // pub#837: a check whose items are links says how many pages carry them.
+      const messages = rule.checks
+        .map((c) =>
+          c.message && hasItemSources(c)
+            ? c.message + affectedPagesSuffix(c, affectedPages(c).count)
+            : c.message,
+        )
+        .filter((m) => m);
       if (messages.length > 0) lines.push(`${indent(2)}${escapeXml(messages.join("; "))}`);
       // Shared-resource units (#2341) narrow the coverage the component units
       // computed, so the page arithmetic below counts a page as accounted for
@@ -434,19 +511,30 @@ export function renderLlm(report: AuditReport, options?: LlmRenderOptions): stri
       // 200/600). `hasMore` marks the floor as a lower bound (2+ truncated
       // checks with possibly-disjoint hidden pages) → suffix "+".
       const rollup = ruleAffectedRollup(rule.checks);
-      const totalPages = rollup.count;
-      const totalLabel = `${totalPages}${rollup.hasMore ? "+" : ""}`;
+      const totalLabel = `${rollup.count}${rollup.hasMore ? "+" : ""}`;
   
-      // A fully covered rule has already said which pages are affected, once per
-      // repair target. Repeating them as a flat list is the noise this feature
-      // was supposed to remove.
+      // pub#846/#857: a check that names its region or its page type lists no pages here: its own
+      // line says where it is. The pages of the rule's other checks are still listed, so a
+      // documentation check on all 9 pages and a contact check below the share both read right.
+      const scopedChecks = rule.checks.filter((c) =>
+        checkPagesScopedAway(c, affectedPages(c).count, report.structure),
+      );
+      const openChecks = rule.checks.filter((c) => !scopedChecks.includes(c));
+      const openPages = ruleAffectedPages(openChecks);
+      const openRollup = ruleAffectedRollup(openChecks);
+      const openLabel = `${openRollup.count}${openRollup.hasMore ? "+" : ""}`;
+      // #2307: a fully covered rule has already said which pages are affected, once per
+      // repair target. Repeating them as a flat list is the noise this feature was supposed to
+      // remove; a partly covered one lists only the pages no repair target named.
       const legacyPages =
         coverage.mode === "full"
           ? new Set<string>()
           : coverage.mode === "partial"
-            ? new Set(coverage.uncoveredPages)
-            : allPages;
-      if (legacyPages.size > 0) {
+            ? new Set([...openPages].filter((page) => coverage.uncoveredPages.includes(page)))
+            : openPages;
+      if (coverage.mode !== "full" && allPages.size > 0 && openChecks.length === 0) {
+        lines.push(`${indent(2)}Pages (${totalLabel})`);
+      } else if (legacyPages.size > 0) {
         const sampledPages = sampleAffectedPagesBreadthFirst(Array.from(legacyPages), baseOrigin);
         const pageList = sampledPages
           .map((p) => escapeXml(compressUrl(p, baseOrigin)))
@@ -457,18 +545,30 @@ export function renderLlm(report: AuditReport, options?: LlmRenderOptions): stri
           lines.push(
             `${indent(2)}Pages not attributed to a shared component (${legacyPages.size}): ${pageList}`,
           );
-        } else if (sampledPages.length < totalPages) {
-          lines.push(`${indent(2)}Pages (${sampledPages.length}/${totalLabel}): ${pageList}`);
+        } else if (sampledPages.length < openRollup.count) {
+          lines.push(`${indent(2)}Pages (${sampledPages.length}/${openLabel}): ${pageList}`);
         } else {
-          lines.push(`${indent(2)}Pages (${totalLabel}): ${pageList}`);
+          lines.push(`${indent(2)}Pages (${openLabel}): ${pageList}`);
         }
       }
-  
+      for (const c of scopedChecks) {
+        const scope = checkScopeLine(c, affectedPages(c).count, report.structure);
+        if (scope) lines.push(`${indent(2)}${escapeXml(scope)}`);
+      }
+
       const allItems: CheckItem[] = [];
+      // repo#2661: items a capped (or clamped) check left out still count.
+      // `details.additional` is always items LEFT OUT of `items`: the fold's and
+      // the publish clamp's dropped count, and every rule's own "first N items,
+      // the rest as additional" remainder (rules/src/shared/sample-items.ts and
+      // the a11y rules' slice(0, 10)). So listed + additional is the total.
+      let itemsLeftOut = 0;
       for (const check of rule.checks) {
         // Narrowed to what the printed groups did NOT account for, so a
         // partially covered rule does not report the same pages twice.
         allItems.push(...uncoveredItems(check.items, coverage));
+        const additional = check.details?.additional;
+        if (typeof additional === "number" && additional > 0) itemsLeftOut += Math.floor(additional);
       }
   
       if (allItems.length > 0 && coverage.mode !== "full") {
@@ -502,18 +602,23 @@ export function renderLlm(report: AuditReport, options?: LlmRenderOptions): stri
 
         const itemBudget = Math.max(0, LLM_REPORT.maxItems - shownCollapsed.length);
         const sampledItems = remaining.slice(0, itemBudget);
+        const itemsTotal = remaining.length + itemsLeftOut;
         if (sampledItems.length > 0) {
           lines.push(
-            sampledItems.length < remaining.length
-              ? `${indent(2)}Items (${sampledItems.length}/${remaining.length}):`
-              : `${indent(2)}Items (${remaining.length}):`,
+            sampledItems.length < itemsTotal
+              ? `${indent(2)}Items (${sampledItems.length}/${itemsTotal}):`
+              : `${indent(2)}Items (${itemsTotal}):`,
           );
         }
   
         for (const item of sampledItems) {
           const itemId = item.id.startsWith("http") ? compressUrl(item.id, baseOrigin) : item.id;
           let itemLine = `${indent(3)}- ${escapeXml(itemId)}`;
-          if (item.label && item.label !== item.id) itemLine += ` (${escapeXml(item.label)})`;
+          // pub#837/#846: the item's pages, and the region it is shown in; a scoped item's label
+          // drops the section phrase the region says.
+          const view = itemSourceView(item, report.structure);
+          const label = itemLabel(item, view.scope);
+          if (label && label !== item.id) itemLine += ` (${escapeXml(label)})`;
           if (item.snippet) itemLine += ` | ${escapeXml(item.snippet)}`;
           if (item.meta) {
             const metaParts: string[] = [];
@@ -525,19 +630,25 @@ export function renderLlm(report: AuditReport, options?: LlmRenderOptions): stri
             }
             if (metaParts.length > 0) itemLine += ` [${metaParts.join(", ")}]`;
           }
-          if (item.sourcePages && item.sourcePages.length > 0) {
-            const sourcePages = item.sourcePages.slice(0, LLM_REPORT.maxItemSourcePages);
-            const sources = sourcePages
-              .map((s) => escapeXml(compressUrl(s, baseOrigin)))
-              .join(", ");
-            if (sourcePages.length < item.sourcePages.length) {
-              itemLine += ` (from: ${sources}; +${item.sourcePages.length - sourcePages.length} more)`;
-            } else {
-              itemLine += ` (from: ${sources})`;
-            }
+          // pub#837: each page once, with its links and where they sit. pub#846: an item
+          // scoped to a region names it, then the pages it is on outside it.
+          const shown = view.rows.slice(0, LLM_REPORT.maxItemSourcePages);
+          const hidden = Math.max(0, view.total - shown.length);
+          const sources = shown
+            .map((row) => escapeXml(sourceRowText(compressUrl(row.page, baseOrigin), row.detail)))
+            .join(", ");
+          const more = hidden > 0 ? `; ${moreSourcePages(hidden)}` : "";
+          if (view.scope) {
+            const where = escapeXml(lowerFirst(regionScopeLine(view.scope)));
+            itemLine += shown.length > 0 ? ` (${where}; also from: ${sources}${more})` : ` (${where})`;
+          } else if (shown.length > 0) {
+            itemLine += ` (from: ${sources}${more})`;
           }
           lines.push(itemLine);
         }
+      } else if (itemsLeftOut > 0 && coverage.mode !== "full") {
+        // pub#866: a check that keeps no items still says how many it has.
+        lines.push(`${indent(2)}Items (0/${itemsLeftOut}): none listed`);
       }
 
       lines.push(`${indent(1)}</rule>`);
@@ -545,6 +656,20 @@ export function renderLlm(report: AuditReport, options?: LlmRenderOptions): stri
     lines.push("</issues>");
   } else {
     lines.push("<issues/>");
+  }
+
+  // pub#629: rules that do not apply to a local or private-network host. An
+  // agent must not read their absence from <issues> as "HTTPS and caching are
+  // fine", nor go fixing a dev server's transport. One element, not one per rule.
+  const privateTarget = privateTargetLine(report);
+  if (privateTarget) {
+    const rules = privateTargetSkippedRules(report);
+    lines.push(`<not-applicable reason="private-target" count="${rules.length}">`);
+    lines.push(`${indent(1)}${escapeXml(privateTarget)}`);
+    for (const rule of rules) {
+      lines.push(`${indent(1)}<rule id="${escapeXml(rule.id)}" name="${escapeXml(rule.name)}"/>`);
+    }
+    lines.push("</not-applicable>");
   }
 
   // Cloud-/Pro-gated rules that didn't run this audit (#780) — an agent must
@@ -604,6 +729,56 @@ export function renderLlm(report: AuditReport, options?: LlmRenderOptions): stri
       );
     }
     lines.push("</entities>");
+  }
+
+  // Report detail: the last element, after every finding. What this audit did not check, then the
+  // page structure. An agent reads the absence of an issue in <issues> through the first.
+  const detail: string[] = [];
+  // repo#2729: checks this audit did not run (link checks off, links not
+  // followed). Their absence from <issues> is NOT a clean result: an agent must
+  // not tell the user "no broken links" when no link was checked.
+  const notChecked = notCheckedRules(report);
+  if (notChecked.length > 0) {
+    detail.push(`<not-checked count="${notChecked.length}">`);
+    for (const rule of notChecked) {
+      detail.push(
+        `${indent(1)}<rule id="${escapeXml(rule.ruleId)}" name="${escapeXml(rule.name)}" check="${escapeXml(rule.check)}" reason="${escapeXml(rule.reason)}">${escapeXml(notCheckedLine(rule))}</rule>`,
+      );
+    }
+    detail.push("</not-checked>");
+  }
+
+  // Page structure (#2307) — report-only context for the agent (does not affect the score): which
+  // part of the page the links sit in, and the page types. The sentences are for reading, the
+  // rows for counting.
+  if (report.structure) {
+    const structure = report.structure;
+    const share = structure.chrome.share;
+    detail.push(
+      `<page-structure pages="${structureAttr(structure.pages)}" links="${structureAttr(structure.totalLinks)}"${typeof share === "number" ? ` chrome-share="${structureAttr(share)}"` : ""}>`,
+    );
+    for (const line of [
+      structurePageTypesLine(structure),
+      structureChromeLine(structure),
+      structureTotalsLine(structure),
+      structureDegradedLine(structure),
+    ]) {
+      if (line) detail.push(`${indent(1)}${escapeXml(line)}`);
+    }
+    // The section id as the JSON report spells it, so a row can be matched to `structure.sections`.
+    for (const row of structure.sections) {
+      if (structureSectionName(row.section) === undefined) continue;
+      detail.push(
+        `${indent(1)}<section name="${escapeXml(row.section)}" pages="${structureAttr(row.pages)}" links="${structureAttr(row.links)}"/>`,
+      );
+    }
+    detail.push("</page-structure>");
+  }
+
+  if (detail.length > 0) {
+    lines.push("<report-detail>");
+    for (const line of detail) lines.push(`${indent(1)}${line}`);
+    lines.push("</report-detail>");
   }
 
   lines.push("</audit>");

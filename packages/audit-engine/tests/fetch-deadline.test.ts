@@ -154,21 +154,27 @@ describe("external checker deadline (#1729)", () => {
     const results = await Effect.runPromise(
       checkExternalLinks([`${base}/stall-403`], null, {
         timeoutMs: DEADLINE_MS,
+        // Loopback fixture: the policy a private site's audit uses.
+        egress: { allowPrivateNetwork: true },
       }),
     );
     const elapsed = Date.now() - startedAt;
 
     // The status is known from the headers. With no WAF signature in the
-    // headers and no body to read, this stays a plain 403 — the pre-existing
-    // ambiguity, unchanged by this fix.
+    // headers and no body to read, no vendor can be named, but a 403 is a
+    // wall either way: unverifiable, never broken (pub#800).
     expect(results[0]?.status).toBe(403);
-    expect(results[0]?.wafBlocked).toBeUndefined();
+    expect(results[0]?.wafBlocked).toBe(true);
+    expect(results[0]?.wafProvider).toBe("unknown");
     expect(elapsed).toBeLessThan(DEADLINE_MS * 8);
   });
 
   test("an unreadable 403 body still gets WAF detection from the headers", async () => {
     const results = await Effect.runPromise(
-      checkExternalLinks([`${base}/stall-403-cf`], null, { timeoutMs: DEADLINE_MS }),
+      checkExternalLinks([`${base}/stall-403-cf`], null, {
+        timeoutMs: DEADLINE_MS,
+        egress: { allowPrivateNetwork: true },
+      }),
     );
 
     // The deadline now cuts the WAF body read short, so giving up on detection

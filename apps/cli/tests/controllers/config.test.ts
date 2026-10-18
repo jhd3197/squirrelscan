@@ -12,6 +12,7 @@ import {
   redactConfigValueForDisplay,
   setConfigValue,
   showConfig,
+  validateConfig,
 } from "../../src/controllers/config";
 
 describe("showConfig", () => {
@@ -356,5 +357,82 @@ describe("getConfigPath", () => {
     if (result.ok) {
       expect(result.data).toBe("/path/to/squirrel.toml");
     }
+  });
+});
+
+describe("config read errors (repo#2055)", () => {
+  test("showConfig labels a TOML syntax error with the parser detail", () => {
+    const dir = mkdtempSync(join(tmpdir(), "squirrel-toml-"));
+    try {
+      const path = join(dir, "squirrel.toml");
+      writeFileSync(path, "[crawl\nmax_pages = 5\n");
+      const result = showConfig(path);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.message).toContain(
+          "Failed to read config: TOML syntax error: "
+        );
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("validateConfig (pub#510)", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "squirrel-test-"));
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  test("checks every rule option against the rule it names", async () => {
+    const configPath = join(tempDir, "squirrel.toml");
+    writeFileSync(
+      configPath,
+      `[rule_options."core/meta-title"]
+min_length = "thirty"
+
+[rule_options."performance/ttfb"]
+warn_threshold = 300
+
+[rule_options."core/meta-description"]
+no_such_option = 5
+`
+    );
+    const result = await validateConfig(configPath);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(
+      result.data.ruleOptionProblems.map((p) => [p.kind, p.ruleId, p.key])
+    ).toEqual([
+      ["invalid-value", "core/meta-title", "min_length"],
+      ["unknown-rule", "performance/ttfb", null],
+      ["unknown-option", "core/meta-description", "no_such_option"],
+    ]);
+  });
+
+  test("a config with valid rule options has no problems", async () => {
+    const configPath = join(tempDir, "squirrel.toml");
+    writeFileSync(
+      configPath,
+      `[rule_options."core/meta-title"]
+min_length = 20
+enabled = true
+`
+    );
+    const result = await validateConfig(configPath);
+    expect(result.ok && result.data.ruleOptionProblems).toEqual([]);
+  });
+
+  test("a schema error still comes back as an error result", async () => {
+    const configPath = join(tempDir, "squirrel.toml");
+    writeFileSync(configPath, `[crawler]\nmax_pages = "many"\n`);
+    const result = await validateConfig(configPath);
+    expect(result.ok).toBe(false);
   });
 });

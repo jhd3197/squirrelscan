@@ -5,6 +5,8 @@ description: "Internal and external link health and structure"
 
 Links rules read the link graph the crawl built. Half of them are health checks: internal and external targets that return an error, hrefs that do not parse, links that drop to plain HTTP, links that resolve only through a redirect. The other half describe structure: how many links point at a page, whether any of them sit in body copy rather than the footer, and whether the anchor text says what the destination is.
 
+Three of the health checks, [broken internal links](/rules/links/broken-links), [broken external links](/rules/links/broken-external-links) and [broken anchor links](/rules/links/broken-anchors), are in the [Reliability](/rules/reliability) category: a dead link is a failed request a visitor hits, not a search-engine signal. Their ids keep the `links/` prefix, so `links/*` still selects them.
+
 ## Rules
 
 <CardGroup cols={2}>
@@ -16,6 +18,9 @@ Links rules read the link graph the crawl built. Half of them are health checks:
   </Card>
   <Card title="Broken internal links: 404s inside your own site" icon="circle-exclamation" href="/rules/links/broken-links">
     An internal link to a page that returns 404 or 500 is a dead end you control. squirrel cross-references every internal link against the crawl.
+  </Card>
+  <Card title="Broken anchor links: #fragments that point at nothing" icon="circle-exclamation" href="/rules/links/broken-anchors">
+    A link to #pricing whose target id is gone still loads, and the reader lands at the top of the page. squirrel checks every in-page anchor against its element.
   </Card>
   <Card title="Cloud dead-link checking: the shared external link cache" icon="circle-info" href="/rules/links/dead-links">
     Checking every external link from your machine is slow and rude to the sites you link to. The cloud service checks against a shared cache instead.
@@ -54,6 +59,20 @@ Links rules read the link graph the crawl built. Half of them are health checks:
     One inbound link is enough to be found and not enough to look important. squirrel lists every page whose dofollow inbound count is exactly one.
   </Card>
 </CardGroup>
+
+## Link checking defaults
+
+Internal link checks run at every [audit level](/guides/audit-levels), Quick included, and are free. Each internal link target the crawl did not fetch gets a status-only request (up to 200 per audit, most-linked first), so a linked 404 is found even when the crawl did not follow links or ran out of page budget. It is built not to change anything on your site: it skips links that look like actions (log out, unsubscribe, delete, confirm, add to cart) or carry a token, sends no cookies, credentials or custom headers, and sends `HEAD`, never a `GET` unless the server does not support `HEAD`. See [What the internal link check never requests](/configuration/external-links#what-the-internal-link-check-never-requests).
+
+External link checks run at every level, Quick included. Skip them with `--no-external-links`, `[external_links] enabled = false`, or the website's **External link checks** setting in the cloud. An audit that checks them requests up to its page budget or 200 distinct external links, whichever is more, most-linked first. In a cloud audit, or a signed-in CLI audit at Surface or Full, each external link the cloud verifies costs 1 credit, at most one per page of the audit's budget. Links checked on your machine are free, a Quick CLI audit's included.
+
+| Where | External links | Internal links |
+|-------|----------------|----------------|
+| One CLI run | `--external-links` to check them, `--no-external-links` to skip them | `--no-internal-links` to skip them |
+| `squirrel.toml` | `[external_links] enabled = false` to skip them | `[internal_links] enabled = false` to skip them |
+| A cloud website | The website's **External link checks** setting | The website's **Internal link checks** [crawl setting](/dashboard/crawl-settings#internal-link-checks) |
+
+`--offline` skips external links, since it promises no requests beyond the audited site. A check that did not run is reported as **Not checked** with the reason, never as a pass.
 
 ## Disable all Links rules
 

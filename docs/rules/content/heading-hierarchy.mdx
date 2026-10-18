@@ -15,7 +15,7 @@ The rule runs on every crawled page and reads the heading analysis the parser pr
 
 - `heading-hierarchy` warns when a level was skipped. Message: `Skipped heading levels detected`, listing each skip. Severity warning, weight 5.
 - `heading-hierarchy` passes when nothing was skipped and the page has headings. Message: `Heading hierarchy is valid`.
-- `empty-headings` warns when a heading has no text. Message: `2 empty heading(s) found`.
+- `empty-headings` warns when a heading has no text. Message: `2 empty heading(s) found`. A heading the markup hides from every reader does not count: one with the `hidden` attribute, inline `display:none` or `visibility:hidden`, or inside a `[hidden]` or `aria-hidden="true"` ancestor. The same test decides which empty headings [a11y/empty-heading](/rules/a11y/empty-heading) reports. Hiding through a stylesheet class cannot be seen from the markup, so it still counts.
 - `long-headings` reports info for headings over 70 characters. Message: `3 heading(s) over 70 characters`, each item naming the level with the first 50 characters of its text.
 - `duplicate-headings` reports info for repeated heading text. Message: `4 duplicate heading(s)`, listing the repeated text.
 
@@ -62,8 +62,9 @@ disable = ["content/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["content/heading-hierarchy"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
@@ -81,7 +82,7 @@ Content findings ship in every audit next to the SEO, performance and agent expe
 
 ## Check your site
 
-Run `squirrel audit https://example.com` and open the Content section of the report. Each page is listed with its skipped levels, empty headings and repeats. Local audits are free.
+Run `squirrel audit https://example.com` and open the Content section of the report. Each page is listed with its skipped levels, empty headings and repeats. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">

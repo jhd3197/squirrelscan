@@ -6,6 +6,8 @@ description: "Install squirrelscan and run your first audit"
 
 ## Installation
 
+<Tip>Rather have your coding agent do the whole setup? Paste `Fetch and follow the setup instructions for squirrelscan at https://docs.squirrelscan.com/agent-setup/prompt.md` into it. See [Agent setup](/agent-setup).</Tip>
+
 <Tabs>
   <Tab title="macOS / Linux">
     ```bash
@@ -17,11 +19,23 @@ description: "Install squirrelscan and run your first audit"
     iwr -useb https://install.squirrelscan.com/install.ps1 | iex
     ```
   </Tab>
+  <Tab title="Homebrew (macOS)">
+    ```bash
+    brew install --cask squirrelscan/tap/squirrel
+    ```
+    The cask is macOS only. `brew upgrade` does nothing for the CLI: update it with `squirrel self update`. See [Homebrew](#homebrew) below for how this install updates and uninstalls.
+  </Tab>
 </Tabs>
 
-This downloads the binary to `~/.local/bin/squirrel` and adds it to your PATH.
+This downloads the binary to `~/.local/bin/squirrel` and adds it to your PATH. With Homebrew, that happens on the first run, when the launcher runs the regular installer.
 
-<Tip>After installation, run `squirrel self doctor` to verify everything is set up correctly.</Tip>
+Then run setup once. It signs you in (optional), installs the agent skills for Claude Code, Codex, Cursor and more, and turns on auto-update:
+
+```bash
+squirrel setup
+```
+
+<Tip>Run `squirrel` on its own any time to see every command and a quick start. If something looks wrong, `squirrel self doctor` checks the install.</Tip>
 
 <Note>
 **Alpine / musl Linux:** the binary needs the `libstdc++` runtime library. The installer adds it automatically when run as root; otherwise install it first with `apk add libstdc++` (or `sudo apk add libstdc++`).
@@ -63,6 +77,32 @@ If both hosts are unreachable, the installer prints the two URLs it tried. Allow
 
 `SQUIRREL_DOWNLOAD_ENDPOINT` points the fallback at a different host if you mirror the releases yourself. Only its scheme, host and path appear in the installer's anonymous failure report, so a URL carrying a token in its userinfo, query or fragment does not send that token anywhere.
 
+### Homebrew
+
+```bash
+brew install --cask squirrelscan/tap/squirrel
+```
+
+The cask is macOS only (Linuxbrew is not supported; on Linux use the install script). It puts a small `squirrel` launcher on your PATH. The first time you run it, it runs the regular installer and then your command. The CLI lands in `~/.squirrel/releases` with a `squirrel` link in `~/.local/bin`, the same layout as the install script.
+
+From then on it is an ordinary managed install. `squirrel self update` and auto-update keep it current, and `brew upgrade` leaves the CLI alone. Homebrew only owns the launcher.
+
+To uninstall:
+
+```bash
+brew uninstall --cask squirrel
+```
+
+This removes the launcher and runs `squirrel self uninstall --yes`. That removes the link and the release binaries, and keeps your settings, credentials and audit data in `~/.squirrel`. To remove `~/.squirrel` as well:
+
+```bash
+brew uninstall --zap --cask squirrel
+```
+
+### Uninstall
+
+Whichever way you installed, `squirrel self uninstall` removes the link and the release binaries. It asks before deleting anything. Add `--purge` to remove settings, credentials and audit data too. See [self uninstall](/cli/self#uninstall) for exactly what it removes.
+
 ### If the install is killed at the last step
 
 On a machine with very little free memory the kernel can kill `squirrel self install` before it finishes, which used to leave nothing installed. The installer now finishes the job itself: it lays the release out, links the binary, and runs it once to confirm it works. If even that run is killed, the machine cannot execute the binary at all, and the installer says so and points at the [cloud dashboard](https://app.squirrelscan.com) as the way to audit without a local binary.
@@ -79,7 +119,7 @@ On a machine with very little free memory the kernel can kill `squirrel self ins
   <Tab title="In your agent">
     Install the skills for autonomous workflows in Claude Code, Cursor, Codex, and any coding agent:
     ```bash
-    npx skills add squirrelscan/squirrelscan
+    squirrel skills install
     ```
     Then run `/audit-website` or prompt your agent:
     ```text
@@ -129,7 +169,7 @@ You'll see output like:
   v0.0.84  •  https://squirrelscan.com
 ────────────────────────────────────────────
 Auditing  https://example.com
-Coverage  surface · max 100 pages
+Level     surface · max 100 pages
 Config    defaults
 Account   you@example.com · 500 credits
 Dashboard https://app.squirrelscan.com
@@ -203,12 +243,12 @@ Content (2 warnings)
     ```
   </Step>
 
-  <Step title="Choose a coverage mode">
-    Pick depth or speed. `quick` is fast, local and free. `surface` audits one page per template. `full` is comprehensive:
+  <Step title="Choose an audit level">
+    Pick depth or speed. `quick` is fast: up to 25 pages, without the cloud checks (logged out it runs locally, no account needed; logged in it is billed like any level, up to 100 credits). `surface` audits one page per template with the cloud checks. `full` reads every page up to 500:
     ```bash
-    squirrel audit https://example.com -C quick
+    squirrel audit https://example.com --level quick
     ```
-    The default is `quick` when you're logged out and `surface` when you're logged in.
+    The default is `quick` when you're logged out and `surface` when you're logged in. See [Audit levels](/guides/audit-levels) for what each one checks and costs.
   </Step>
 
   <Step title="Run only some categories">
@@ -217,7 +257,7 @@ Content (2 warnings)
     <Warning>A filtered audit produces a partial report. Scores reflect only the rules that ran, so don't compare them against a full audit.</Warning>
 
     ```bash
-    squirrel audit https://example.com --rule-include ax,performance
+    squirrel audit https://example.com --rule-include ax,perf
     ```
   </Step>
 </Steps>
@@ -245,7 +285,7 @@ squirrelscan is designed for coding agents. Two primary methods:
 ### 1. Install the skills (recommended)
 
 ```bash
-npx skills add squirrelscan/squirrelscan
+squirrel skills install
 ```
 
 Then use with Claude Code, Cursor, or any skill-compatible agent:
@@ -270,4 +310,4 @@ The `--format llm` provides compact, token-optimized output designed specificall
 - Run `squirrel --help` for all available commands
 - See [Configuration](/configuration) to customize audit behavior
 - Check [CLI Reference](/cli/audit) for full audit options
-- View the [GitHub repo](https://github.com/squirrelscan/squirrelscan) for updates
+- View the [GitHub repo](https://github.com/squirrelscan/squirrelscan) for updates. If squirrelscan caught something your agent missed, a star there helps other developers find it

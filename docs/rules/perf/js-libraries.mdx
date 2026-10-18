@@ -21,6 +21,8 @@ Detection is tried in three passes and stops once a library is both detected and
 
 Only five of the twenty-two carry advisory data: jQuery, Bootstrap, Lodash, Prototype.js and YUI. A version is flagged when it is at or below the advisory's maximum affected version. A page with no parsed document, or no HTML, emits nothing at all.
 
+Elements inside `<noscript>` are skipped: a browser with scripting enabled reads `<noscript>` content as plain text, so nothing in it loads or renders. See [content inside noscript](/rules#content-inside-noscript).
+
 ## How to fix it
 
 Update the dependency. For a library loaded from a CDN that is one URL:
@@ -62,8 +64,9 @@ disable = ["perf/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["perf/js-libraries"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
@@ -81,7 +84,7 @@ Performance findings ship in every audit next to the SEO, security and agent exp
 
 ## Check your site
 
-Run `squirrel audit https://example.com` and open the Performance section of the report. Each detected library is listed with its version and how it was found. Local audits are free.
+Run `squirrel audit https://example.com` and open the Performance section of the report. Each detected library is listed with its version and how it was found. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">

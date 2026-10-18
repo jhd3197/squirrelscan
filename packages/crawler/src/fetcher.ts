@@ -16,11 +16,18 @@ import {
   classifyFetchErrorCode,
   fetchErrorCode,
 } from "@squirrelscan/core-contracts/failure-reason";
-import { CHROME_SEC_CH_UA } from "@squirrelscan/utils/constants";
-import { headersForRedirect } from "@squirrelscan/utils/headers";
+import {
+  CHROME_SEC_CH_UA,
+  TECH_DETECT_HEADER_MAX_CHARS,
+  TECH_DETECT_HEADER_NAMES,
+  TECH_DETECT_PRESENCE_HEADERS,
+} from "@squirrelscan/utils/constants";
+import { headersForRedirect, techCookieNames } from "@squirrelscan/utils/headers";
 import { isHttpOrHttpsUrl } from "@squirrelscan/utils/safe-fetch";
 import {
   DEFAULT_MAX_DOCUMENT_BODY_BYTES,
+  fetchUndecoded,
+  isDecompressionError,
   readBodyCapped,
 } from "@squirrelscan/utils/response-body";
 import {
@@ -30,7 +37,14 @@ import {
 } from "@squirrelscan/utils/rate-limit";
 import { detectWafChallengePage } from "@squirrelscan/utils/waf";
 
-export type CrawlErrorType = "timeout" | "network" | "parse" | "blocked" | "rate_limit" | "tls";
+export type CrawlErrorType =
+  | "timeout"
+  | "network"
+  | "parse"
+  | "decode"
+  | "blocked"
+  | "rate_limit"
+  | "tls";
 
 /** The generic timeout sentence; a `timeout` error carrying anything else is naming its deadline. */
 const TIMEOUT_MESSAGE = "Crawl request timed out";
@@ -87,6 +101,21 @@ export class CrawlError extends Error {
 
   static parse(url: string, message: string): CrawlError {
     return new CrawlError(url, "parse", message);
+  }
+
+  /**
+   * The response arrived but its body could not be decoded: the server declared
+   * a `content-encoding` the bytes do not honour (or truncated the stream).
+   * Names the URL and the encoding because the runtime's own report of this is
+   * the bare "Decompression error: ZlibError" and nothing else.
+   */
+  static decode(url: string, contentEncoding: string | null, cause: string): CrawlError {
+    const encoding = contentEncoding?.trim() || "none declared";
+    return new CrawlError(
+      url,
+      "decode",
+      `Could not decode response body from ${url} (content-encoding: ${encoding}): ${cause}`,
+    );
   }
 
   static blocked(url: string, message = "Request blocked by server", status = 403): CrawlError {
@@ -203,6 +232,7 @@ export function crawlErrorToFailureDetail(
       });
     }
     case "parse":
+    case "decode":
       return auditFailureDetail({ ...base, code: "unknown", detail: message });
   }
 }
@@ -302,6 +332,14 @@ const defaultRetryPolicy: RetryPolicy = {
  * host-wide pause the crawler injects. Adding it back here would give it two
  * competing retry budgets that multiply.
  */
+/**
+ * A body that does not decode: a server lied about (or truncated) its
+ * `content-encoding`. Pages are fetched undecoded and decoded while read
+ * (#2717), so this is mostly our ContentDecodingError now; the runtime's own
+ * "BrotliDecompressionError" / "ZlibError" still matches.
+ */
+export { isDecompressionError };
+
 function isRetryable(error: CrawlError): boolean {
   return error.type === "timeout" || error.type === "network" || error.type === "tls";
 }
@@ -406,7 +444,10 @@ function requestWithTiming(
         const headers = new Headers(options.headers);
         applyBrowserHeaders(headers, userAgent);
 
-        const response = await fetch(url, {
+        // #2717: undecoded on every hop, or the runtime inflates a
+        // Content-Encoding body in full before the capped read below (or the
+        // abort of a discarded 3xx) can stop it.
+        const response = await fetchUndecoded(url, {
           ...options,
           headers,
           signal: controller.signal,
@@ -594,8 +635,37 @@ function extractResponseHeaders(headers: Headers): ResponseHeaders {
     xVercelCache: headers.get("x-vercel-cache"),
     altSvc: headers.get("alt-svc"),
     acceptRanges: headers.get("accept-ranges"),
+    xPoweredBy: headers.get("x-powered-by"),
+    xAspNetVersion: headers.get("x-aspnet-version"),
+    xAspNetMvcVersion: headers.get("x-aspnetmvc-version"),
+    xGenerator: headers.get("x-generator"),
     setCookie: setCookies.length > 0 ? setCookies.join("\n") : null,
+    techHeaders: extractTechHeaders(headers, setCookies),
   };
+}
+
+/**
+ * The headers technology detection reads, kept so a local audit can detect
+ * from the stored page (pub#871). Only listed names, each value capped, so a
+ * page record cannot grow with whatever a server sends. A header detection
+ * only tests for presence keeps "1", and Set-Cookie keeps its cookie names
+ * (`name=`, one per line), so no token or session value is kept here.
+ */
+function extractTechHeaders(headers: Headers, setCookies: string[]): Record<string, string> | null {
+  const out: Record<string, string> = {};
+  let any = false;
+  for (const name of TECH_DETECT_HEADER_NAMES) {
+    const value = headers.get(name);
+    if (value === null) continue;
+    out[name] = TECH_DETECT_PRESENCE_HEADERS.has(name) ? "1" : value.slice(0, TECH_DETECT_HEADER_MAX_CHARS);
+    any = true;
+  }
+  const cookieNames = techCookieNames(setCookies);
+  if (cookieNames) {
+    out["set-cookie"] = cookieNames;
+    any = true;
+  }
+  return any ? out : null;
 }
 
 function extractSecurityHeaders(headers: Headers): SecurityHeaders {
@@ -613,6 +683,43 @@ function extractSecurityHeaders(headers: Headers): SecurityHeaders {
 function normalizeContentType(value: string | null): string | null {
   if (!value) return null;
   return value.split(";")[0]?.trim().toLowerCase() ?? null;
+}
+
+/**
+ * The `charset` parameter of a Content-Type value, unquoted (pub#674):
+ * `text/html; charset="UTF-8"` gives `UTF-8`. Parameters split on `;` outside
+ * quoted strings, and a quoted value drops its escapes (RFC 9110 5.6.4). Only a
+ * token (RFC 9110 5.6.2) of at most 40 characters counts as a label.
+ */
+export function contentTypeCharset(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const params: string[] = [];
+  let current = "";
+  let quoted = false;
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i]!;
+    if (quoted && ch === "\\" && i + 1 < value.length) {
+      current += ch + value[++i];
+      continue;
+    }
+    if (ch === '"') quoted = !quoted;
+    if (ch === ";" && !quoted) {
+      params.push(current);
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  params.push(current);
+  for (const param of params.slice(1)) {
+    const eq = param.indexOf("=");
+    if (eq === -1 || param.slice(0, eq).trim().toLowerCase() !== "charset") continue;
+    let label = param.slice(eq + 1).trim();
+    const quotedLabel = /^"((?:[^"\\]|\\.)*)"$/.exec(label);
+    if (quotedLabel) label = quotedLabel[1]!.replace(/\\(.)/g, "$1");
+    return /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,40}$/.test(label) ? label : null;
+  }
+  return null;
 }
 
 function normalizeServerTimingValue(value: string): string {
@@ -869,8 +976,10 @@ function fetchPageStandardOnce(
     if (!held) return;
     held.disarm();
     // Aborting, not just disarming. `release` runs only as this effect leaves,
-    // so nothing reads the held body afterwards: on the success path the stream
-    // is already drained and this is a no-op, and on every failure path —
+    // so nothing reads the held body afterwards. On the success path it is a
+    // no-op for a body read to the end, and it is what closes the connection
+    // when the capped read stopped short (#766): cancelling the stream does not,
+    // Bun goes on downloading until the signal aborts. On every failure path —
     // a terminal 403/429/5xx that fails the status guard before any read, or a
     // hop still held when the NEXT request fails — nobody ever consumes it.
     // Disarming alone parked that socket and its buffered chunks for the life
@@ -1012,6 +1121,16 @@ function fetchPageStandardOnce(
         // response — report it as the same class as a headers-phase timeout so
         // it is not miscounted as a parse failure.
         if ((error as Error).name === "AbortError") return CrawlError.timeout(url);
+        // A body the runtime could not decompress is not a malformed response
+        // we can say nothing about: it is attributable to the declared
+        // encoding, and the crawl counts it so the report can say so.
+        if (isDecompressionError(error)) {
+          return CrawlError.decode(
+            url,
+            finalResponse.headers.get("content-encoding"),
+            (error as Error).message,
+          );
+        }
         return CrawlError.parse(url, `Failed to read response: ${(error as Error).message}`);
       },
     });

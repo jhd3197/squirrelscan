@@ -3,6 +3,8 @@
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { dirname, join, parse, resolve } from "node:path";
 
+import { bundledPackages, isSilentBundler, silentBundlerError } from "./third-party-bundled";
+
 interface PackageJson {
   name?: string;
   version?: string;
@@ -112,6 +114,50 @@ const packages = new Map<string, PackageNotice>();
 const noticeTexts = new Map<string, { filename: string; text: string; packages: Set<string> }>();
 const visitedDirectories = new Set<string>();
 
+/**
+ * Packages a dependency ships INSIDE its own files rather than as a dependency
+ * are found by `bundledPackages` (scripts/third-party-bundled.ts). Their license
+ * text cannot be read from node_modules (nothing is installed), so it is
+ * committed under `scripts/third-party-embedded/`, one
+ * `<name with / as __>@<version>/` directory with the package's `package.json`
+ * fields and license file, and a bundled package without one is an error.
+ */
+const embeddedDirectory = join(root, "scripts", "third-party-embedded");
+const embeddedMissing: string[] = [];
+const silentBundlers: string[] = [];
+
+function recordNotice(realDirectory: string, pkg: PackageJson): void {
+  const id = `${pkg.name}@${pkg.version ?? "unknown"}`;
+  const noticeHashes: string[] = [];
+  for (const filename of readdirSync(realDirectory).sort()) {
+    if (!/^(licen[cs]e|copying|notice)(\..*)?$/i.test(filename)) continue;
+    const path = join(realDirectory, filename);
+    let text: string;
+    try {
+      text = readFileSync(path, "utf8").trim();
+    } catch {
+      continue;
+    }
+    if (!text) continue;
+    const hash = hashText(text);
+    noticeHashes.push(hash);
+    const existing = noticeTexts.get(hash);
+    if (existing) {
+      existing.packages.add(id);
+    } else {
+      noticeTexts.set(hash, { filename, text, packages: new Set([id]) });
+    }
+  }
+
+  packages.set(id, {
+    name: pkg.name!,
+    version: pkg.version ?? "unknown",
+    license: pkg.license ?? "SEE PACKAGE",
+    source: repositoryUrl(pkg.repository),
+    noticeHashes,
+  });
+}
+
 function visit(directory: string): void {
   const realDirectory = realpathSync(directory);
   if (visitedDirectories.has(realDirectory)) return;
@@ -131,35 +177,19 @@ function visit(directory: string): void {
         `${pkg.name}: installed ${pkg.version}, bun.lock has ${[...locked].sort().join(", ")}`,
       );
     }
+    recordNotice(realDirectory, pkg);
     const id = `${pkg.name}@${pkg.version ?? "unknown"}`;
-    const noticeHashes: string[] = [];
-    for (const filename of readdirSync(realDirectory).sort()) {
-      if (!/^(licen[cs]e|copying|notice)(\..*)?$/i.test(filename)) continue;
-      const path = join(realDirectory, filename);
-      let text: string;
-      try {
-        text = readFileSync(path, "utf8").trim();
-      } catch {
+    const bundledHere = bundledPackages(realDirectory);
+    if (isSilentBundler(pkg.name, bundledHere)) silentBundlers.push(id);
+    for (const bundled of [...bundledHere].sort()) {
+      const committed = join(embeddedDirectory, bundled.replace("/", "__"));
+      if (!existsSync(join(committed, "package.json"))) {
+        embeddedMissing.push(`${bundled} (bundled in ${id})`);
         continue;
       }
-      if (!text) continue;
-      const hash = hashText(text);
-      noticeHashes.push(hash);
-      const existing = noticeTexts.get(hash);
-      if (existing) {
-        existing.packages.add(id);
-      } else {
-        noticeTexts.set(hash, { filename, text, packages: new Set([id]) });
-      }
+      const bundledPkg = JSON.parse(readFileSync(join(committed, "package.json"), "utf8")) as PackageJson;
+      recordNotice(committed, bundledPkg);
     }
-
-    packages.set(id, {
-      name: pkg.name,
-      version: pkg.version ?? "unknown",
-      license: pkg.license ?? "SEE PACKAGE",
-      source: repositoryUrl(pkg.repository),
-      noticeHashes,
-    });
   }
 
   for (const name of [...dependencyNames].sort()) {
@@ -215,6 +245,21 @@ const targets = [join(root, "THIRD_PARTY_NOTICES.md"), join(root, "npm", "THIRD_
 // A stale/partial node_modules yields versions the lockfile does not pin, so
 // the notices generated from it are wrong no matter what the committed file
 // says. Fail on that directly instead of reporting it as out-of-date notices.
+const silentError = silentBundlerError(silentBundlers);
+if (silentError) {
+  console.error(silentError);
+  process.exit(1);
+}
+
+if (embeddedMissing.length > 0) {
+  console.error("Packages bundled inside a dependency have no committed license text:");
+  for (const missing of embeddedMissing.sort()) console.error(`  ${missing}`);
+  console.error(
+    "Add each one's package.json (name, version, license, repository) and license file under scripts/third-party-embedded/<name with / as __>@<version>/.",
+  );
+  process.exit(1);
+}
+
 if (versionMismatches.length > 0) {
   console.error("Installed dependencies do not match bun.lock:");
   for (const mismatch of versionMismatches.sort()) console.error(`  ${mismatch}`);

@@ -6,26 +6,34 @@ import {
   detectPageType,
   extractContactLinks,
   extractContent,
+  extractFontUrls,
+  hasErrorShellMarker,
   extractHeadings,
   extractImages,
   extractLinks,
   extractMeta,
   extractOG,
+  extractPreloadedScriptUrls,
   extractScripts,
   extractStylesheets,
   extractTwitter,
   isSameDomainScript,
   parseDocument,
   parseSchemas,
+  runClassifier,
   schemaCollectionFromJSON,
   EMPTY_SCHEMA_COLLECTION,
   extractAuthorFromSchema,
   extractVisibleMeta,
+  toLinkData,
   type ParsedPageCache,
+  type ParsePageOptions,
 } from "@squirrelscan/parser";
 import {
   buildCollectedPageSignal,
   createRunner,
+  isRuleEnabled,
+  isSiteIndexable,
   mergeRuleRunResult,
   type RunnerScope,
 } from "@squirrelscan/rules";
@@ -53,9 +61,11 @@ import type {
 import type {
   CollectedPageSignal,
   CollectedSiteSignals,
+  EndpointSurface,
   ParsedPage,
   RuleRunResult,
   SiteData,
+  WebAppManifestData,
 } from "@squirrelscan/rules";
 import type { SQLiteStorage } from "@squirrelscan/crawler";
 import type {
@@ -71,8 +81,13 @@ import type {
   ScriptContentData,
   SitemapUrlStatusData,
   SiteQuery,
+  UnverifiedReason,
 } from "@squirrelscan/core-contracts";
-import { CLOUD_RESOURCE_CHECK, REPORT_LIMITS } from "@squirrelscan/core-contracts/limits";
+import {
+  CLOUD_RESOURCE_CHECK,
+  LINK_CHECK_LIMITS,
+  REPORT_LIMITS,
+} from "@squirrelscan/core-contracts/limits";
 
 import { createFetchBudget, type FetchBudget, type FetchBudgetSummary } from "./fetch-budget";
 import {
@@ -81,6 +96,7 @@ import {
   foldRuleResultIntoTallies,
   type RuleTally,
 } from "./scoring";
+import { createEndpointCollector, entryFirst } from "./endpoint-discovery";
 import { localIntelContext } from "./intel";
 import { logger } from "./adapter-logger";
 // Report assembly extracted to ./report-stream (#1021, PR-F). adapter references
@@ -103,6 +119,7 @@ import {
 import {
   streamPageRules,
   STREAM_PAGE_BATCH,
+  type PageResultSink,
   type PageSignalCollector,
   type StreamPageRulesHooks,
 } from "./streaming";
@@ -124,11 +141,37 @@ import {
   RESOURCE_SIZE_LIMITS,
   SQUIRRELSCAN_USER_AGENT,
 } from "@squirrelscan/utils/constants";
+import { maskLinkTokens } from "@squirrelscan/utils/link-actions";
+import { isCloudflareEmailProtectionUrl } from "@squirrelscan/utils/cloudflare-email";
+
 import { checkExternalLinks, type ExternalCheckResult, type LinkCache } from "./external-checker";
 import { checkResourceSizes, type ResourceCheckResult } from "./resource-checker";
+import {
+  linkTextLooksLikeAnAction,
+  type LinkTargetProbe,
+  looksLikeAnAction,
+  probeLinkTargets,
+} from "./link-target-probe";
+import {
+  absorbWebAppManifestLinks,
+  emptyWebAppManifestOccurrences,
+  fetchWebAppManifests,
+  type FetchedWebAppManifests,
+  type WebAppManifestOccurrences,
+} from "./web-app-manifest";
 import { fetchScriptContents, type ScriptFetchResult } from "./script-fetcher";
+import { overlayTechHeaders } from "@squirrelscan/utils/headers";
 import { isRateLimitStatus } from "@squirrelscan/utils/rate-limit";
+import { isNonPublicHostname } from "@squirrelscan/utils/non-public-host";
+import {
+  type EgressPolicy,
+  memoizeResolveHost,
+  refusedWithoutLookup,
+  resolveHostAddresses,
+} from "@squirrelscan/utils/public-egress";
 import { getHostname, normalizeUrl } from "@squirrelscan/utils/url";
+import { isInScope } from "@squirrelscan/crawler/frontier";
+import { createRobotsEvaluator } from "@squirrelscan/crawler/robots";
 import { detectWafChallengePage } from "@squirrelscan/waf-detect";
 
 // ============================================
@@ -266,6 +309,10 @@ export function buildSiteContext(
             document: doc,
             ...stored,
             schemas: schemaCollectionFromJSON(stored.schemas),
+            // A parse stored before the marker was captured has no value, but
+            // the DOM is live right here, so read it now rather than losing it.
+            errorShell:
+              typeof stored.errorShell === "boolean" ? stored.errorShell : hasErrorShellMarker(doc),
           };
         } catch (e) {
           logger.error(`Failed to deserialize parsedData for ${page.url}:`, e);
@@ -333,15 +380,21 @@ export function ensureSiteContextDocuments(siteContext: SiteContextPage[]): void
  * linkedom Document can't cross a worker seam). Keeping ONE parse path is what
  * guarantees pooled execution stays byte-identical to serial.
  */
-export function parseHtmlForRules(html: string, baseUrl: string): ParsedPage {
+export function parseHtmlForRules(
+  html: string,
+  baseUrl: string,
+  options?: ParsePageOptions,
+): ParsedPage {
   const doc = parseDocument(html);
+  // The page classifier, when the caller supplied one (#2307): same hook `parsePage` takes.
+  const classified = runClassifier(options?.classify, doc, baseUrl, html);
 
   const meta = extractMeta(doc);
   const og = extractOG(doc);
   const twitter = extractTwitter(doc);
   const headings = extractHeadings(doc);
   const content = extractContent(doc, html);
-  const links = extractLinks(doc, baseUrl);
+  const links = extractLinks(doc, baseUrl, classified?.placeLink);
   const images = extractImages(doc, baseUrl);
 
   // Parse schemas (new rich collection)
@@ -366,24 +419,20 @@ export function parseHtmlForRules(html: string, baseUrl: string): ParsedPage {
     headings,
     content,
     h1: { count: headings.h1Count, texts: headings.h1Texts },
-    links: links.map((l) => ({
-      url: l.href,
-      text: l.text,
-      isInternal: l.isInternal,
-      rel: l.rel,
-      isNofollow: l.isNofollow,
-      isChrome: l.isChrome,
-    })),
+    links: links.map(toLinkData),
     // tel:/mailto: anchors, which `extractLinks` drops as non-crawlable. This is
     // the parse path production actually runs (parsePageRecord + the #263 page-rule
     // workers), so a field populated only by `parsePage` would be invisible live.
-    contactLinks: extractContactLinks(doc),
+    contactLinks: extractContactLinks(doc, classified?.placeLink),
     images: images.map((i) => ({
       src: i.src,
       alt: i.alt,
       width: i.width,
       height: i.height,
     })),
+    // Captured now, while the DOM is live: the streamed audit releases it before
+    // soft-404 candidates are picked (#235).
+    errorShell: hasErrorShellMarker(doc),
     // New schema data
     schemas,
     author,
@@ -392,6 +441,8 @@ export function parseHtmlForRules(html: string, baseUrl: string): ParsedPage {
     visibleAuthor: visibleMeta.visibleAuthor,
     visibleDatePublished: visibleMeta.visibleDatePublished,
     visibleDateModified: visibleMeta.visibleDateModified,
+    // Present only when the classifier ran (#2307).
+    ...(classified ? { classification: classified.classification } : {}),
     // Legacy (deprecated)
     schema,
   };
@@ -400,12 +451,12 @@ export function parseHtmlForRules(html: string, baseUrl: string): ParsedPage {
 /**
  * Parse a page record to extract structured data for rules
  */
-export function parsePageRecord(page: PageRecord): ParsedPage | null {
+export function parsePageRecord(page: PageRecord, options?: ParsePageOptions): ParsedPage | null {
   if (!page.html) return null;
 
   return logger.withTrace(
     "parsePageRecord",
-    () => parseHtmlForRules(page.html!, page.url),
+    () => parseHtmlForRules(page.html!, page.url, options),
     () => ({ url: page.url, htmlLen: page.html!.length }),
   );
 }
@@ -496,6 +547,43 @@ export interface ResourceCheckOverrides {
    * freshness (#107). Defaults to false (cold audit) when unset.
    */
   incremental?: boolean;
+  /**
+   * The runtime's fetch already resolves each host once and connects to the
+   * address it validated (the hosted container's egress proxy). Third-party
+   * probes are then vetted but not pinned again (#703): the proxy rewrites a
+   * plain-http request's Host from its target, so a pinned one would lose its
+   * name. Defaults to false, the CLI, where the engine pins them itself.
+   */
+  egressPinnedByTransport?: boolean;
+  /**
+   * No request to any host outside the audited site and its subdomains
+   * (`squirrel audit --offline`, pub#807): the third-party asset status checks
+   * are skipped, so reliability/broken-resources reads them as not measured,
+   * and a sitemap URL on another host gets no status check.
+   */
+  ownSiteOnly?: boolean;
+}
+
+/** Most preloaded chunks fetched per audit, on top of the regular script fetch. */
+const PRELOAD_CHUNK_FETCH_LIMIT = 20;
+
+/** The one rule that reads the third-party asset pools (#703). */
+const BROKEN_RESOURCES_RULE_ID = "reliability/broken-resources";
+
+/** The one rule that reads the web app manifest fetch (#710). */
+const WEB_APP_MANIFEST_RULE_ID = "mobile/web-app-manifest";
+
+/**
+ * Referenced URLs each fetch cap left unfetched, per kind (#703): the count of
+ * URLs the pages reference minus the rows the fetch returned.
+ */
+export interface AssetCapDropped {
+  scripts: number;
+  css: number;
+  fonts: number;
+  externalScripts: number;
+  externalCss: number;
+  externalFonts: number;
 }
 
 /**
@@ -506,10 +594,66 @@ export interface PreFetchedAssets {
   resourceSizes: {
     css: ResourceSizeData[];
     images: ResourceSizeData[];
+    /** Font files the pages reference directly (preload, inline `@font-face`).
+     * Optional: sizes are HEAD-checked at audit time and never persisted, so
+     * anything that builds this by hand simply has no fonts. */
+    fonts?: ResourceSizeData[];
   };
   scripts: ScriptContentData[];
+  /**
+   * Same-site chunks a page preloads (`modulepreload`, `preload as=script`) that
+   * no `<script src>` names. Held apart from `scripts` so the file-size,
+   * compression and minification rules see exactly what they saw before; only
+   * security/csp-blocks-own-resources reads them. Optional: callers that build
+   * assets by hand have none.
+   */
+  preloadedScripts?: ScriptContentData[];
+  /**
+   * Third-party scripts, stylesheets and fonts the pages reference (#703),
+   * status-checked. Kept apart from `resourceSizes` and `scripts` so no size,
+   * compression or script rule sees them; only reliability/broken-resources reads
+   * them. Absent on hand-built assets.
+   */
+  externalAssets?: {
+    scripts: ResourceSizeData[];
+    css: ResourceSizeData[];
+    fonts: ResourceSizeData[];
+  };
+  /**
+   * Referenced URLs each fetch cap left unfetched (`maxScripts` / `maxResources`
+   * slicing), per kind (#703). Zero or absent means nothing was dropped.
+   */
+  assetCapDropped?: AssetCapDropped;
   pdfSizes: ResourceSizeData[];
   sitemapUrlStatuses: SitemapUrlStatusData[];
+  /**
+   * Sitemap URLs on another site an own-site-only audit left unchecked
+   * (pub#807), so crawl/sitemap-4xx can say so instead of passing. Absent or
+   * zero means none were dropped.
+   */
+  sitemapOffSiteSkipped?: number;
+  /**
+   * Status of internal link targets the crawl did not fetch (repo#2729): one
+   * HEAD (then GET) per target, most-linked first, read by links/broken-links as
+   * known statuses. Optional: absent when internal link checks were off, and on
+   * assets a caller builds by hand.
+   */
+  linkTargetStatuses?: SitemapUrlStatusData[];
+  /** What the internal link probe covered: targets it could not reach, and how many it checked. */
+  internalLinkProbe?: {
+    unfetched: number;
+    probed: number;
+    cap: number;
+    outOfScope?: number;
+    headUnreliable?: boolean;
+  };
+  /**
+   * #710: web app manifests the pages link, each with its icons checked. Optional:
+   * callers that build assets by hand have none, so the rule reports not checked.
+   */
+  webAppManifests?: WebAppManifestData[];
+  /** #710: linked same-site manifest URLs past the per-site fetch cap, not fetched. */
+  webAppManifestsDropped?: number;
   /**
    * #1252: set only when the asset-fetch step degraded (total budget spent or a
    * host tarpitting) and some fetches were skipped. Undefined on a healthy run,
@@ -536,22 +680,55 @@ export interface SiteAssetOccurrences {
   css: Map<string, Set<string>>;
   images: Map<string, Set<string>>;
   scripts: Map<string, Set<string>>;
+  /** Preloaded script chunks, kept out of `scripts` (see {@link PreFetchedAssets.preloadedScripts}). */
+  preloads: Map<string, Set<string>>;
   pdfs: Map<string, Set<string>>;
+  fonts: Map<string, Set<string>>;
+  /** Third-party copies of the above (#703): kept out of the same-site maps. */
+  externalCss: Map<string, Set<string>>;
+  externalScripts: Map<string, Set<string>>;
+  externalFonts: Map<string, Set<string>>;
+  /** Web app manifest links and the theme-colors of the pages that link them (#710). */
+  webAppManifests: WebAppManifestOccurrences;
   /** Scalars for the sitemap-coverage pass — v1's non-WAF parsed-page list. */
   coveragePages: Array<{ url: string; finalUrl?: string; statusCode: number }>;
   /** Every page absorbed, WAF and non-HTML included — v1's `siteContext.length`,
    * which sizes the script fetcher's per-page budget. */
   pageCount: number;
+  /**
+   * Internal link targets (repo#2729), keyed by normalized URL: the URL as
+   * linked and how many pages link to it. Bounded at
+   * MAX_TRACKED_INTERNAL_LINK_TARGETS distinct targets.
+   */
+  internalLinkTargets: Map<string, { url: string; pages: number; action?: boolean }>;
+  /** Normalized URL of every page the crawl stored, non-HTML and 4xx included. */
+  crawledUrls: Set<string>;
 }
 
-function emptySiteAssetOccurrences(): SiteAssetOccurrences {
+/**
+ * Distinct internal link targets the asset collector remembers (repo#2729).
+ * Far above what one audit probes (LINK_CHECK_LIMITS.internalTargetProbes), so
+ * the most-linked ones are always among them, and bounded so a site with a
+ * million links costs a bounded map.
+ */
+const MAX_TRACKED_INTERNAL_LINK_TARGETS = 50_000;
+
+export function emptySiteAssetOccurrences(): SiteAssetOccurrences {
   return {
     css: new Map(),
     images: new Map(),
     scripts: new Map(),
+    preloads: new Map(),
     pdfs: new Map(),
+    fonts: new Map(),
+    externalCss: new Map(),
+    externalScripts: new Map(),
+    externalFonts: new Map(),
+    webAppManifests: emptyWebAppManifestOccurrences(),
     coveragePages: [],
     pageCount: 0,
+    internalLinkTargets: new Map(),
+    crawledUrls: new Set(),
   };
 }
 
@@ -581,11 +758,17 @@ export function createSiteAssetCollector(baseUrl: string): {
       // Same filtering as runRulesOnStorage: parsed, non-WAF. Note the page
       // COUNT below still counts every page, matching v1's siteContext.length.
       occurrences.pageCount += siteContext.length;
+      // repo#2729: every stored page, so the link probe skips what the crawl
+      // already fetched (a 404 the crawler stored is a known status, not a gap).
+      for (const { page } of siteContext) {
+        occurrences.crawledUrls.add(normalizeUrl(page.normalizedUrl));
+      }
       const parsedPages: Array<{
         url: string;
         finalUrl?: string;
         statusCode: number;
         parsed: ParsedPage;
+        hasCsp: boolean;
       }> = [];
 
       for (const { page, parsed } of siteContext) {
@@ -606,6 +789,7 @@ export function createSiteAssetCollector(baseUrl: string): {
           finalUrl: page.finalUrl,
           statusCode: page.status,
           parsed,
+          hasCsp: !!page.securityHeaders.csp || hasMetaCsp(parsed.document),
         });
       }
 
@@ -619,6 +803,53 @@ export function createSiteAssetCollector(baseUrl: string): {
 
       // Needs the DOM (stylesheet + script srcs aren't in stored parsedData).
       absorbResourceOccurrences(occurrences, parsedPages, baseUrl);
+
+      // Internal link targets for the link probe (repo#2729), from the same
+      // parsed scalars links/broken-links reads, normalized the way it does.
+      // Not a rate-limited page's (#1829): the rule never sees its links, and
+      // the rule splits its unfetched targets by this probe's counts, so a
+      // target only a 429 body links would be called skipped in place of one
+      // the rule could not check (pub#794).
+      for (const page of parsedPages) {
+        if (isRateLimitStatus(page.statusCode)) continue;
+        const seen = new Set<string>();
+        const nofollowActions = nofollowActionTargets(page);
+        for (const link of page.parsed.links) {
+          if (!link.isInternal || !link.url || link.error) continue;
+          // pub#811: an obfuscated email address, never requested. The parser
+          // leaves these out of `links`; a parse stored before it did not.
+          // links/broken-links skips them the same way.
+          if (isCloudflareEmailProtectionUrl(link.url)) continue;
+          const key = normalizeUrl(link.url);
+          // A link any page words as an action ("Log out", or rel=nofollow on
+          // action text) is never probed, wherever else it appears.
+          const action =
+            nofollowActions.has(key) ||
+            linkTextLooksLikeAnAction(
+              link.text ?? "",
+              link.isNofollow === true || (link.rel?.includes("nofollow") ?? false),
+            );
+          const entry = occurrences.internalLinkTargets.get(key);
+          if (entry && action) entry.action = true;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          if (entry) entry.pages++;
+          else if (occurrences.internalLinkTargets.size < MAX_TRACKED_INTERNAL_LINK_TARGETS) {
+            occurrences.internalLinkTargets.set(key, {
+              url: link.url,
+              pages: 1,
+              ...(action ? { action } : {}),
+            });
+          }
+        }
+      }
+
+      // Web app manifest links, same-site only (#710).
+      for (const page of parsedPages) {
+        absorbWebAppManifestLinks(occurrences.webAppManifests, page, (url) =>
+          isSameDomainResource(url, getHostname(baseUrl).toLowerCase()),
+        );
+      }
 
       // PDF links come from parsed scalars.
       for (const page of parsedPages) {
@@ -638,6 +869,44 @@ export function createSiteAssetCollector(baseUrl: string): {
         }
       }
     },
+  };
+}
+
+/** A status-only third-party record (#703): no body, cache or compression fields. */
+function externalAssetRecord(
+  check: ResourceCheckResult,
+  sources: Map<string, Set<string>>,
+): ResourceSizeData {
+  return {
+    url: check.url,
+    status: check.status,
+    error: check.error,
+    contentType: check.contentType,
+    sizeBytes: check.sizeBytes,
+    sourcePages: Array.from(sources.get(check.url) ?? []),
+    rateLimited: check.rateLimited,
+    wafBlocked: check.wafBlocked,
+  };
+}
+
+/**
+ * Referenced URLs the fetch caps left unfetched, per kind (#703): referenced
+ * minus returned, floored at zero. Rows a budget skip returned still count as
+ * fetched here; the rule reads those from their `skipped` error instead.
+ */
+export function assetCapDroppedOf(
+  referenced: Pick<SiteAssetOccurrences, keyof AssetCapDropped>,
+  fetched: Record<keyof AssetCapDropped, readonly unknown[]>,
+): AssetCapDropped {
+  const dropped = (kind: keyof AssetCapDropped): number =>
+    Math.max(0, referenced[kind].size - fetched[kind].length);
+  return {
+    scripts: dropped("scripts"),
+    css: dropped("css"),
+    fonts: dropped("fonts"),
+    externalScripts: dropped("externalScripts"),
+    externalCss: dropped("externalCss"),
+    externalFonts: dropped("externalFonts"),
   };
 }
 
@@ -728,6 +997,7 @@ export function fetchAssetsFromOccurrences(
       totalUrls: sitemaps.reduce((sum, s) => sum + s.urlCount, 0),
       orphanPages: [] as string[],
       missingPages: [] as string[],
+      orphanPagesTotal: 0,
       failed: [],
       // Rules run against THIS object, not the report built later, so the
       // truncation flag has to be here or crawl/sitemap-exists still reports
@@ -749,6 +1019,7 @@ export function fetchAssetsFromOccurrences(
       // The arrays that TRAVEL stay capped at the schema's array limit.
       sitemapDiscovery.orphanPages = coverage.orphanPages.slice(0, REPORT_LIMITS.maxPages);
       sitemapDiscovery.missingPages = coverage.missingPages.slice(0, REPORT_LIMITS.maxPages);
+      sitemapDiscovery.orphanPagesTotal = coverage.orphanPages.length;
     }
 
     const resourceOccurrences = occurrences;
@@ -772,9 +1043,9 @@ export function fetchAssetsFromOccurrences(
     // bounds CSS + images + scripts + PDFs + sitemap fetches together. Once the
     // budget is spent or a host escalates its latency (activera.com.au), the
     // REMAINING fetches skip fast instead of re-hitting a tarpit for minutes.
-    // Unset (CLI, which has its own fetchResourceAssets) → undefined → fetch as
-    // today. One budget for both fetchers so a slow origin is detected across
-    // resource types, not per-category.
+    // Unset (the CLI) → undefined → fetch as today. One budget for both
+    // fetchers so a slow origin is detected across resource types, not
+    // per-category.
     const budgetMs = overrides?.resourceCheckBudgetMs;
     const fetchBudget: FetchBudget | undefined =
       budgetMs && budgetMs > 0
@@ -784,6 +1055,43 @@ export function fetchAssetsFromOccurrences(
             tarpitStrikes: CLOUD_RESOURCE_CHECK.tarpitStrikes,
           })
         : undefined;
+
+    // repo#2764: the site's own assets may not reach a link-local or cloud
+    // metadata address. An open redirect on the site
+    // (`/go?u=http://169.254.169.254/`), or a subdomain pointed at one, used
+    // as a stylesheet, script, image or sitemap URL would otherwise send the
+    // auditor's machine there. The hosts the crawl itself requests are sent
+    // as it sends them; every other hop, subdomains included, is vetted
+    // (private networks allowed: a LAN or dev-server audit) and connects to
+    // the address it was vetted on.
+    const resolveOnce = memoizeResolveHost(resolveHostAddresses);
+    const ownSiteHost = getHostname(baseUrl).toLowerCase();
+    // The crawl's own host scope: the base host, its www/apex pair and
+    // `project.domains`. These are requested as the crawl requests them.
+    const inCrawlHostScope = (url: string): boolean => {
+      if (!baseUrl) return false;
+      try {
+        return isInScope(url, {
+          baseUrl,
+          include: [],
+          exclude: [],
+          allowedDomains: config.project?.domains ?? [],
+        }).allowed;
+      } catch {
+        return false;
+      }
+    };
+    // The site's own for headers and pools: that scope plus subdomains. A
+    // subdomain is still vetted: the crawl never requests it, and its name can
+    // point anywhere (`imds.example.com A 169.254.169.254`).
+    const isOwnSiteUrl = (url: string): boolean =>
+      isSameDomainResource(url, ownSiteHost) || inCrawlHostScope(url);
+    const ownSiteEgress: EgressPolicy = {
+      allowPrivateNetwork: true,
+      resolve: resolveOnce,
+      pin: overrides?.egressPinnedByTransport !== true,
+      trustTarget: (url) => inCrawlHostScope(url.href),
+    };
 
     const resourceCheckOptions = {
       concurrency: config.external_links?.concurrency ?? RESOURCE_SIZE_LIMITS.CHECK_CONCURRENCY,
@@ -797,11 +1105,14 @@ export function fetchAssetsFromOccurrences(
         ? { maxStalenessSeconds: config.crawler.max_staleness_seconds }
         : {}),
       ...(maxResources != null ? { maxResources } : {}),
-      // Web Bot Auth / custom headers apply to asset fetches too (#494).
+      // Web Bot Auth / custom headers apply to asset fetches too (#494). Only
+      // the site's own: every pool on these options is same-site, and the
+      // sitemap pool sends a URL on another host without them (below).
       ...(config.crawler?.headers && Object.keys(config.crawler.headers).length > 0
         ? { customHeaders: config.crawler.headers }
         : {}),
       ...(fetchBudget ? { budget: fetchBudget } : {}),
+      egress: ownSiteEgress,
     };
 
     const scriptFetchOptions: Parameters<typeof fetchScriptContents>[1] = {
@@ -814,6 +1125,7 @@ export function fetchAssetsFromOccurrences(
         ? { customHeaders: config.crawler.headers }
         : {}),
       ...(fetchBudget ? { budget: fetchBudget } : {}),
+      egress: ownSiteEgress,
     };
 
     const sitemapStatusLimit = Math.min(
@@ -823,13 +1135,143 @@ export function fetchAssetsFromOccurrences(
 
     const pdfCheckLimit = Math.min(pdfUrls.size, maxResources ?? 50);
 
+    // repo#2729: internal link targets the crawl never fetched, most-linked
+    // first, so a linked 404 is found even when the crawl did not follow links.
+    // Held to what the crawl itself may request: inside the crawl scope
+    // (include/exclude, allowed domains) and, when robots.txt is respected,
+    // allowed by it, and never a link that looks like an action or carries a
+    // token (link-target-probe.ts). Excluded paths like /logout are often on
+    // every page, so without this they would be the first requested.
+    const internalLinksEnabled = config.internal_links?.enabled !== false;
+    const probeCap = config.internal_links?.max_targets ?? LINK_CHECK_LIMITS.internalTargetProbes;
+    // The crawl's own user agent, so the request is UA-equivalent to the crawl
+    // (a bot wall that let the crawl through lets this through too).
+    const probeUserAgent = crawl?.config?.userAgent || config.crawler?.user_agent || CHROME_USER_AGENT;
+    const respectRobots = config.crawler?.respect_robots ?? true;
+    const robotsRecord =
+      internalLinksEnabled && respectRobots
+        ? yield* storage.getRobotsTxt(crawlId).pipe(Effect.catchAll(() => Effect.succeed(null)))
+        : null;
+    const robots =
+      robotsRecord?.exists && robotsRecord.content
+        ? createRobotsEvaluator(robotsRecord.url, robotsRecord.content, probeUserAgent)
+        : null;
+    const mayProbe = (url: string): boolean => {
+      if (looksLikeAnAction(url)) return false;
+      try {
+        const scoped = isInScope(url, {
+          baseUrl,
+          include: config.crawler?.include ?? [],
+          exclude: config.crawler?.exclude ?? [],
+          allowedDomains: config.project?.domains ?? [],
+        });
+        return scoped.allowed && (robots === null || robots.isAllowed(url));
+      } catch {
+        return false;
+      }
+    };
+    let outOfScope = 0;
+    const unfetchedTargets =
+      internalLinksEnabled && baseUrl
+        ? Array.from(occurrences.internalLinkTargets.entries())
+            .filter(([key, target]) => {
+              if (occurrences.crawledUrls.has(key)) return false;
+              if (!target.action && mayProbe(target.url)) return true;
+              outOfScope++;
+              return false;
+            })
+            .sort(([ak, a], [bk, b]) => b.pages - a.pages || (ak < bk ? -1 : ak > bk ? 1 : 0))
+        : [];
+    const probeTargets = unfetchedTargets.slice(0, probeCap).map(([, target]) => target.url);
+
+    // Third-party copies feed reliability/broken-resources alone (#703), so
+    // they are requested only when that rule runs, and get a per-kind cap of
+    // their own, never above the caller's item cap.
+    // pub#807: an own-site-only (offline) audit sends nothing to a third party.
+    const probeExternalAssets =
+      overrides?.ownSiteOnly !== true &&
+      isRuleEnabled(
+        BROKEN_RESOURCES_RULE_ID,
+        // The runner's own defaults (runner.ts), so the two never disagree.
+        config.rules?.enable ?? [],
+        config.rules?.disable ?? [],
+        (config.rule_options as Record<string, { enabled?: boolean }> | undefined)?.[
+          BROKEN_RESOURCES_RULE_ID
+        ],
+      );
+    const probeWebAppManifests = isRuleEnabled(
+      WEB_APP_MANIFEST_RULE_ID,
+      config.rules?.enable ?? [],
+      config.rules?.disable ?? [],
+      (config.rule_options as Record<string, { enabled?: boolean }> | undefined)?.[
+        WEB_APP_MANIFEST_RULE_ID
+      ],
+    );
+    const externalAssetLimit = probeExternalAssets
+      ? Math.min(
+          maxResources ?? RESOURCE_SIZE_LIMITS.MAX_EXTERNAL_ASSETS_TO_CHECK,
+          RESOURCE_SIZE_LIMITS.MAX_EXTERNAL_ASSETS_TO_CHECK,
+        )
+      : 0;
+    // Third-party status probes (#703) are not the site's own requests:
+    //  - They carry none of the audit's credentials. The custom and Web Bot
+    //    Auth headers (#494) go to the site's own host only; a probe sends
+    //    User-Agent and Accept, nothing else.
+    //  - They reach public addresses only, checked on every redirect hop, so a
+    //    page cannot point squirrel at the auditor's own network or a metadata
+    //    service. A site that is itself on a private network (`localhost:3000`)
+    //    may probe private hosts, never link-local or metadata ones. An unknown
+    //    base URL counts as public, the strict side. Each request connects to
+    //    the address that was vetted, so DNS rebinding cannot swap it.
+    //  - Status only: no body is read, and no prior-crawl cache is consulted.
+    const { customHeaders: _ownHostOnly, priorByUrl: _ownHostCache, ...probeShared } =
+      resourceCheckOptions;
+    const baseHost = getHostname(baseUrl).replace(/^\[|\]$/g, "");
+    let siteOrigin = "";
+    try {
+      siteOrigin = baseUrl ? new URL(baseUrl).origin : "";
+    } catch {
+      // An unparseable base URL grants no private exception.
+    }
+    const thirdPartyEgress: EgressPolicy = {
+      allowPrivateNetwork: baseHost !== "" && isNonPublicHostname(baseHost),
+      resolve: resolveOnce,
+      pin: overrides?.egressPinnedByTransport !== true,
+    };
+    const externalCheckOptions = {
+      ...probeShared,
+      statusOnly: true,
+      egress: thirdPartyEgress,
+    };
+
+    // repo#2764: a sitemap may list URLs on any host. The ones outside the
+    // audited host and its subdomains are checked as the third-party probes
+    // are: none of the audit's custom headers (Web Bot Auth signatures,
+    // Authorization, cookies), no prior-crawl cache, public addresses only.
+    // One cap for the pool as a whole: each half would otherwise get the
+    // checker's own default cap.
+    // pub#807: an own-site-only audit checks no sitemap URL on another site. They
+    // are left out before the cap, so they take none of its slots.
+    const sitemapCandidates =
+      overrides?.ownSiteOnly === true
+        ? orphanCandidates.filter((url) => isOwnSiteUrl(url))
+        : orphanCandidates;
+    const sitemapOffSiteSkipped = orphanCandidates.length - sitemapCandidates.length;
+    const sitemapTargets = sitemapCandidates.slice(
+      0,
+      Math.min(sitemapStatusLimit, maxResources ?? RESOURCE_SIZE_LIMITS.MAX_RESOURCES_TO_CHECK),
+    );
+    const ownSitemapTargets = sitemapTargets.filter((url) => isOwnSiteUrl(url));
+    const foreignSitemapTargets = sitemapTargets.filter((url) => !isOwnSiteUrl(url));
+
     const resourceCheckStart = Date.now();
 
     const allResourceChecks = Effect.all(
       {
         // verifyCompression only on the two pools perf/asset-compression reads
         // (#9) — the pdf and sitemap checks below never report on compression,
-        // so they keep the cheap HEAD path and pay nothing for it.
+        // so they keep the cheap HEAD path and pay nothing for it. Only the
+        // image pool reads headers, for images/responsive-size (#470).
         css: checkResourceSizes(Array.from(resourceOccurrences.css.keys()), {
           ...resourceCheckOptions,
           verifyCompression: true,
@@ -837,18 +1279,95 @@ export function fetchAssetsFromOccurrences(
         images: checkResourceSizes(Array.from(resourceOccurrences.images.keys()), {
           ...resourceCheckOptions,
           verifyCompression: true,
+          readImageHeader: true,
         }),
+        // Same cheap HEAD path as the sitemap and pdf pools: a font's size is
+        // all total-byte-weight reads.
+        fonts: checkResourceSizes(
+          Array.from(resourceOccurrences.fonts.keys()),
+          resourceCheckOptions,
+        ),
         scripts: fetchScriptContents(
           Array.from(resourceOccurrences.scripts.keys()),
           scriptFetchOptions,
+        ),
+        // Chunks no <script src> already covers, on a cap of their own so a
+        // modulepreload-heavy site cannot grow the main script fetch.
+        preloads: fetchScriptContents(
+          Array.from(resourceOccurrences.preloads.keys()).filter(
+            (url) => !resourceOccurrences.scripts.has(url),
+          ),
+          {
+            ...scriptFetchOptions,
+            maxScripts: Math.min(scriptFetchOptions.maxScripts ?? PRELOAD_CHUNK_FETCH_LIMIT, PRELOAD_CHUNK_FETCH_LIMIT),
+          },
         ),
         pdfs: checkResourceSizes(
           Array.from(pdfUrls.keys()).slice(0, pdfCheckLimit),
           resourceCheckOptions,
         ),
-        sitemap: checkResourceSizes(
-          orphanCandidates.slice(0, sitemapStatusLimit),
-          resourceCheckOptions,
+        // Manifest body first, then its icons (the icon list comes from the body).
+        // Every hop held to the site's own host and subdomains (#710): a manifest
+        // or icon that redirects elsewhere is not followed there. Only when the
+        // rule runs: disabled, it sends nothing and reads as not checked.
+        webAppManifests: probeWebAppManifests
+          ? fetchWebAppManifests(resourceOccurrences.webAppManifests, resourceCheckOptions, {
+              // Private addresses only for a site that is itself private, or for the
+              // site's own origin, which the crawl already requested: a public site's
+              // subdomain (or another port) that resolves privately is refused.
+              allowPrivateNetwork: baseHost !== "" && isNonPublicHostname(baseHost),
+              allowPrivateTarget: (url) => siteOrigin !== "" && url.origin === siteOrigin,
+              allowHost: (host) =>
+                baseHost !== "" && (host === baseHost || host.endsWith(`.${baseHost}`)),
+              resolve: resolveOnce,
+              pin: overrides?.egressPinnedByTransport !== true,
+            })
+          : Effect.succeed(null as FetchedWebAppManifests | null),
+        sitemap: Effect.all([
+          checkResourceSizes(ownSitemapTargets, resourceCheckOptions),
+          checkResourceSizes(foreignSitemapTargets, { ...probeShared, egress: thirdPartyEgress }),
+        ]).pipe(
+          // Back in the sitemap's order, as one pool.
+          Effect.map(([own, foreign]) => {
+            const byUrl = new Map([...own, ...foreign].map((r) => [r.url, r]));
+            return sitemapTargets.flatMap((url) => {
+              const result = byUrl.get(url);
+              return result ? [result] : [];
+            });
+          }),
+        ),
+        // Status only, and safe by construction (link-target-probe.ts): HEAD,
+        // GET only on 405/501, no credentials or custom headers, every
+        // redirect hop held to the same checks. The crawl's UA, its own limit
+        // (the cloud's per-pool item cap would otherwise cut it below
+        // max_targets), and no more requests of its own in flight than the
+        // crawl's per-host concurrency: every target is on the audited host.
+        // The asset pools beside it keep their own limits, as before.
+        linkTargets: probeLinkTargets(probeTargets, {
+          userAgent: probeUserAgent,
+          timeoutMs: resourceCheckOptions.timeoutMs,
+          concurrency: Math.max(
+            1,
+            Math.min(resourceCheckOptions.concurrency, config.crawler?.per_host_concurrency ?? 2),
+          ),
+          mayRequest: mayProbe,
+          ...(fetchBudget ? { budget: fetchBudget } : {}),
+          // The audited URL, which the crawl fetched: the HEAD control.
+          ...(baseUrl ? { controlUrl: baseUrl } : {}),
+        }),
+        // Third-party copies (#703): status only, through the HEAD-first checker, so
+        // no body is stored. Read by reliability/broken-resources alone.
+        externalCss: checkResourceSizes(
+          Array.from(resourceOccurrences.externalCss.keys()).slice(0, externalAssetLimit),
+          externalCheckOptions,
+        ),
+        externalScripts: checkResourceSizes(
+          Array.from(resourceOccurrences.externalScripts.keys()).slice(0, externalAssetLimit),
+          externalCheckOptions,
+        ),
+        externalFonts: checkResourceSizes(
+          Array.from(resourceOccurrences.externalFonts.keys()).slice(0, externalAssetLimit),
+          externalCheckOptions,
         ),
       },
       { concurrency: 5 },
@@ -877,9 +1396,16 @@ export function fetchAssetsFromOccurrences(
             return Effect.succeed({
               css: [] as ResourceCheckResult[],
               images: [] as ResourceCheckResult[],
+              fonts: [] as ResourceCheckResult[],
               scripts: [] as ScriptFetchResult[],
+              preloads: [] as ScriptFetchResult[],
               pdfs: [] as ResourceCheckResult[],
               sitemap: [] as ResourceCheckResult[],
+              linkTargets: { results: [], headUnreliable: false } as LinkTargetProbe,
+              externalCss: [] as ResourceCheckResult[],
+              externalScripts: [] as ResourceCheckResult[],
+              externalFonts: [] as ResourceCheckResult[],
+              webAppManifests: null as FetchedWebAppManifests | null,
             });
           },
         )
@@ -888,13 +1414,22 @@ export function fetchAssetsFromOccurrences(
     logger.trace("resource checks", {
       css: resourceResults.css.length,
       images: resourceResults.images.length,
+      fonts: resourceResults.fonts.length,
       scripts: resourceResults.scripts.length,
+      preloads: resourceResults.preloads.length,
       pdfs: resourceResults.pdfs.length,
       sitemap: resourceResults.sitemap.length,
       elapsed: `${Date.now() - resourceCheckStart}ms`,
     });
 
     const result: PreFetchedAssets = {
+      // Absent on the timeout fallback: not checked, rather than "no manifest linked".
+      ...(resourceResults.webAppManifests
+        ? {
+            webAppManifests: resourceResults.webAppManifests.manifests,
+            webAppManifestsDropped: resourceResults.webAppManifests.dropped,
+          }
+        : {}),
       resourceSizes: {
         css: resourceResults.css.map((check) => ({
           url: check.url,
@@ -903,6 +1438,8 @@ export function fetchAssetsFromOccurrences(
           contentType: check.contentType,
           sizeBytes: check.sizeBytes,
           sourcePages: Array.from(resourceOccurrences.css.get(check.url) ?? []),
+          rateLimited: check.rateLimited,
+          wafBlocked: check.wafBlocked,
           contentEncoding: check.contentEncoding,
           transferBytes: check.transferBytes,
           cacheControl: check.cacheControl,
@@ -918,6 +1455,8 @@ export function fetchAssetsFromOccurrences(
           contentType: check.contentType,
           sizeBytes: check.sizeBytes,
           sourcePages: Array.from(resourceOccurrences.images.get(check.url) ?? []),
+          rateLimited: check.rateLimited,
+          wafBlocked: check.wafBlocked,
           contentEncoding: check.contentEncoding,
           transferBytes: check.transferBytes,
           cacheControl: check.cacheControl,
@@ -925,8 +1464,56 @@ export function fetchAssetsFromOccurrences(
           lastModified: check.lastModified,
           vary: check.vary,
           cacheReason: check.cacheReason,
+          naturalWidth: check.naturalWidth,
+          naturalHeight: check.naturalHeight,
+          animated: check.animated,
+        })),
+        fonts: resourceResults.fonts.map((check) => ({
+          url: check.url,
+          status: check.status,
+          error: check.error,
+          contentType: check.contentType,
+          sizeBytes: check.sizeBytes,
+          sourcePages: Array.from(resourceOccurrences.fonts.get(check.url) ?? []),
+          rateLimited: check.rateLimited,
+          wafBlocked: check.wafBlocked,
         })),
       },
+      // Absent, not empty, when the rule is off: nothing was measured.
+      ...(probeExternalAssets
+        ? {
+            externalAssets: {
+              scripts: resourceResults.externalScripts.map((check) =>
+                externalAssetRecord(check, resourceOccurrences.externalScripts),
+              ),
+              css: resourceResults.externalCss.map((check) =>
+                externalAssetRecord(check, resourceOccurrences.externalCss),
+              ),
+              fonts: resourceResults.externalFonts.map((check) =>
+                externalAssetRecord(check, resourceOccurrences.externalFonts),
+              ),
+            },
+          }
+        : overrides?.ownSiteOnly === true &&
+            resourceOccurrences.externalScripts.size +
+              resourceOccurrences.externalCss.size +
+              resourceOccurrences.externalFonts.size ===
+              0
+          ? // pub#807: pages that reference no third-party resource leave
+            // nothing unmeasured, so the rule need not say there was.
+            { externalAssets: { scripts: [], css: [], fonts: [] } }
+          : {}),
+      assetCapDropped: assetCapDroppedOf(
+        probeExternalAssets
+          ? resourceOccurrences
+          : {
+              ...resourceOccurrences,
+              externalScripts: new Map(),
+              externalCss: new Map(),
+              externalFonts: new Map(),
+            },
+        resourceResults,
+      ),
       scripts: resourceResults.scripts.map((fetch) => ({
         url: fetch.url,
         status: fetch.status,
@@ -935,6 +1522,21 @@ export function fetchAssetsFromOccurrences(
         sizeBytes: fetch.sizeBytes,
         content: fetch.content,
         sourcePages: Array.from(resourceOccurrences.scripts.get(fetch.url) ?? []),
+        rateLimited: fetch.rateLimited,
+        wafBlocked: fetch.wafBlocked,
+        redirected: fetch.redirected,
+        finalUrl: fetch.finalUrl,
+        sourceMapHeader: fetch.sourceMapHeader,
+        contentEncoding: fetch.contentEncoding,
+      })),
+      preloadedScripts: resourceResults.preloads.map((fetch) => ({
+        url: fetch.url,
+        status: fetch.status,
+        error: fetch.error,
+        contentType: fetch.contentType,
+        sizeBytes: fetch.sizeBytes,
+        content: fetch.content,
+        sourcePages: Array.from(resourceOccurrences.preloads.get(fetch.url) ?? []),
         redirected: fetch.redirected,
         finalUrl: fetch.finalUrl,
         sourceMapHeader: fetch.sourceMapHeader,
@@ -956,6 +1558,28 @@ export function fetchAssetsFromOccurrences(
         // to crawl/sitemap-4xx, which would otherwise report it as dead.
         rateLimited: check.rateLimited,
       })),
+      ...(sitemapOffSiteSkipped > 0 ? { sitemapOffSiteSkipped } : {}),
+      ...(internalLinksEnabled
+        ? {
+            linkTargetStatuses: resourceResults.linkTargets.results.map((check) => ({
+              url: check.url,
+              status: check.status,
+              error: check.error,
+              rateLimited: check.rateLimited,
+            })),
+            internalLinkProbe: {
+              unfetched: unfetchedTargets.length,
+              // Answered, not merely attempted: a fetch the budget skipped or
+              // that failed outright says nothing about the target.
+              probed: resourceResults.linkTargets.results.filter(
+                (r) => typeof r.status === "number" && r.status > 0,
+              ).length,
+              cap: probeCap,
+              outOfScope,
+              ...(resourceResults.linkTargets.headUnreliable ? { headUnreliable: true } : {}),
+            },
+          }
+        : {}),
     };
 
     // #1252: only attach the degradation summary when the phase actually hit a
@@ -991,9 +1615,34 @@ export function fetchAssetsFromOccurrences(
  * this is the exact seam where a header field can be added to the storage
  * type but never surfaced to rules, as happened with Set-Cookie (#748).
  */
+/**
+ * Whether a stored page record carries the version headers (#713). The crawler
+ * writes them as `null` when not sent; a record stored before they existed has
+ * no key at all, and security/version-disclosure must not read that as "not sent".
+ */
+export function recordsVersionHeaders(page: PageRecord): boolean {
+  return page.headers?.xPoweredBy !== undefined;
+}
+
+/**
+ * The header map technology detection reads: the rule-facing map plus the
+ * headers the crawler keeps for detection (pub#871), which a crawl reusing an
+ * unchanged page refreshes.
+ */
+export function buildTechHeadersMap(page: PageRecord): Record<string, string> {
+  return overlayTechHeaders(buildHeadersMap(page), page.headers.techHeaders);
+}
+
 export function buildHeadersMap(page: PageRecord): Record<string, string> {
   const headers: Record<string, string> = {};
-  if (page.headers.contentType) headers["content-type"] = page.headers.contentType;
+  if (page.headers.contentType) {
+    // The stored media type plus the charset parameter it was sent with
+    // (pub#674); a record without one reads as before.
+    const charset = page.headers.contentTypeCharset;
+    headers["content-type"] = charset
+      ? `${page.headers.contentType}; charset=${charset}`
+      : page.headers.contentType;
+  }
   if (page.headers.contentEncoding) headers["content-encoding"] = page.headers.contentEncoding;
   if (page.headers.cacheControl) headers["cache-control"] = page.headers.cacheControl;
   if (page.headers.expires) headers["expires"] = page.headers.expires;
@@ -1010,6 +1659,12 @@ export function buildHeadersMap(page: PageRecord): Record<string, string> {
   if (page.headers.xVercelCache) headers["x-vercel-cache"] = page.headers.xVercelCache;
   if (page.headers.altSvc) headers["alt-svc"] = page.headers.altSvc;
   if (page.headers.acceptRanges) headers["accept-ranges"] = page.headers.acceptRanges;
+  // Version-revealing headers (security/version-disclosure, #713).
+  if (page.headers.xPoweredBy) headers["x-powered-by"] = page.headers.xPoweredBy;
+  if (page.headers.xAspNetVersion) headers["x-aspnet-version"] = page.headers.xAspNetVersion;
+  if (page.headers.xAspNetMvcVersion)
+    headers["x-aspnetmvc-version"] = page.headers.xAspNetMvcVersion;
+  if (page.headers.xGenerator) headers["x-generator"] = page.headers.xGenerator;
   // Set-Cookie — security/cookie-flags rule (#748).
   if (page.headers.setCookie) headers["set-cookie"] = page.headers.setCookie;
   // Security headers
@@ -1025,6 +1680,16 @@ export function buildHeadersMap(page: PageRecord): Record<string, string> {
     headers["permissions-policy"] = page.securityHeaders.permissionsPolicy;
   if (page.securityHeaders.xRobotsTag) headers["x-robots-tag"] = page.securityHeaders.xRobotsTag;
   return headers;
+}
+
+/**
+ * Where the crawl started: where its seed's redirects resolved and the URL it
+ * was given (#788). Both engine paths hand this to the hidden-page checks.
+ */
+function crawlEntryUrls(
+  crawl: { seedUrl?: string; originalUrl?: string } | null | undefined,
+): string[] {
+  return [crawl?.seedUrl, crawl?.originalUrl].filter((url): url is string => !!url);
 }
 
 export function runRulesOnStorage(
@@ -1066,6 +1731,9 @@ export function runRulesOnStorage(
       parsed: ParsedPage;
       headers?: Record<string, string>;
       redirectChain?: RedirectChain;
+      sizeBytes?: number | null;
+      rendered?: boolean;
+      versionHeadersRecorded?: boolean;
     }> = [];
     const wafBlockedPages: Array<{
       url: string;
@@ -1074,6 +1742,8 @@ export function runRulesOnStorage(
     const wafBlockedPageSet = new Set<string>();
     const rateLimitedPages: Array<{ url: string; status: number }> = [];
     const rateLimitedPageSet = new Set<string>();
+    // Pages the crawl fetched that site.pages leaves out (pub#798).
+    const fetchedTargets: NonNullable<SiteData["fetchedTargets"]> = [];
 
     // Build page data structures needed for site context
     const pageDataMap = new Map<
@@ -1086,7 +1756,15 @@ export function runRulesOnStorage(
     >();
 
     for (const { page, parsed } of siteContext) {
-      if (!parsed) continue; // Skip non-HTML or failed parses
+      if (!parsed) {
+        // Skip non-HTML or failed parses. One that answered is still a known
+        // status for a link to it (pub#798); 4xx/5xx join site.pages below. A
+        // 3xx is stored only when its redirect never resolved: no answer.
+        if (answeredOutsidePages(page)) {
+          fetchedTargets.push({ url: page.normalizedUrl, status: page.status });
+        }
+        continue;
+      }
       // Throttled pages describe our request rate, not the page (#1829).
       // Excluded from page-level scoring exactly as a WAF challenge page is:
       // grading a 429 body would file a soft-404 / noindex / slow-page finding
@@ -1094,6 +1772,7 @@ export function runRulesOnStorage(
       if (isRateLimitStatus(page.status)) {
         rateLimitedPages.push({ url: page.normalizedUrl, status: page.status });
         rateLimitedPageSet.add(page.normalizedUrl);
+        fetchedTargets.push({ url: page.normalizedUrl, status: page.status, rateLimited: true });
         continue;
       }
       const wafChallenge = detectWafChallengePage({
@@ -1116,6 +1795,7 @@ export function runRulesOnStorage(
           provider: wafChallenge.provider,
         });
         wafBlockedPageSet.add(page.normalizedUrl);
+        fetchedTargets.push({ url: page.normalizedUrl, status: page.status, wafChallenge: true });
         continue;
       }
 
@@ -1127,6 +1807,9 @@ export function runRulesOnStorage(
         parsed,
         headers,
         redirectChain: page.redirectChain,
+        sizeBytes: page.sizeBytes,
+        rendered: isRenderedFetch(page.fetcherId),
+        versionHeadersRecorded: recordsVersionHeaders(page),
       });
       pageDataMap.set(page.normalizedUrl, { page, parsed, headers });
     }
@@ -1206,10 +1889,14 @@ export function runRulesOnStorage(
       sourcePages: string[];
       wafBlocked?: boolean;
       wafProvider?: string;
+      /** pub#821: why a `wafBlocked` link is unverifiable. */
+      unverifiedReason?: UnverifiedReason;
       /** Throttled: status unverified rather than broken (#1829). */
       rateLimited?: boolean;
     }> = [];
 
+    // Rows the external check would refuse on their address are left out.
+    const staleRowEgress = externalLinkEgress(crawl?.baseUrl ?? "");
     let linkQueryCount = 0;
     for (const link of allLinks) {
       if (!link.isInternal) {
@@ -1220,6 +1907,19 @@ export function runRulesOnStorage(
               .getLinkAppearances(crawlId, link.href)
               .pipe(Effect.catchAll(() => Effect.succeed([])));
         if (!hasBatchLinkMethod) linkQueryCount++;
+        // repo#2759: never requested this audit. A row for one can still be
+        // here, a verdict an earlier engine wrote and an incremental crawl
+        // copied over with the page; it is not this audit's answer.
+        if (isNotRequestedExternalLink(link.href, appearances.map((a) => a.anchorText ?? ""))) continue;
+        // pub#770: nor one the external check refuses on its address.
+        if (refusedWithoutLookup(link.href, staleRowEgress)) continue;
+        // Nor any row this run did not write: an incremental crawl copies a
+        // reused page's link rows from earlier crawls, verdicts and their
+        // checkedAt included. This run's external phase stamps every row it
+        // writes with the time it wrote it, so an older row is a verdict this
+        // audit never made (a link it refused after lookup, left out, or did
+        // not reach under the limit).
+        if ((link.checkedAt ?? 0) < (crawl?.startedAt ?? 0)) continue;
 
         externalLinksData.push({
           href: link.href,
@@ -1232,6 +1932,7 @@ export function runRulesOnStorage(
           wafBlocked: link.wafBlocked,
           rateLimited: link.rateLimited,
           wafProvider: link.wafProvider,
+          ...(link.unverifiedReason ? { unverifiedReason: link.unverifiedReason } : {}),
         });
       }
     }
@@ -1285,6 +1986,7 @@ export function runRulesOnStorage(
       totalUrls: sitemaps.reduce((sum, s) => sum + s.urlCount, 0),
       orphanPages: [] as string[],
       missingPages: [] as string[],
+      orphanPagesTotal: 0,
       failed: [], // Not persisted to storage, only available during live audit
       // Rules run against THIS object, not the report built later, so the
       // truncation flag has to be here or crawl/sitemap-exists still reports
@@ -1307,10 +2009,21 @@ export function runRulesOnStorage(
       );
       sitemapDiscovery.orphanPages = coverage.orphanPages.slice(0, SITEMAP_ARRAY_CAP);
       sitemapDiscovery.missingPages = coverage.missingPages.slice(0, SITEMAP_ARRAY_CAP);
+      sitemapDiscovery.orphanPagesTotal = coverage.orphanPages.length;
     }
 
     // Use pre-fetched resource data (no HTTP calls during rules phase)
-    const { resourceSizes, scripts, pdfSizes, sitemapUrlStatuses } = assets;
+    const {
+      resourceSizes,
+      scripts,
+      preloadedScripts,
+      externalAssets,
+      assetCapDropped,
+      pdfSizes,
+      sitemapUrlStatuses,
+      webAppManifests,
+      webAppManifestsDropped,
+    } = assets;
 
     // Differential cloaking probe (#118) — opt-in, bounded. Re-fetches suspicious
     // paths (orphan / recently-modified) with a googlebot UA + query variation and
@@ -1321,6 +2034,7 @@ export function runRulesOnStorage(
         config.integrity?.cloaking_probe,
         {
           baseUrl: crawl?.baseUrl ?? "",
+          entryUrls: crawlEntryUrls(crawl),
           pages: parsedPages.map((p) => ({
             url: p.url,
             statusCode: p.statusCode,
@@ -1377,18 +2091,40 @@ export function runRulesOnStorage(
     const siteDataForPageRules: SiteData = {
       baseUrl: crawl?.baseUrl ?? "",
       pages: parsedPages,
+      // pub#457: noindex pages are skipped only on a site known to be indexed
+      // (homepage, else the entry page). Decided once for both passes.
+      siteIndexable: isSiteIndexable(parsedPages, crawl?.baseUrl ?? "", [
+        crawl?.seedUrl,
+        crawl?.originalUrl,
+      ]),
+      entryUrls: crawlEntryUrls(crawl),
       robotsTxt: robotsData,
+      // What the site refused, so a rule says "refused" not "absent".
+      refusedFetches: crawl?.stats?.refusedFetches,
       llmsTxt: llmsData,
       markdownResponse: markdownData,
       wellKnown: wellKnownData,
       agentAccess: agentAccessData,
       rsl: rslData,
       sitemaps: sitemapDiscovery,
-      externalLinks: externalLinksData,
+      // repo#2729: undefined, not [], when external link checking was off, so
+      // links/broken-external-links reports "not checked" instead of passing.
+      externalLinks: config.external_links?.enabled === false ? undefined : externalLinksData,
+      linkDiscoveryOff: crawl?.stats?.linkDiscoveryOff === true,
+      externalLinkCheck: crawl?.stats?.externalLinkCheck,
+      linkTargetStatuses: assets.linkTargetStatuses,
+      internalLinkProbe: assets.internalLinkProbe,
+      sitemapOffSiteSkipped: assets.sitemapOffSiteSkipped,
+      fetchedTargets,
       resourceSizes,
       scripts,
+      preloadedScripts,
+      externalAssets,
+      assetCapDropped,
       pdfSizes,
       sitemapUrlStatuses,
+      webAppManifests,
+      webAppManifestsDropped,
       cloakingProbes,
       // Raw committed-page count vs the run's configured cap (#697), so
       // sitemap-coverage can tell "crawl budget truncated this run" apart
@@ -1458,7 +2194,24 @@ export function runRulesOnStorage(
 
     // Step 4: Run site rules
     const siteRulesSpan = logger.traceStart("runSiteRules");
-    const siteResult = yield* Effect.promise(() => runner.runSiteRules(siteDataForPageRules));
+    // Endpoint discovery: same collector the streaming path registers, fed from the
+    // parsed pages v1 already holds. Passive; no request is made. The entry page
+    // is chosen by URL and collected first, not by map insertion order.
+    const endpointCollector = createEndpointCollector({
+      headersOf: buildTechHeadersMap,
+      entryUrl: siteDataForPageRules.baseUrl,
+    });
+    for (const { page, parsed } of entryFirst(pageDataMap.values(), siteDataForPageRules.baseUrl)) {
+      endpointCollector.collect(page, parsed);
+    }
+    const siteResult = yield* Effect.promise(() =>
+      runner.runSiteRules(
+        siteDataForPageRules,
+        undefined,
+        undefined,
+        endpointCollector.finish(siteDataForPageRules),
+      ),
+    );
 
     // Build site rule results map for storage
     const siteRuleResults = new Map<string, CheckResult[]>();
@@ -1666,6 +2419,9 @@ type StreamParsedPage = {
   parsed: ParsedPage;
   headers?: Record<string, string>;
   redirectChain?: RedirectChain;
+  sizeBytes?: number | null;
+  rendered?: boolean;
+  versionHeadersRecorded?: boolean;
 };
 
 /**
@@ -1677,6 +2433,17 @@ type StreamParsedPage = {
  * whole point is bounding residency (#1860). `parsed` is the SAME object the
  * matching `parsedPages` entry holds, so it costs nothing extra.
  */
+/**
+ * A stored page left out of `site.pages` (it did not parse as HTML) that still
+ * answered a link to it (pub#798): a 2xx, or a 3xx whose redirect chain did not
+ * end in an error. The crawler stores a 3xx only when following it failed (a
+ * loop, a missing Location, the hop cap), and that is no answer.
+ */
+function answeredOutsidePages(page: Pick<PageRecord, "status" | "redirectChain">): boolean {
+  if (page.status < 200 || page.status >= 400) return false;
+  return page.status < 300 || page.redirectChain?.endsInError !== true;
+}
+
 interface StreamPageIdentity {
   normalizedUrl: string;
   status: number;
@@ -1692,6 +2459,8 @@ interface ParsedUniverse {
   rateLimitedPages: Array<{ url: string; status: number }>;
   rateLimitedPageSet: Set<string>;
   pageDataMap: Map<string, StreamPageIdentity>;
+  /** Pages the crawl fetched that site.pages leaves out (pub#798). */
+  fetchedTargets: NonNullable<SiteData["fetchedTargets"]>;
 }
 
 /**
@@ -1725,6 +2494,7 @@ function createParsedUniverseAccumulator(): {
   const rateLimitedPages: Array<{ url: string; status: number }> = [];
   const rateLimitedPageSet = new Set<string>();
   const pageDataMap: ParsedUniverse["pageDataMap"] = new Map();
+  const fetchedTargets: ParsedUniverse["fetchedTargets"] = [];
   // v1's second loop tests `!pageDataMap.has(url)` against the map as it stands
   // AFTER the whole first loop. Batching means a later batch can still add to
   // that map, so the error-page decision is deferred to `build`.
@@ -1746,11 +2516,19 @@ function createParsedUniverseAccumulator(): {
           });
         }
 
-        if (!parsed) continue; // non-HTML / failed parse — v1 skips these too
+        if (!parsed) {
+          // non-HTML / failed parse — v1 skips these too, keeping the status
+          // of one that answered for links to it (pub#798).
+          if (answeredOutsidePages(page)) {
+            fetchedTargets.push({ url: page.normalizedUrl, status: page.status });
+          }
+          continue;
+        }
         // Mirrors v1's rate-limit exclusion (#1829); the golden diff gates drift.
         if (isRateLimitStatus(page.status)) {
           rateLimitedPages.push({ url: page.normalizedUrl, status: page.status });
           rateLimitedPageSet.add(page.normalizedUrl);
+          fetchedTargets.push({ url: page.normalizedUrl, status: page.status, rateLimited: true });
           continue;
         }
         const wafChallenge = detectWafChallengePage({
@@ -1765,6 +2543,7 @@ function createParsedUniverseAccumulator(): {
         if (wafChallenge.detected) {
           wafBlockedPages.push({ url: page.normalizedUrl, provider: wafChallenge.provider });
           wafBlockedPageSet.add(page.normalizedUrl);
+          fetchedTargets.push({ url: page.normalizedUrl, status: page.status, wafChallenge: true });
           continue;
         }
 
@@ -1800,6 +2579,8 @@ function createParsedUniverseAccumulator(): {
           parsed: kept,
           headers,
           redirectChain: page.redirectChain,
+          rendered: isRenderedFetch(page.fetcherId),
+          versionHeadersRecorded: recordsVersionHeaders(page),
         });
         // Scalars only — NOT the PageRecord (see StreamPageIdentity).
         pageDataMap.set(page.normalizedUrl, {
@@ -1830,6 +2611,7 @@ function createParsedUniverseAccumulator(): {
         rateLimitedPages,
         rateLimitedPageSet,
         pageDataMap,
+        fetchedTargets,
       };
     },
   };
@@ -1894,6 +2676,7 @@ function buildStreamingSiteData(
   parsedPages: StreamParsedPage[],
   pageDataMap: ParsedUniverse["pageDataMap"],
   totalPageCount: number,
+  fetchedTargets: ParsedUniverse["fetchedTargets"],
 ): Effect.Effect<
   {
     siteDataForPageRules: SiteData;
@@ -1940,13 +2723,28 @@ function buildStreamingSiteData(
       sourcePages: string[];
       wafBlocked?: boolean;
       wafProvider?: string;
+      /** pub#821: why a `wafBlocked` link is unverifiable. */
+      unverifiedReason?: UnverifiedReason;
       /** Throttled: status unverified rather than broken (#1829). */
       rateLimited?: boolean;
     }> = [];
 
+    // Rows the external check would refuse on their address are left out.
+    const staleRowEgress = externalLinkEgress(crawl?.baseUrl ?? "");
     for (const link of allLinks) {
       if (!link.isInternal) {
         const appearances = linkAppearancesByHref.get(link.href) ?? [];
+        // repo#2759: never requested this audit; see the v1 builder.
+        if (isNotRequestedExternalLink(link.href, appearances.map((a) => a.anchorText ?? ""))) continue;
+        // pub#770: nor one the external check refuses on its address.
+        if (refusedWithoutLookup(link.href, staleRowEgress)) continue;
+        // Nor any row this run did not write: an incremental crawl copies a
+        // reused page's link rows from earlier crawls, verdicts and their
+        // checkedAt included. This run's external phase stamps every row it
+        // writes with the time it wrote it, so an older row is a verdict this
+        // audit never made (a link it refused after lookup, left out, or did
+        // not reach under the limit).
+        if ((link.checkedAt ?? 0) < (crawl?.startedAt ?? 0)) continue;
 
         externalLinksData.push({
           href: link.href,
@@ -1958,6 +2756,7 @@ function buildStreamingSiteData(
           wafBlocked: link.wafBlocked,
           rateLimited: link.rateLimited,
           wafProvider: link.wafProvider,
+          ...(link.unverifiedReason ? { unverifiedReason: link.unverifiedReason } : {}),
         });
       }
     }
@@ -2002,6 +2801,7 @@ function buildStreamingSiteData(
       totalUrls: sitemaps.reduce((sum, s) => sum + s.urlCount, 0),
       orphanPages: [] as string[],
       missingPages: [] as string[],
+      orphanPagesTotal: 0,
       failed: [],
       // Rules run against THIS object, not the report built later, so the
       // truncation flag has to be here or crawl/sitemap-exists still reports
@@ -2021,15 +2821,27 @@ function buildStreamingSiteData(
       );
       sitemapDiscovery.orphanPages = coverage.orphanPages.slice(0, SITEMAP_ARRAY_CAP);
       sitemapDiscovery.missingPages = coverage.missingPages.slice(0, SITEMAP_ARRAY_CAP);
+      sitemapDiscovery.orphanPagesTotal = coverage.orphanPages.length;
     }
 
-    const { resourceSizes, scripts, pdfSizes, sitemapUrlStatuses } = assets;
+    const {
+      resourceSizes,
+      scripts,
+      preloadedScripts,
+      externalAssets,
+      assetCapDropped,
+      pdfSizes,
+      sitemapUrlStatuses,
+      webAppManifests,
+      webAppManifestsDropped,
+    } = assets;
 
     const cloakingProbes = yield* Effect.promise(() =>
       resolveCloakingProbes(
         config.integrity?.cloaking_probe,
         {
           baseUrl: crawl?.baseUrl ?? "",
+          entryUrls: crawlEntryUrls(crawl),
           pages: parsedPages.map((p) => ({
             url: p.url,
             statusCode: p.statusCode,
@@ -2071,18 +2883,38 @@ function buildStreamingSiteData(
     const siteDataForPageRules: SiteData = {
       baseUrl: crawl?.baseUrl ?? "",
       pages: parsedPages,
+      // pub#457: see runRulesOnStorage — same decision, same input.
+      siteIndexable: isSiteIndexable(parsedPages, crawl?.baseUrl ?? "", [
+        crawl?.seedUrl,
+        crawl?.originalUrl,
+      ]),
+      entryUrls: crawlEntryUrls(crawl),
       robotsTxt: robotsData,
+      // What the site refused, so a rule says "refused" not "absent".
+      refusedFetches: crawl?.stats?.refusedFetches,
       llmsTxt: llmsData,
       markdownResponse: markdownData,
       wellKnown: wellKnownData,
       agentAccess: agentAccessData,
       rsl: rslData,
       sitemaps: sitemapDiscovery,
-      externalLinks: externalLinksData,
+      // repo#2729: see runRulesOnStorage — undefined means "not checked".
+      externalLinks: config.external_links?.enabled === false ? undefined : externalLinksData,
+      linkDiscoveryOff: crawl?.stats?.linkDiscoveryOff === true,
+      externalLinkCheck: crawl?.stats?.externalLinkCheck,
+      linkTargetStatuses: assets.linkTargetStatuses,
+      internalLinkProbe: assets.internalLinkProbe,
+      sitemapOffSiteSkipped: assets.sitemapOffSiteSkipped,
+      fetchedTargets,
       resourceSizes,
       scripts,
+      preloadedScripts,
+      externalAssets,
+      assetCapDropped,
       pdfSizes,
       sitemapUrlStatuses,
+      webAppManifests,
+      webAppManifestsDropped,
       cloakingProbes,
       crawlLimits: {
         pagesCrawled: totalPageCount,
@@ -2126,6 +2958,7 @@ function runSitePass(
   rateLimitedPages: ReadonlyArray<{ url: string; status: number }>,
   collectedSignals: CollectedSiteSignals,
   siteQuery: SiteQuery,
+  endpointSurface: EndpointSurface,
 ): Effect.Effect<
   {
     siteResults: CheckResult[];
@@ -2142,7 +2975,7 @@ function runSitePass(
     // identical to v1: identical scalar universe, collectors reproduce the per-page
     // DOM signal, and siteQuery's universe is reconciled to v1's site.pages.
     const siteResult = yield* Effect.promise(() =>
-      runner.runSiteRules(siteData, siteQuery, collectedSignals),
+      runner.runSiteRules(siteData, siteQuery, collectedSignals, endpointSurface),
     );
 
     const siteRuleResults = new Map<string, CheckResult[]>();
@@ -2387,12 +3220,36 @@ export function runStreamingRules(
        * binary invalidates every entry even when no rule id or option changed.
        */
       engineVersion: string;
+      /**
+       * A hash of the rule code, also part of the key, so a rule change that
+       * ships without a version bump still invalidates every entry.
+       */
+      rulesVersion: string;
     };
+    /**
+     * Take ownership of each page's rule output as it is produced (#2343), so it
+     * does not have to be held until the report. Forwarded verbatim to
+     * {@link streamPageRules} — see {@link PageResultSink}.
+     */
+    pageSink?: PageResultSink;
+    /**
+     * Keep the O(pages × page bytes) result maps. Default TRUE (today's
+     * behaviour, and what the cloud path runs on).
+     *
+     * FALSE (#2343) is the bounded mode the CLI runs: `pageResults`,
+     * `pageRuleResults` and `parsedPages` come back EMPTY, and `ruleResultsMap`
+     * carries the SITE rules only. `tallies` still carries every rule's meta and
+     * exact counts, which is everything scoring needs
+     * (`calculateHealthScoreFromTallies`). A caller passing false MUST have a
+     * `pageSink`, or the run's page-level findings go nowhere.
+     */
+    retainPageResults?: boolean;
   },
 ): Effect.Effect<StreamingRuleExecutionResult, never, never> {
   return Effect.gen(function* () {
     // Clamped — see streaming.ts; a 0 batch would loop forever over the crawl.
     const batchSize = Math.max(1, opts?.batchSize ?? STREAM_PAGE_BATCH);
+    const retainPageResults = opts?.retainPageResults ?? true;
     const onPhase = opts?.onPhase;
     const phase = <T,>(name: StreamingRulePhase, body: () => Effect.Effect<T, never, never>) =>
       Effect.gen(function* () {
@@ -2408,8 +3265,14 @@ export function runStreamingRules(
     const runner = createRunner(config, effectiveScope);
 
     // Pass 1: DOM-free scalar universe (one batch of DOMs live at a time).
-    const { parsedPages, pageDataMap, totalPageCount, wafBlockedPages, rateLimitedPages } =
-      yield* phase("universe", () => streamParsedUniverse(storage, crawlId, batchSize));
+    const {
+      parsedPages,
+      pageDataMap,
+      totalPageCount,
+      wafBlockedPages,
+      rateLimitedPages,
+      fetchedTargets,
+    } = yield* phase("universe", () => streamParsedUniverse(storage, crawlId, batchSize));
 
     // Steps 2+3: site-fetch phase + soft-404 verdict map.
     const { siteDataForPageRules, soft404Map } = yield* phase("site-fetch", () =>
@@ -2421,6 +3284,7 @@ export function runStreamingRules(
         parsedPages,
         pageDataMap,
         totalPageCount,
+        fetchedTargets,
       ),
     );
 
@@ -2446,6 +3310,7 @@ export function runStreamingRules(
         const ctxHash = yield* Effect.promise(() =>
           computeRunContextHash({
             engineVersion: ruleCacheOpts.engineVersion,
+            rulesVersion: ruleCacheOpts.rulesVersion,
             pageRules: runner.pageRuleSignature(),
             siteData: siteDataForPageRules,
             siteMetadata: effectiveScope?.siteMetadata,
@@ -2479,13 +3344,21 @@ export function runStreamingRules(
             finalUrl: page.finalUrl,
             parsed,
             fingerprint: shared.fingerprint,
+            htmlBytes: page.sizeBytes,
+            // links/broken-anchors: an unrendered client shell's ids are unconfirmed.
+            rendered: isRenderedFetch(page.fetcherId),
+            // The extractors are rules' per-page work, so they share the rules'
+            // budget, including a `[rules] time_budget_ms` override (#578).
+            budgetMs: runner.ruleTimeBudgetMs,
           }),
           "collected-signal",
         );
         collectedPages.push(signal);
         // The value the rule cache stores for this page. It is already detached
-        // and holds no DOM, so it is exactly what a replay needs (#1990).
-        return signal;
+        // and holds no DOM, so it is exactly what a replay needs (#1990). An
+        // extractor that ran past its time budget left a hole, which must not be
+        // replayed: `undefined` keeps the page out of the cache.
+        return signal.timedOut ? undefined : signal;
       },
       // A replayed page contributes at the same point in the stream, so
       // `collectedPages` stays in crawl order whether a page ran or replayed —
@@ -2494,11 +3367,15 @@ export function runStreamingRules(
         collectedPages.push(snapshot as CollectedPageSignal);
       },
     };
+    const endpointCollector = createEndpointCollector({
+      headersOf: buildTechHeadersMap,
+      entryUrl: siteDataForPageRules.baseUrl,
+    });
     const streamed = yield* phase("page-rules", () =>
       streamPageRules(storage, crawlId, runner, siteDataForPageRules, {
       batchSize,
       soft404Confirmations: soft404Map,
-      collectors: [signalCollector],
+      collectors: [signalCollector, endpointCollector],
       hooks: opts?.hooks,
       signal: opts?.signal,
       // v1's page-rule universe verbatim (its `pageDataMap` keys), so the streamed
@@ -2509,6 +3386,8 @@ export function runStreamingRules(
       pageLoopHooks: opts?.pageLoopHooks,
       templateFanout: opts?.templateFanout,
       ruleCache,
+      pageSink: opts?.pageSink,
+      retainPageResults: opts?.retainPageResults,
       }),
     );
     const collectedSignals: CollectedSiteSignals = { pages: collectedPages };
@@ -2538,6 +3417,7 @@ export function runStreamingRules(
         rateLimitedPages,
         collectedSignals,
         siteQuery,
+        endpointCollector.finish(siteDataForPageRules),
       ),
     );
 
@@ -2560,9 +3440,16 @@ export function runStreamingRules(
 
         // Parsed-page cache for the report tail — same universe (auditable pages)
         // v1 returns, with DOMs already dropped (report reads only extracted
-        // fields).
+        // fields). Skipped in the bounded mode (#2343): its only readers are
+        // buildV1Report/buildV2Report's summary pass, and a caller that opted out
+        // of the retained maps is not on that path — the CLI rebuilds its report
+        // from SQLite. The pages themselves are held by `parsedPages` either way
+        // (this Map is a second index over the same objects), so what this saves
+        // is the index, and what it buys is a single owner for the universe.
         const cache = new Map<string, ParsedPage>();
-        for (const [url, { parsed }] of pageDataMap) cache.set(url, parsed);
+        if (retainPageResults) {
+          for (const [url, { parsed }] of pageDataMap) cache.set(url, parsed);
+        }
         return { ruleResultsMap: map, tallies: folded, parsedPagesCache: cache };
       }),
     );
@@ -2626,6 +3513,25 @@ export interface ExternalLinkCheckProgress {
   checked: number;
   total: number;
   fromCache: number;
+}
+
+/**
+ * How long the external link check may take (repo#2613). Absent fields mean no
+ * limit, which is what every caller had before.
+ */
+export interface ExternalLinkCheckLimits {
+  /**
+   * The check's wall-clock budget, from when the links are sent. The links it
+   * has not reached by then are not requested; they are counted in the stats
+   * as `outOfTime` and reported as not checked, never as broken. Zero or less,
+   * or not a number: no budget.
+   */
+  budgetMs?: number;
+  /**
+   * The longest one bulk call or one local check is waited on: a backstop for
+   * a request whose own timeout does not hold, so set it above both.
+   */
+  maxWaitMs?: number;
 }
 
 /**
@@ -2715,6 +3621,156 @@ export function absorbExternalLinkOccurrences(
   }
 }
 
+// repo#2729: the internal link probe's action filter lives with the probe.
+export { looksLikeAnAction } from "./link-target-probe";
+
+/**
+ * Normalized targets of the page's rel=nofollow links whose text is an action
+ * ("Log out", "Delete"), read from the DOM: the stored link scalars the
+ * collector reads carry no rel.
+ */
+function nofollowActionTargets(page: {
+  url: string;
+  finalUrl?: string;
+  parsed: ParsedPage;
+}): Set<string> {
+  const out = new Set<string>();
+  const doc = page.parsed.document;
+  if (!doc) return out;
+  for (const anchor of Array.from(doc.querySelectorAll("a[href]"))) {
+    const rel = (anchor.getAttribute("rel") ?? "").toLowerCase().split(/\s+/);
+    if (!rel.includes("nofollow")) continue;
+    if (!linkTextLooksLikeAnAction(anchor.textContent ?? "", true)) continue;
+    try {
+      out.add(normalizeUrl(new URL(anchor.getAttribute("href") ?? "", page.finalUrl ?? page.url).href));
+    } catch {
+      // An href that does not resolve is not a link the probe could request.
+    }
+  }
+  return out;
+}
+
+/**
+ * The egress policy for an audit's external links (#767): public addresses
+ * only, private ones too when the audited site is itself on a private
+ * network, never link-local or cloud metadata; each hop pinned to the vetted
+ * address unless the transport pins.
+ */
+function externalLinkEgress(baseUrl: string, egressPinnedByTransport?: boolean): EgressPolicy {
+  const siteHost = getHostname(baseUrl).replace(/^\[|\]$/g, "");
+  return {
+    allowPrivateNetwork: siteHost !== "" && isNonPublicHostname(siteHost),
+    resolve: memoizeResolveHost(resolveHostAddresses),
+    pin: egressPinnedByTransport !== true,
+  };
+}
+
+/** Not-requested external links kept as a sample in the crawl stats, and source pages per link. */
+const NOT_REQUESTED_SAMPLE_LINKS = 50;
+const NOT_REQUESTED_SAMPLE_PAGES = 10;
+
+/**
+ * An external link the checker never requests (repo#2759): its URL looks like
+ * an action or carries a token, or some page's link text is plainly an action
+ * ("Log out", "Unsubscribe", "Delete account"). rel=nofollow does not widen it
+ * here as it does for internal links: on an external link it marks a paid or
+ * untrusted link ("Buy on Amazon", "Follow us"), not an action.
+ */
+export function isNotRequestedExternalLink(href: string, linkTexts: Iterable<string>): boolean {
+  if (looksLikeAnAction(href)) return true;
+  for (const text of linkTexts) if (linkTextLooksLikeAnAction(text, false)) return true;
+  return false;
+}
+
+/**
+ * Split the external links into those the checker may request and those it
+ * never requests ({@link isNotRequestedExternalLink}). The second come back as
+ * a count and a sample, most-linked first, then by URL, each with its first
+ * source pages, how many pages link it, and its URL with token-like values
+ * masked (`maskLinkTokens`, a best effort) for a report that may be published.
+ */
+export function splitNotRequestedExternalLinks(occurrences: ExternalLinkOccurrences): {
+  requestable: ExternalLinkOccurrences;
+  notRequested: {
+    count: number;
+    sample: Array<{ href: string; sourcePages: string[]; pageCount: number }>;
+  };
+} {
+  const requestable: ExternalLinkOccurrences = new Map();
+  const skipped: Array<{ href: string; pages: string[] }> = [];
+  for (const [href, occs] of occurrences) {
+    if (!isNotRequestedExternalLink(href, occs.map((o) => o.text))) {
+      requestable.set(href, occs);
+      continue;
+    }
+    skipped.push({ href, pages: [...new Set(occs.map((o) => o.pageUrl))] });
+  }
+  return {
+    requestable,
+    notRequested: { count: skipped.length, sample: sampleLinkPages(skipped) },
+  };
+}
+
+/** {@link sampleLinkPages} over collected occurrences. */
+function sampleExternalLinks(
+  occurrences: ExternalLinkOccurrences,
+): Array<{ href: string; sourcePages: string[]; pageCount: number }> {
+  return sampleLinkPages(
+    [...occurrences].map(([href, occs]) => ({ href, pages: [...new Set(occs.map((o) => o.pageUrl))] })),
+  );
+}
+
+/**
+ * The report sample of links the checker did not request: most-linked first,
+ * then by URL, each URL masked (`maskLinkTokens`), and links that mask the
+ * same (`?u=1`, `?u=2`) merged into one entry with their pages combined, since
+ * a report keys items by id and would drop one.
+ */
+function sampleLinkPages(
+  links: Array<{ href: string; pages: string[] }>,
+): Array<{ href: string; sourcePages: string[]; pageCount: number }> {
+  const byMasked = new Map<string, Set<string>>();
+  for (const { href, pages } of links) {
+    const masked = maskLinkTokens(href);
+    const merged = byMasked.get(masked) ?? new Set<string>();
+    for (const page of pages) merged.add(page);
+    byMasked.set(masked, merged);
+  }
+  const entries = [...byMasked].map(([href, pages]) => ({ href, pages: [...pages] }));
+  entries.sort(
+    (a, b) => b.pages.length - a.pages.length || (a.href < b.href ? -1 : a.href > b.href ? 1 : 0),
+  );
+  return entries.slice(0, NOT_REQUESTED_SAMPLE_LINKS).map(({ href, pages }) => ({
+    href,
+    sourcePages: pages.slice(0, NOT_REQUESTED_SAMPLE_PAGES),
+    pageCount: pages.length,
+  }));
+}
+
+/**
+ * The external links an audit checks under a `max_links` limit (repo#2729):
+ * all of them when there is no limit or they fit. Otherwise `priority` first
+ * (links the caller must see again, such as the ones an open finding names, so
+ * a capped run can still tell it fixed), then the ones on the most pages, ties
+ * broken by URL so the same crawl always checks the same set.
+ */
+export function selectExternalLinksToCheck(
+  occurrences: ExternalLinkOccurrences,
+  maxLinks: number | undefined,
+  priority: readonly string[] = [],
+): string[] {
+  const hrefs = Array.from(occurrences.keys());
+  if (maxLinks === undefined || hrefs.length <= maxLinks) return hrefs;
+  const first = new Set(priority.filter((href) => occurrences.has(href)));
+  const pagesOf = (href: string): number =>
+    new Set((occurrences.get(href) ?? []).map((o) => o.pageUrl)).size;
+  const ranked = hrefs
+    .filter((href) => !first.has(href))
+    .map((href) => ({ href, pages: pagesOf(href) }))
+    .sort((a, b) => b.pages - a.pages || (a.href < b.href ? -1 : a.href > b.href ? 1 : 0));
+  return [...first, ...ranked.map((r) => r.href)].slice(0, Math.max(0, maxLinks));
+}
+
 export function checkExternalLinksOnStorage(
   storage: CrawlStorage,
   crawlId: string,
@@ -2752,6 +3808,10 @@ export function checkCollectedExternalLinks(
   onProgress?: (progress: ExternalLinkCheckProgress) => void,
   linkCache?: LinkCache | null,
   bulkChecker?: (urls: string[]) => Promise<Map<string, ExternalCheckResult>>,
+  priorityHrefs?: readonly string[],
+  /** The transport resolves once and connects to what it validated (the hosted container). */
+  egressPinnedByTransport?: boolean,
+  limits?: ExternalLinkCheckLimits,
 ): Effect.Effect<ExternalCheckResult[], never, never> {
   return Effect.gen(function* () {
     if (!config.enabled) {
@@ -2762,37 +3822,141 @@ export function checkCollectedExternalLinks(
       return [];
     }
 
+    // An external link is the page's to name, so every local request and every
+    // redirect hop it leads to is held to the third-party probes' policy:
+    // public addresses only (private ones too when the audited site is itself
+    // on a private network), never link-local or cloud metadata, and connected
+    // to the address that was vetted. No custom headers ever go with it.
+    const crawl = yield* storage.getCrawl(crawlId).pipe(Effect.catchAll(() => Effect.succeed(null)));
+    const egress = externalLinkEgress(crawl?.baseUrl ?? "", egressPinnedByTransport);
+
     // Check external links using injected cache (or null for no caching)
     const cache = linkCache ?? null;
     const ttlSeconds = config.cache_ttl_days * 24 * 60 * 60;
 
-    const results = yield* checkExternalLinks(Array.from(externalLinkOccurrences.keys()), cache, {
+    // repo#2759: a link that looks like an action or carries a token (a
+    // third-party unsubscribe or magic link, a signed download URL) is never
+    // requested, locally or by the cloud's bulk checker: the URL itself can be
+    // the credential. Same rules as the internal link probe, URL and link text
+    // alike. Counted, sampled, and reported by links/broken-external-links.
+    const { requestable: requestableOrRefused, notRequested } =
+      splitNotRequestedExternalLinks(externalLinkOccurrences);
+    // pub#770: an address the policy refuses on the URL alone (a private,
+    // link-local or metadata IP literal, `localhost`, a metadata name) is
+    // never requested either, so it takes no slot under `max_links` and is
+    // never stored as a row. Listed with the refusals the check itself makes.
+    const requestable: ExternalLinkOccurrences = new Map();
+    const refusedByUrl: string[] = [];
+    for (const [href, occs] of requestableOrRefused) {
+      if (refusedWithoutLookup(href, egress)) refusedByUrl.push(href);
+      else requestable.set(href, occs);
+    }
+    const notRequestedHrefs = [...externalLinkOccurrences.keys()].filter((href) => !requestable.has(href));
+
+    // repo#2729: a site can link out to tens of thousands of URLs, and in the
+    // cloud each link is a credit, so an audit checks at most `max_links` of
+    // them: the most-linked first (nav and footer links every page shares),
+    // then by URL so the choice is stable. The rest are counted and reported as
+    // not checked.
+    const hrefs = selectExternalLinksToCheck(requestable, config.max_links, priorityHrefs);
+    const externalLinkCheck = {
+      found: externalLinkOccurrences.size,
+      checked: hrefs.length,
+      cap: config.max_links ?? requestable.size,
+      ...(notRequested.count > 0
+        ? { notRequested: notRequested.count, notRequestedLinks: notRequested.sample }
+        : {}),
+      ...(refusedByUrl.length > 0 ? { refusedByUrl: refusedByUrl.length } : {}),
+    };
+    yield* storage
+      .updateStats(crawlId, { externalLinkCheck })
+      .pipe(
+        // Without the stat the over-limit "Not checked" line cannot be shown,
+        // so say so rather than read as a complete check.
+        Effect.catchAll((error) =>
+          Effect.sync(() =>
+            logger.warn("could not record external link check coverage", { error: String(error) }),
+          ),
+        ),
+      );
+
+    const results = yield* checkExternalLinks(hrefs, cache, {
       ttlSeconds,
       concurrency: config.concurrency,
       timeoutMs: config.timeout_ms,
       userAgent: SQUIRRELSCAN_USER_AGENT,
       bulkChecker,
+      egress,
+      // repo#2613: a long check reports as it goes, and stops at its budget. A
+      // budget of zero or less, or not a number, is no budget, as elsewhere.
+      ...(limits?.budgetMs !== undefined && Number.isFinite(limits.budgetMs) && limits.budgetMs > 0
+        ? { deadlineAt: Date.now() + limits.budgetMs }
+        : {}),
+      ...(limits?.maxWaitMs !== undefined ? { maxWaitMs: limits.maxWaitMs } : {}),
+      onProgress: (progress) =>
+        onProgress?.({ checked: progress.done, total: hrefs.length, fromCache: progress.fromCache }),
     });
+
+    // repo#2613: the links the budget ran out on were never answered. They are
+    // left out of the results (so out of the stored rows), counted here, and
+    // reported as not checked, never as broken or as passing.
+    const outOfTime = hrefs.length - results.length;
+
+    // pub#770: the links the egress policy refused (a private, link-local or
+    // metadata address on a public site's page) were never requested. Counted
+    // and sampled like the not-requested ones, so the report can say so
+    // rather than leave them out of every line.
+    const refusedHrefs = [...refusedByUrl, ...results.filter((r) => r.refused).map((r) => r.href)];
+    if (refusedHrefs.length > 0 || outOfTime > 0) {
+      const refusedOccurrences: ExternalLinkOccurrences = new Map(
+        refusedHrefs.map((href) => [href, externalLinkOccurrences.get(href) ?? []]),
+      );
+      yield* storage
+        .updateStats(crawlId, {
+          externalLinkCheck: {
+            ...externalLinkCheck,
+            ...(refusedHrefs.length > 0
+              ? { refused: refusedHrefs.length, refusedLinks: sampleExternalLinks(refusedOccurrences) }
+              : {}),
+            ...(outOfTime > 0 ? { outOfTime } : {}),
+          },
+        })
+        .pipe(
+          Effect.catchAll((error) =>
+            Effect.sync(() =>
+              logger.warn("could not record refused or unreached external links", {
+                error: String(error),
+              }),
+            ),
+          ),
+        );
+    }
 
     // Store results in per-crawl storage
     // Collect all appearances for batch insert
     const allAppearances: LinkAppearanceRecord[] = [];
 
     for (const result of results) {
-      yield* storage
-        .upsertLink(crawlId, {
-          href: result.href,
-          isInternal: false,
-          status: result.status ?? undefined,
-          error: result.error ?? undefined,
-          checkedAt: Date.now(),
-          wafBlocked: result.wafBlocked,
-          wafProvider: result.wafProvider,
-          // #1829: persisted, not re-derived — the 503 + Retry-After case
-          // cannot be recovered from the status code the rules read.
-          rateLimited: result.rateLimited,
-        })
-        .pipe(Effect.catchAll(() => Effect.void));
+      // Never requested: no row, so no line reads it as checked (pub#770).
+      // Its appearances are still written, like the not-requested links'.
+      if (!result.refused) {
+        yield* storage
+          .upsertLink(crawlId, {
+            href: result.href,
+            isInternal: false,
+            status: result.status ?? undefined,
+            error: result.error ?? undefined,
+            checkedAt: Date.now(),
+            wafBlocked: result.wafBlocked,
+            wafProvider: result.wafProvider,
+            // pub#821: why it is unverifiable, for the item label.
+            unverifiedReason: result.unverifiedReason,
+            // #1829: persisted, not re-derived — the 503 + Retry-After case
+            // cannot be recovered from the status code the rules read.
+            rateLimited: result.rateLimited,
+          })
+          .pipe(Effect.catchAll(() => Effect.void));
+      }
 
       // Collect link appearances for batch insert
       const occurrences = externalLinkOccurrences.get(result.href) ?? [];
@@ -2807,18 +3971,41 @@ export function checkCollectedExternalLinks(
       }
     }
 
+    // repo#2759: the links never requested get their appearances too, though
+    // no row. An incremental crawl copies a reused page's link rows, earlier
+    // verdicts included, but not its appearances; with these the rule-data
+    // builders can tell such a row is a link this run never requested by its
+    // link text, not only by its URL, and leave it out.
+    for (const href of notRequestedHrefs) {
+      for (const occ of externalLinkOccurrences.get(href) ?? []) {
+        allAppearances.push({
+          href,
+          pageUrl: occ.pageUrl,
+          anchorText: occ.text,
+          position: occ.position,
+          isNofollow: occ.isNofollow,
+        });
+      }
+    }
+
     // Batch insert all appearances in one transaction
     if (allAppearances.length > 0) {
       yield* storage
         .addLinkAppearancesBatch(crawlId, allAppearances)
-        .pipe(Effect.catchAll(() => Effect.void));
+        .pipe(
+          Effect.catchAll((error) =>
+            Effect.sync(() =>
+              logger.warn("could not record external link appearances", { error: String(error) }),
+            ),
+          ),
+        );
     }
 
     // Report progress
     const fromCache = results.filter((r) => r.fromCache).length;
     onProgress?.({
       checked: results.length,
-      total: externalLinkOccurrences.size,
+      total: hrefs.length,
       fromCache,
     });
 
@@ -2834,6 +4021,20 @@ interface ResourceOccurrenceMap {
   css: Map<string, Set<string>>;
   images: Map<string, Set<string>>;
   scripts: Map<string, Set<string>>;
+  preloads: Map<string, Set<string>>;
+  fonts: Map<string, Set<string>>;
+  externalCss: Map<string, Set<string>>;
+  externalScripts: Map<string, Set<string>>;
+  externalFonts: Map<string, Set<string>>;
+}
+
+/** A `<meta http-equiv="Content-Security-Policy">` is an enforced policy too. */
+function hasMetaCsp(doc: Document | null): boolean {
+  if (!doc) return false;
+  for (const meta of doc.querySelectorAll("meta[http-equiv]")) {
+    if (meta.getAttribute("http-equiv")?.trim().toLowerCase() === "content-security-policy") return true;
+  }
+  return false;
 }
 
 function isSameDomainResource(url: string, baseHost: string): boolean {
@@ -2855,6 +4056,11 @@ function collectResourceOccurrences(
     css: new Map<string, Set<string>>(),
     images: new Map<string, Set<string>>(),
     scripts: new Map<string, Set<string>>(),
+    preloads: new Map<string, Set<string>>(),
+    fonts: new Map<string, Set<string>>(),
+    externalCss: new Map<string, Set<string>>(),
+    externalScripts: new Map<string, Set<string>>(),
+    externalFonts: new Map<string, Set<string>>(),
   };
   absorbResourceOccurrences(target, pages, baseUrl);
   return target;
@@ -2863,17 +4069,20 @@ function collectResourceOccurrences(
 /** {@link collectResourceOccurrences}' body, accumulating into `target` so the
  * streamed pre-rules pass can feed it one page batch at a time (DOMs live) and
  * the whole-array entry point stays a one-shot call into the same code. */
-function absorbResourceOccurrences(
+export function absorbResourceOccurrences(
   target: ResourceOccurrenceMap,
   pages: Array<{
     url: string;
     finalUrl?: string;
     parsed: ParsedPage;
+    /** The page enforces a CSP (header or meta); only then are its preloads wanted. */
+    hasCsp?: boolean;
   }>,
   baseUrl: string,
 ): void {
   const baseHost = getHostname(baseUrl).toLowerCase();
-  const { css, images, scripts } = target;
+  const { css, images, scripts, preloads, fonts, externalCss, externalScripts, externalFonts } =
+    target;
 
   for (const page of pages) {
     const pageUrl = page.finalUrl ?? page.url;
@@ -2883,10 +4092,10 @@ function absorbResourceOccurrences(
     const stylesheetRefs = extractStylesheets(doc, pageUrl);
     for (const sheet of stylesheetRefs) {
       if (!sheet.href || sheet.href.startsWith("data:")) continue;
-      if (!isSameDomainResource(sheet.href, baseHost)) continue;
-      const sources = css.get(sheet.href) ?? new Set<string>();
+      const sheets = isSameDomainResource(sheet.href, baseHost) ? css : externalCss;
+      const sources = sheets.get(sheet.href) ?? new Set<string>();
       sources.add(page.url);
-      css.set(sheet.href, sources);
+      sheets.set(sheet.href, sources);
     }
 
     for (const image of page.parsed.images) {
@@ -2903,14 +4112,31 @@ function absorbResourceOccurrences(
       images.set(resolved, sources);
     }
 
+    for (const fontUrl of extractFontUrls(doc, pageUrl)) {
+      const fontMap = isSameDomainResource(fontUrl, baseHost) ? fonts : externalFonts;
+      const sources = fontMap.get(fontUrl) ?? new Set<string>();
+      sources.add(page.url);
+      fontMap.set(fontUrl, sources);
+    }
+
     // Extract external script URLs
     const scriptRefs = extractScripts(doc, pageUrl);
     for (const script of scriptRefs) {
       if (!script.src || script.src.startsWith("data:")) continue;
-      if (!isSameDomainScript(script.src, baseHost)) continue;
-      const sources = scripts.get(script.src) ?? new Set<string>();
+      const scriptMap = isSameDomainScript(script.src, baseHost) ? scripts : externalScripts;
+      const sources = scriptMap.get(script.src) ?? new Set<string>();
       sources.add(page.url);
-      scripts.set(script.src, sources);
+      scriptMap.set(script.src, sources);
+    }
+
+    // Preloaded chunks name the lazy third-party scripts a page loads. They go in
+    // their own map so no script rule's input changes, and only pages that
+    // enforce a CSP are read, since nothing else needs them.
+    for (const src of page.hasCsp ? extractPreloadedScriptUrls(doc, pageUrl) : []) {
+      if (!isSameDomainScript(src, baseHost)) continue;
+      const sources = preloads.get(src) ?? new Set<string>();
+      sources.add(page.url);
+      preloads.set(src, sources);
     }
   }
 }

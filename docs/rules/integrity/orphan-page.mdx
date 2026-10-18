@@ -11,7 +11,7 @@ That is exactly how injected phishing and spam pages survive. A legitimate unlis
 
 ## What squirrel checks
 
-The rule is site-wide. It builds the set of sitemap URLs from every discovered sitemap, counts inbound internal links for every crawled page, then evaluates each page. The homepage is never flagged, and pages whose status code is outside 200 to 299 are ignored.
+The rule is site-wide. It builds the set of sitemap URLs from every discovered sitemap, counts inbound internal links for every crawled page, then evaluates each page. The homepage is never flagged, and neither is the page the audit started from: the URL you gave and where its redirects landed (a root that redirects to `/en/` or to a sign-in page). Pages whose status code is outside 200 to 299 are ignored.
 
 A page is hidden when it has zero inbound internal links and, if the site has a sitemap at all, is absent from it. When the site has no sitemap, absence from it means nothing, so zero inbound links alone qualifies. Each hidden page is then correlated with the page-level integrity signals for that page.
 
@@ -70,8 +70,9 @@ disable = ["integrity/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["integrity/orphan-page"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
@@ -89,7 +90,7 @@ Site Integrity findings ship in every audit next to the SEO, performance and age
 
 ## Check your site
 
-Run `squirrel audit https://example.com` and open the Site Integrity section of the report. Every hidden page is listed by path, split by whether it carries other compromise signals. Local audits are free.
+Run `squirrel audit https://example.com` and open the Site Integrity section of the report. Every hidden page is listed by path, split by whether it carries other compromise signals. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">

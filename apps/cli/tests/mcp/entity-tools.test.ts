@@ -17,6 +17,8 @@
 
 import type { EntityMap } from "@squirrelscan/core-contracts/entity-map";
 
+import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
+import { McpServer } from "@modelcontextprotocol/server";
 import { ENTITY_MCP_FIELD_DESCRIPTIONS } from "@squirrelscan/core-contracts/entity-mcp";
 import {
   afterAll,
@@ -124,6 +126,8 @@ async function fixture(name: string): Promise<EntityMap> {
 async function seed(options: {
   project: string;
   baseUrl: string;
+  /** The URL the audit was run on; the crawl records it as `originalUrl`. */
+  originalUrl?: string;
   startedAt: number;
   map: EntityMap;
   /** Overrides the map's own page list; use it to seed a narrower re-crawl. */
@@ -142,6 +146,7 @@ async function seed(options: {
     const crawlId = await Effect.runPromise(
       storage.createCrawl({
         baseUrl: options.baseUrl,
+        ...(options.originalUrl ? { originalUrl: options.originalUrl } : {}),
         startedAt: options.startedAt,
         status: "analyzed",
         config: {},
@@ -202,43 +207,36 @@ async function seed(options: {
   }
 }
 
+/** A client wired to a server holding only the entity tools. */
+async function connectEntityClient(): Promise<Client> {
+  const { registerEntityTools } = await import("@/mcp/tools/entity-tools");
+  const server = new McpServer({ name: "test", version: "0.0.0" });
+  registerEntityTools(server);
+  const [clientTransport, serverTransport] =
+    InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test", version: "0.0.0" });
+  await Promise.all([
+    server.connect(serverTransport),
+    client.connect(clientTransport),
+  ]);
+  return client;
+}
+
 /**
- * Call one tool the way a client does, and parse the JSON it returns.
- *
- * Through the `tools/call` request handler rather than the registered
- * callback, so the zod input schema runs too. A test that bypassed it would
- * pass with arguments no real client could send.
+ * Call a tool the way a client does (tools/call over a linked transport), so
+ * the zod input schema runs too. A test that bypassed it would pass with
+ * arguments no real client could send.
  */
 async function call(
   tool: string,
   args: Record<string, unknown> = {}
 ): Promise<{ ok: boolean; text: string; data: Record<string, unknown> }> {
-  const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
-  const { registerEntityTools } = await import("@/mcp/tools/entity-tools");
-
-  const server = new McpServer({ name: "test", version: "0.0.0" });
-  registerEntityTools(server);
-
-  const handlers = (
-    server.server as unknown as {
-      _requestHandlers: Map<
-        string,
-        (request: unknown, extra: unknown) => Promise<unknown>
-      >;
-    }
-  )._requestHandlers;
-  const callTool = handlers.get("tools/call");
-  if (!callTool) throw new Error("the server registered no tools/call handler");
-
-  const result = (await callTool(
-    { method: "tools/call", params: { name: tool, arguments: args } },
-    {
-      signal: new AbortController().signal,
-      requestId: 1,
-      sendNotification: () => {},
-      sendRequest: () => {},
-    }
-  )) as { isError?: boolean; content: Array<{ text: string }> };
+  const client = await connectEntityClient();
+  const result = (await client.callTool({ name: tool, arguments: args })) as {
+    isError?: boolean;
+    content: Array<{ text: string }>;
+  };
+  await client.close();
 
   const text = result.content[0]?.text ?? "";
   let data: Record<string, unknown> = {};
@@ -265,40 +263,18 @@ async function listTools(): Promise<
     { properties?: Record<string, SchemaProperty>; required?: string[] }
   >
 > {
-  const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
-  const { registerEntityTools } = await import("@/mcp/tools/entity-tools");
-
-  const server = new McpServer({ name: "test", version: "0.0.0" });
-  registerEntityTools(server);
-  const handlers = (
-    server.server as unknown as {
-      _requestHandlers: Map<
-        string,
-        (request: unknown, extra: unknown) => Promise<unknown>
-      >;
-    }
-  )._requestHandlers;
-  const listHandler = handlers.get("tools/list");
-  if (!listHandler) throw new Error("the server registered no tools/list");
-
-  const result = (await listHandler(
-    { method: "tools/list", params: {} },
-    {
-      signal: new AbortController().signal,
-      requestId: 1,
-      sendNotification: () => {},
-      sendRequest: () => {},
-    }
-  )) as {
-    tools: Array<{
-      name: string;
-      inputSchema: {
+  const client = await connectEntityClient();
+  const { tools } = await client.listTools();
+  await client.close();
+  return new Map(
+    tools.map((tool) => [
+      tool.name,
+      tool.inputSchema as {
         properties?: Record<string, SchemaProperty>;
         required?: string[];
-      };
-    }>;
-  };
-  return new Map(result.tools.map((tool) => [tool.name, tool.inputSchema]));
+      },
+    ])
+  );
 }
 
 /** The shared wording for one field, per-tool overriding the common group. */
@@ -323,19 +299,15 @@ afterEach(() => {
 
 describe("the five tools are registered with the shared contract", () => {
   test("all five exist, and their descriptions state the loop", async () => {
-    const { McpServer } =
-      await import("@modelcontextprotocol/sdk/server/mcp.js");
-    const { registerEntityTools } = await import("@/mcp/tools/entity-tools");
     const { ENTITY_MCP_TOOL_NAMES, ENTITY_MCP_LOOP, ENTITY_MCP_DESCRIPTIONS } =
       await import("@squirrelscan/core-contracts/entity-mcp");
 
-    const server = new McpServer({ name: "test", version: "0.0.0" });
-    registerEntityTools(server);
-    const registered = (
-      server as unknown as {
-        _registeredTools: Record<string, { description?: string }>;
-      }
-    )._registeredTools;
+    const client = await connectEntityClient();
+    const { tools } = await client.listTools();
+    await client.close();
+    const registered = Object.fromEntries(
+      tools.map((tool) => [tool.name, tool])
+    );
 
     for (const name of ENTITY_MCP_TOOL_NAMES) {
       expect(registered[name]).toBeDefined();
@@ -411,6 +383,62 @@ describe("the five tools are registered with the shared contract", () => {
   });
 });
 
+// #492: the map `squirrel entities` reads back from the store dropped every
+// edge's pages, so the dangling-reference table's "Example page" column was
+// always blank, and named the crawl's origin as `site` where the audit's own map
+// names the URL the audit was run on.
+describe("a map read back from the store matches the audit's own (#492)", () => {
+  test("edges keep their pages, and site is the audited URL", async () => {
+    const { buildEntityMap } =
+      await import("@squirrelscan/audit-engine/entity-map");
+    const { loadEntityMap } = await import("@/controllers/entities");
+    const audited = "https://shop.test/blog/";
+    const page = "https://shop.test/blog/post";
+    const map = buildEntityMap(
+      [
+        {
+          url: page,
+          raw: JSON.stringify({
+            "@context": "https://schema.org",
+            "@type": "Article",
+            "@id": `${page}#article`,
+            headline: "Post",
+            publisher: { "@id": "https://shop.test/#organization" },
+          }),
+        },
+      ],
+      audited
+    );
+    const dangling = map.edges.find((edge) => edge.dangling);
+    expect(dangling?.pages).toEqual([page]);
+
+    await seed({
+      project: "shop",
+      baseUrl: "https://shop.test",
+      originalUrl: audited,
+      startedAt: 3_000_000,
+      map,
+    });
+    const loaded = await loadEntityMap();
+    if (!loaded.ok) throw new Error(loaded.error.message);
+    expect(loaded.data.map.site).toBe(audited);
+    expect(loaded.data.map.edges).toEqual(map.edges);
+  });
+
+  test("a crawl with no recorded audited URL falls back to its origin", async () => {
+    const { loadEntityMap } = await import("@/controllers/entities");
+    await seed({
+      project: "docs",
+      baseUrl: "https://docs.squirrelscan.com",
+      startedAt: 1_000_000,
+      map: await fixture("docs-after-jsonld"),
+    });
+    const loaded = await loadEntityMap();
+    if (!loaded.ok) throw new Error(loaded.error.message);
+    expect(loaded.data.map.site).toBe("https://docs.squirrelscan.com");
+  });
+});
+
 describe("against the docs snapshots as a seeded store", () => {
   let beforeRun: string;
   let afterRun: string;
@@ -440,6 +468,24 @@ describe("against the docs snapshots as a seeded store", () => {
     // site from five of its entities.
     expect(data.total as number).toBeGreaterThan(5);
     expect(data.hasMore).toBe(true);
+  });
+
+  test("list_entities keeps the summary site-wide and reports the filtered counts", async () => {
+    const all = await call("list_entities", { limit: 1 });
+    const some = await call("list_entities", {
+      limit: 1,
+      problem: ["no-id"],
+    });
+    // The same invariant as `squirrel entities -f json` and the REST
+    // endpoint: `summary` describes the audit, `filtered` what survived.
+    expect(some.data.summary).toEqual(all.data.summary);
+    const total = some.data.total as number;
+    expect(total).toBeLessThan(
+      (all.data.summary as { nodeCount: number }).nodeCount
+    );
+    expect(
+      (some.data.filtered as { nodes: number; edges: number }).nodes
+    ).toBeGreaterThanOrEqual(total);
   });
 
   test("list_entities hides page-local entities unless asked", async () => {

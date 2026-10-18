@@ -1,5 +1,11 @@
 // Type definitions for SEO audit
 
+import type { ProbeLevel } from "@squirrelscan/config";
+import type {
+  AuditLevel,
+  ResolvedAuditSettings,
+} from "@squirrelscan/core-contracts/audit-levels";
+
 export interface AuditResult {
   url: string;
   status: "pass" | "warn" | "fail";
@@ -185,12 +191,16 @@ import type {
   AuditStatus as _AS,
   CacheStats as _CST,
   CategoryScore as _CS,
+  CheckItemSource,
   ComponentOccurrence as _CO,
+  LinkSectionCounts,
   DomainStats as _DST,
   EditorSummary as _ES,
   EntityMap as _EM,
   GroupScore as _GS,
   HealthScore as _HS,
+  RefusedFetch,
+  ReportStructure as _RST,
   ReportTechnologies as _RT,
   RuleCategory as _RC,
   SiteMetadata as _SM,
@@ -203,6 +213,7 @@ export type GroupScore = _GS;
 export type HealthScore = _HS;
 export type RuleCategory = _RC;
 export type ReportTechnologies = _RT;
+export type ReportStructure = _RST;
 export type SiteMetadata = _SM;
 export type EditorSummary = _ES;
 export type EntityMap = _EM;
@@ -217,6 +228,9 @@ export interface CheckItem {
   label?: string; // Human-readable label (defaults to id if not set)
   snippet?: string; // Truncated HTML context (e.g., '<img src="..." alt="">')
   sourcePages?: string[]; // Pages where this item appears (for site-scope rules)
+  pageCount?: number; // Pages it was found on when sourcePages lists fewer (published reports)
+  sources?: CheckItemSource[]; // Per source page: links to the item and their sections (pub#837)
+  regions?: LinkSectionCounts; // Pages it sits on, per page section (pub#846)
   meta?: Record<string, unknown>; // Rule-specific metadata (e.g., { status: 404, density: 3.2 })
 }
 
@@ -306,6 +320,8 @@ export interface LinkData {
   isNofollow?: boolean;
   /** Anchor sat in a `nav`/`header`/`footer`/`aside` landmark (#109). */
   isChrome?: boolean;
+  /** Part of the page the anchor sat in (#2307). */
+  section?: import("@squirrelscan/core-contracts").LinkSection;
 }
 
 export interface ResourceSizeData {
@@ -329,6 +345,11 @@ export interface ResourceSizeData {
   vary?: string | null;
   /** Cache-hit reason if reused from a prior crawl; null on a real fetch. (#107) */
   cacheReason?: import("@squirrelscan/core-contracts").CacheHitReason | null;
+  /** Natural pixel size from the image's header; null when unknown. (#470) */
+  naturalWidth?: number | null;
+  naturalHeight?: number | null;
+  /** APNG, animated GIF/WebP or AVIF sequence; null when not settled. (#470) */
+  animated?: boolean | null;
 }
 
 export interface ScriptContentData {
@@ -455,6 +476,12 @@ export interface AuditReport {
   };
   /** Machine-readable class behind `statusReason` (#1822). */
   statusReasonCode?: AuditFailureReasonCode;
+  /**
+   * Root fetches the site refused (401/403/429, a bot wall). Mirrors the field
+   * on the engine's AuditReport; the two types are structurally different, so
+   * it has to be declared in both.
+   */
+  refusedFetches?: RefusedFetch[];
   siteChecks: CheckResult[];
   pages: PageAudit[];
   summary: {
@@ -487,6 +514,12 @@ export interface AuditReport {
    * tech-detect ran (logged-in users with cloud enabled).
    */
   technologies?: ReportTechnologies;
+  /**
+   * Page structure (#2307) — REPORT-ONLY / non-scoring. Where the audited pages' links sit and
+   * the page types the classifier gave them. Mirrors core-contracts `AuditReport`. Absent when no
+   * audited page carries a link section or a classification.
+   */
+  structure?: ReportStructure;
   /**
    * Resolved Stage-0 site profile — REPORT-ONLY / non-scoring. Present only when
    * the credited cloud `site-metadata` service resolved it (logged-in + cloud +
@@ -579,6 +612,8 @@ export interface AuditReport {
     requestedMaxPages?: number;
     pagesCrawled: number;
     capped: boolean;
+    /** The crawl time budget ended the crawl early (the page cap was not the reason). */
+    stopReason?: "time";
   };
   /**
    * Rule-result cache disclosure (#1990): how many pages replayed a previous
@@ -617,11 +652,18 @@ export interface AuditReport {
    */
   cloudMode?: "http" | "browser";
   /**
-   * Coverage mode this audit ran with (#747). "quick" makes locked cloud rules
-   * read as a coverage choice ("re-run with -C surface/full"), never a cloud
-   * outage. Stamped at publish. Mirrors core-contracts `AuditReport`.
+   * The audit level this run started from, in the crawler's words (#747).
+   * "quick" makes locked cloud rules read as a level choice ("re-run at the
+   * surface or full level"), never a cloud outage. Stamped at publish. Mirrors
+   * core-contracts `AuditReport`.
    */
   coverageMode?: CoverageMode;
+  /**
+   * The audit level and the settings it resolved to: the level (or `custom`),
+   * the level it started from, what changed, and every value. Mirrors
+   * core-contracts `AuditReport`. REPORT-ONLY.
+   */
+  auditLevel?: ResolvedAuditSettings;
   /**
    * Render-block recovery summary (#512): pages whose render was blocked and
    * recovered via a non-browser fallback fetch. Mirrors core-contracts
@@ -630,7 +672,9 @@ export interface AuditReport {
   fetchFallbacks?: { recovered: number };
 }
 
-export type CoverageMode = "quick" | "surface" | "full";
+/** The crawler's name for an audit level (see core-contracts audit-levels). */
+export type CoverageMode = AuditLevel;
+export type { ProbeLevel };
 
 export interface AuditOptions {
   url: string;
@@ -661,7 +705,13 @@ export interface AuditOptions {
   verbose?: boolean;
   debug?: boolean;
   projectName?: string; // custom project name (for local addresses)
-  coverageMode?: CoverageMode; // quick, surface, or full
+  coverageMode?: CoverageMode; // the crawl strategy, as the crawler names it
+  /**
+   * The audit level the command resolved, with every override applied. The
+   * controller reads its cloud checks setting and stamps it on the report.
+   * Absent for callers that predate audit levels: the coverage mode decides.
+   */
+  auditLevel?: ResolvedAuditSettings;
   // Crawl parallelism overrides (#1068): global worker pool + per-host cap.
   // Positive integers; override [crawler] concurrency / per_host_concurrency
   // and suppress the loopback fast path.
@@ -681,6 +731,14 @@ export interface AuditOptions {
   // to config.rules.disable.
   ruleInclude?: string[];
   ruleExclude?: string[];
+  // --disable-discovery-probes (#409): overrides [crawler]
+  // disable_discovery_probes for this run, either way (`=false` turns the
+  // probes back on). Undefined → config decides.
+  disableDiscoveryProbes?: boolean;
+  // Probing intensity, resolved by the command (resolveProbeIntensity): the
+  // level and the wall-clock cap for ALL probing rules together. The controller
+  // turns it into the shared `ctx.probe` budget. Undefined → passive.
+  probe?: { level: ProbeLevel; budgetMs: number };
 }
 
 // ============================================
@@ -729,39 +787,6 @@ export interface CWVHints {
   deferScripts: number;
   blockingScripts: number;
   totalScripts: number;
-}
-
-// ============================================
-// ENHANCED LINK TYPES (Phase 4)
-// ============================================
-
-export interface EnhancedLinkData extends LinkData {
-  rel?: string[];
-  isNofollow: boolean;
-  isSponsored: boolean;
-  isUgc: boolean;
-  hasNoopener: boolean;
-  target?: string;
-  anchorType: "text" | "image" | "empty" | "generic";
-}
-
-export interface InternalLinkAnalysis {
-  totalInternalLinks: number;
-  totalExternalLinks: number;
-  orphanPages: string[];
-  deepPages: { url: string; depth: number }[]; // > 3 clicks
-  crawlDepth: Map<string, number>;
-  linkEquity: Map<string, number>; // incoming link count
-  pagesWithFewLinks: { url: string; count: number }[];
-  pagesWithManyLinks: { url: string; count: number }[];
-}
-
-export interface AnchorTextAnalysis {
-  genericAnchors: { url: string; text: string }[];
-  emptyAnchors: string[];
-  imageOnlyLinks: string[];
-  keywordRichAnchors: { url: string; text: string }[];
-  anchorDistribution: Map<string, number>;
 }
 
 // ============================================

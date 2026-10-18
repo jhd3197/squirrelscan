@@ -2,12 +2,16 @@
 // citty doesn't auto-generate completions, so completion.ts is a manual sync —
 // this test fails when a flag or format list drifts.
 
+import { PROBE_LEVELS } from "@squirrelscan/config";
 import { describe, expect, test } from "bun:test";
 
+import { AUDIT_LEVELS } from "@/cli/audit-level";
 import { audit } from "@/cli/commands/audit";
 import { credits } from "@/cli/commands/credits";
+import { feedback } from "@/cli/commands/feedback";
 import { keys } from "@/cli/commands/keys";
 import { report } from "@/cli/commands/report";
+import { self } from "@/cli/commands/self";
 import { skills } from "@/cli/commands/skills";
 import { OUTPUT_FORMATS } from "@/constants";
 import { generateCompletion, type Shell } from "@/self/completion";
@@ -44,6 +48,7 @@ function commandFlags(cmd: { args?: unknown }): {
 const auditDef = commandFlags(audit);
 const reportDef = commandFlags(report);
 const creditsDef = commandFlags(credits);
+const feedbackDef = commandFlags(feedback);
 
 // Flags completion may offer beyond the def: citty's built-in --help, and
 // auto-negation of boolean args (--no-incremental).
@@ -52,6 +57,7 @@ const ALLOWED_EXTRAS: Record<string, string[]> = {
   report: ["help"],
   // citty auto-negates booleans, and bash/zsh offer --help.
   credits: ["help", "no-json", "no-upgrade"],
+  feedback: ["help", "no-json"],
 };
 
 const shells: Shell[] = ["bash", "zsh", "fish"];
@@ -70,8 +76,11 @@ function script(shell: Shell): string {
 // flag it never offered. Move the entry, do not widen it.
 const BASH_BLOCK_END: Record<string, string> = {
   audit: "entities)",
+  crawl: "credits)",
   report: "feedback)",
   credits: "analyze)",
+  // The last command arm; the default arm follows it.
+  feedback: "    *)",
 };
 
 /** Slice out the completion block for one command in a shell script. */
@@ -201,6 +210,40 @@ describe.each(shells)("%s completion", (shell) => {
     });
   });
 
+  test("audit and crawl --level / -C complete the audit levels", () => {
+    const levels = AUDIT_LEVELS.join(" ");
+    for (const command of ["audit", "crawl"]) {
+      const block = commandBlock(shell, text, command);
+      if (shell === "fish") {
+        expect(block).toContain(`-l level -a "${levels}"`);
+        expect(block).toContain(`-s C -l coverage -a "${levels}"`);
+      } else if (shell === "zsh") {
+        expect(block).toContain(`--level[Audit level]:level:(${levels})`);
+        expect(block).toContain(`{-C,--coverage}'[Audit level`);
+      } else {
+        expect(block).toContain(
+          `--level|--coverage|-C)\n          COMPREPLY=( $(compgen -W "${levels}"`
+        );
+      }
+    }
+  });
+
+  test("audit --probe completes the three levels from PROBE_LEVELS", () => {
+    const block = commandBlock(shell, text, "audit");
+    const levels = PROBE_LEVELS.join(" ");
+    if (shell === "fish") {
+      expect(block).toContain(`-s P -l probe -a "${levels}"`);
+    } else if (shell === "zsh") {
+      expect(block).toContain(
+        `{-P,--probe}'[Probing intensity]:level:(${levels})`
+      );
+    } else {
+      expect(block).toContain(
+        `--probe|-P)\n          COMPREPLY=( $(compgen -W "${levels}"`
+      );
+    }
+  });
+
   // credits had NO bash or zsh arm at all before #1604 — `squirrel credits
   // --<TAB>` fell through to the global default and offered only --config-file,
   // so --json had been invisible in two of three shells since it shipped.
@@ -218,6 +261,42 @@ describe.each(shells)("%s completion", (shell) => {
       const allowed = new Set([
         ...creditsDef.flags,
         ...ALLOWED_EXTRAS.credits!,
+      ]);
+      for (const offered of longFlagsIn(shell, block)) {
+        expect(allowed).toContain(offered);
+      }
+    });
+  });
+
+  // #370: the agent flags (--message, --json, ...) are how a headless agent
+  // finds the non-interactive path at all.
+  describe("feedback", () => {
+    const block = commandBlock(shell, text, "feedback");
+
+    test("every citty flag is offered", () => {
+      expect(feedbackDef.flags).toContain("message");
+      for (const flag of feedbackDef.flags) {
+        expectOffersFlag(shell, block, flag);
+      }
+    });
+
+    test("every citty alias is offered", () => {
+      expect(feedbackDef.aliases).toEqual([{ short: "m", long: "message" }]);
+      for (const { short, long } of feedbackDef.aliases) {
+        if (shell === "fish") {
+          expect(block).toContain(`-s ${short} -l ${long}`);
+        } else if (shell === "zsh") {
+          expect(block).toContain(`{-${short},--${long}}`);
+        } else {
+          expect(block).toContain(` -${short} `);
+        }
+      }
+    });
+
+    test("every offered flag exists on the citty def", () => {
+      const allowed = new Set([
+        ...feedbackDef.flags,
+        ...ALLOWED_EXTRAS.feedback!,
       ]);
       for (const offered of longFlagsIn(shell, block)) {
         expect(allowed).toContain(offered);
@@ -258,7 +337,7 @@ describe.each(shells)("%s completion", (shell) => {
       { meta?: { description?: string } }
     >;
     const names = Object.keys(subCommands);
-    expect(names).toEqual(["install", "update"]);
+    expect(names).toEqual(["install", "update", "status", "uninstall"]);
     const expectedPairs = names.map((name) => {
       const description = subCommands[name]!.meta?.description;
       expect(description).toBeTruthy();
@@ -291,5 +370,59 @@ describe.each(shells)("%s completion", (shell) => {
       ].map((m) => [m[1], m[2]] as const);
       expect(pairs).toEqual(expectedPairs);
     }
+  });
+
+  // #23: `self uninstall` is what `brew uninstall --cask squirrel` calls, with
+  // --yes. A completion that still offered only the old --force would hide it.
+  describe("self uninstall", () => {
+    const selfSubCommands = self.subCommands as Record<
+      string,
+      { args?: unknown }
+    >;
+    const def = commandFlags(selfSubCommands.uninstall!);
+
+    function block(): string {
+      if (shell === "fish") {
+        return text
+          .split("\n")
+          .filter((l) =>
+            l.includes(
+              "__fish_seen_subcommand_from self; and __fish_seen_subcommand_from uninstall"
+            )
+          )
+          .join("\n");
+      }
+      // The self arm comes before the skills arm, so the first `uninstall)`
+      // is `self uninstall`.
+      const start = text.indexOf("uninstall)");
+      expect(start).toBeGreaterThan(-1);
+      return text.slice(start, text.indexOf(";;", start));
+    }
+
+    test("is listed as a self subcommand", () => {
+      expect(Object.keys(selfSubCommands)).toContain("uninstall");
+      if (shell === "bash") {
+        expect(text).toMatch(/self_commands="[^"]*\buninstall\b/);
+      } else if (shell === "zsh") {
+        expect(text).toContain("'uninstall:Remove squirrel from the system'");
+      } else {
+        expect(text).toMatch(
+          /__fish_seen_subcommand_from self; and not [^\n]*-a uninstall /
+        );
+      }
+    });
+
+    test("every citty flag is offered, and nothing else", () => {
+      expect(def.flags.sort()).toEqual(["force", "purge", "yes"]);
+      const offered = longFlagsIn(shell, block());
+      expect(offered.sort()).toEqual(def.flags.sort());
+    });
+
+    test("skills uninstall does not inherit its flags in fish", () => {
+      if (shell !== "fish") return;
+      expect(text).not.toMatch(
+        /-n "__fish_seen_subcommand_from uninstall" -l (purge|yes|force)/
+      );
+    });
   });
 });

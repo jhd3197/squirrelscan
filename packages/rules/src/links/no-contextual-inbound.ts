@@ -19,11 +19,27 @@
 //     (`minInboundLinks`, the same default 2) — i.e. exactly when orphan-pages
 //     stays silent. Keep the two thresholds in sync when tuning.
 //   * THE HOMEPAGE. Reached from every page's header/footer by design; it has no
-//     contextual-equity problem. Skipped, exactly as orphan-pages skips it.
+//     contextual-equity problem. Skipped, exactly as orphan-pages skips it, and
+//     so is the page the crawl started on (pub#796), the front door a root
+//     redirect leads to.
 //   * A CHROME-ONLY CRAWL. Not special-cased: if a whole site links only through
 //     chrome, every one of its pages genuinely lacks contextual support. The
 //     `value` sample is capped so the finding stays readable; `details.total`
 //     and `items` carry the full picture, exactly as orphan-pages does.
+//   * A CAPPED CRAWL. The evidence here is the ABSENCE of a link, and a crawl
+//     that stopped at its page cap has not seen every page that could carry
+//     one: the contextual link may sit on page 11 of a 10-page run. So when
+//     `crawlLimits` shows the cap was hit, the rule skips rather than guess.
+//     Same `pagesCrawled >= maxPages` reading sitemap-coverage and
+//     template-discontinuity use; undefined limits are treated as not capped.
+//   * WHERE THE LINKS ARE (#2307). When the inbound links carry a `section`, each item says which
+//     parts of the page they sit in ("linked only from the footer and the navigation") and
+//     carries the counts in `meta.sections`. "Only" is claimed only when every counted inbound
+//     link had a section; otherwise the label says "from". `isChrome` stays the decision: a link
+//     whose section is `content` but whose anchor has a footer ancestor (a post's own footer) is
+//     chrome here, and the label counts it apart as a template link inside the page content
+//     instead of naming the content as a place the page is linked from. A crawl without sections
+//     keeps the bare `{ id }` items.
 //   * OLD CRAWLS. `isChrome` is optional on `LinkData` (crawls stored before
 //     #109 omit it). `undefined` counts as contextual on BOTH paths, so an old DB
 //     produces contextual == raw and this rule simply passes — never a site-wide
@@ -43,6 +59,8 @@ import { matchesExcludePattern } from "@squirrelscan/utils";
 import { getPathname, normalizeUrl } from "@squirrelscan/utils";
 
 import { logger } from "../logger";
+import { frontDoorTest } from "../shared/front-door";
+import { chromeSectionPhrase, countSection, type SectionCounts } from "./link-section-label";
 
 const SKIP_CHECK: CheckResult = {
   name: "no-contextual-inbound",
@@ -59,8 +77,34 @@ interface InboundCounts {
   contextual: number;
 }
 
-// Shared result builder — both paths feed it the SAME `pages` list.
-function buildCheck(pages: string[]): CheckResult {
+/**
+ * Where the inbound links to one flagged page sit (#2307). `complete` is true when every counted
+ * inbound link carried a section, which is what lets the label say "only" about them.
+ */
+interface InboundSections {
+  counts: SectionCounts;
+  complete: boolean;
+}
+
+/** The sections found for a page, or undefined when none of its inbound links carried one. */
+function inboundSections(
+  counts: SectionCounts | undefined,
+  totalInbound: number
+): InboundSections | undefined {
+  if (!counts) return undefined;
+  let placed = 0;
+  for (const n of Object.values(counts)) placed += n ?? 0;
+  if (placed === 0) return undefined;
+  return { counts, complete: placed >= totalInbound };
+}
+
+// Shared result builder — both paths feed it the SAME `pages` list and the same `sectionsFor`
+// answers, so the item is byte-identical whichever path counted the links. Without section data
+// (a crawl stored before link sections existed) every item stays a bare `{ id }`.
+function buildCheck(
+  pages: string[],
+  sectionsFor?: (url: string) => InboundSections | undefined
+): CheckResult {
   if (pages.length > 0) {
     const pathList = pages
       .slice(0, MAX_SAMPLE)
@@ -74,7 +118,15 @@ function buildCheck(pages: string[]): CheckResult {
       name: "no-contextual-inbound",
       status: "warn",
       message: `${pages.length} page(s) are linked only from sitewide chrome`,
-      items: pages.map((url) => ({ id: url })),
+      items: pages.map((url) => {
+        const placed = sectionsFor?.(url);
+        if (!placed) return { id: url };
+        return {
+          id: url,
+          label: `${url}, ${chromeSectionPhrase(placed.counts, placed.complete)}`,
+          meta: { sections: placed.counts },
+        };
+      }),
       details: { total: pages.length },
       value: pathList + suffix,
     };
@@ -93,15 +145,14 @@ function collectChromeOnlyPages(
   entries: Iterable<[string, InboundCounts]>,
   minInboundLinks: number,
   excludePatterns: string[],
-  baseUrl: string
+  baseUrl: string,
+  entryUrls: readonly string[]
 ): string[] {
-  const normalizedBase = normalizeUrl(baseUrl);
+  const isFrontDoor = frontDoorTest(baseUrl, entryUrls);
   const flagged: string[] = [];
   for (const [url, counts] of entries) {
-    const normalizedUrl = normalizeUrl(url);
-
-    // Skip homepage — same test orphan-pages uses.
-    const isHomepage = normalizedUrl === normalizedBase || getPathname(url) === "/";
+    // Skip the front door: the same test orphan-pages uses.
+    const isHomepage = isFrontDoor(url);
     const isExcluded = matchesExcludePattern(url, excludePatterns);
 
     if (isHomepage || isExcluded) {
@@ -155,6 +206,18 @@ export const noContextualInboundRule: Rule = {
     const minInboundLinks = options.minInboundLinks as number;
     const excludePatterns = options.excludePatterns as string[];
 
+    // A capped crawl cannot prove a link is absent: skip before counting.
+    const limits = ctx.site?.crawlLimits;
+    if (limits && limits.pagesCrawled >= limits.maxPages) {
+      checks.push({
+        name: "no-contextual-inbound",
+        status: "skipped",
+        message: `Crawl stopped at its ${limits.maxPages}-page cap, so a contextual link may sit on a page not crawled`,
+        skipReason: "Crawl capped before the frontier was exhausted",
+      });
+      return { checks };
+    }
+
     // Streaming path — read the pre-materialized counts. Both maps are built by
     // one pass over the same links with the same key/order, so zipping them by
     // key is safe.
@@ -169,14 +232,19 @@ export const noContextualInboundRule: Rule = {
       for (const [url, count] of all) {
         entries.push([url, { all: count, contextual: contextual.get(url) ?? 0 }]);
       }
+      // #2307: where the counted inbound links sit. Optional on the query: one without section
+      // data leaves the items bare, exactly as before.
+      const sections = ctx.siteQuery.inboundSectionCounts?.();
       checks.push(
         buildCheck(
           collectChromeOnlyPages(
             entries,
             minInboundLinks,
             excludePatterns,
-            ctx.site?.baseUrl || ""
-          )
+            ctx.site?.baseUrl || "",
+            ctx.site?.entryUrls ?? []
+          ),
+          sections ? (url) => inboundSections(sections.get(url), all.get(url) ?? 0) : undefined
         )
       );
       return { checks };
@@ -191,6 +259,8 @@ export const noContextualInboundRule: Rule = {
     }
 
     const counts = new Map<string, InboundCounts>();
+    // #2307: the same counted links, per link section, under the same normalized key.
+    const sections = new Map<string, SectionCounts>();
     const normalizedCache = new Map<string, string>();
 
     // Phase 1: initialize every crawled page at zero and cache normalized URLs.
@@ -208,10 +278,16 @@ export const noContextualInboundRule: Rule = {
         if (!isGraphLink(link)) continue;
         try {
           const linkUrl = new URL(link.url, page.url);
-          const current = counts.get(normalizeUrl(linkUrl.href));
+          const target = normalizeUrl(linkUrl.href);
+          const current = counts.get(target);
           if (current !== undefined) {
             current.all += 1;
             if (!link.isChrome) current.contextual += 1;
+            if (link.section && link.section !== "unknown") {
+              let placed = sections.get(target);
+              if (!placed) sections.set(target, (placed = {}));
+              countSection(placed, link.section);
+            }
           }
         } catch {
           invalidUrlCount++;
@@ -239,10 +315,18 @@ export const noContextualInboundRule: Rule = {
       ),
       minInboundLinks,
       excludePatterns,
-      ctx.site?.baseUrl || ""
+      ctx.site?.baseUrl || "",
+      ctx.site?.entryUrls ?? []
     );
 
-    checks.push(buildCheck(flagged));
+    checks.push(
+      buildCheck(flagged, (url) => {
+        const key = normalizedCache.get(url);
+        return key === undefined
+          ? undefined
+          : inboundSections(sections.get(key), counts.get(key)?.all ?? 0);
+      })
+    );
 
     return { checks };
   },

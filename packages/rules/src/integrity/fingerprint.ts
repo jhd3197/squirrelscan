@@ -7,6 +7,8 @@
 
 import type { ParsedPage } from "../types";
 
+import { querySelectorAllOutsideNoscript } from "@squirrelscan/utils";
+
 export interface PageFingerprint {
   /** Distinct external asset hosts referenced by <link>/<script>/<img>. */
   assetHosts: Set<string>;
@@ -40,7 +42,23 @@ export interface PageFingerprint {
   stylesheetHrefs: Set<string>;
 }
 
-const CSS_VAR_RE = /--[a-z0-9-]+\s*:/gi;
+// A custom property declaration is a run of name characters that starts with
+// `--` somewhere inside it and ends at a `:`. The run is found by anchoring on a
+// non-name character before it, so each run is scanned once (an earlier version
+// let every `--` inside `--0--0--0…` start its own scan, which was quadratic),
+// and the `--` is then located with indexOf. Linear in the input.
+const CSS_NAME_RUN_RE = /(?<![a-z0-9-])[a-z0-9-]+\s*:/gi;
+
+/** The custom property names (`--brand-color`, lowercased) declared in a CSS string. */
+export function cssVarNames(css: string): string[] {
+  const names: string[] = [];
+  for (const m of css.matchAll(CSS_NAME_RUN_RE)) {
+    const run = m[0].replace(/\s*:$/, "");
+    const at = run.indexOf("--");
+    if (at >= 0 && run.length - at >= 3) names.push(run.slice(at).toLowerCase());
+  }
+  return names;
+}
 
 /**
  * DOM walks performed by `fingerprintPage` in this process.
@@ -95,17 +113,22 @@ export function fingerprintPage(
     if (kind === "code") codeHosts.add(host);
   };
 
-  for (const link of doc.querySelectorAll("link[href]")) {
+  // The asset graph is what the page loads, so <noscript> content is not in
+  // it (#434). It also keeps this key sound for the template-scoped rules that
+  // read the same elements, security/sri and security/third-party-cookies:
+  // they skip <noscript> content now, so a key that still counted it could
+  // cluster a page whose tracker only sits in a fallback with one that loads it.
+  for (const link of querySelectorAllOutsideNoscript(doc, "link[href]")) {
     const rel = (link.getAttribute("rel") ?? "").toLowerCase();
     const href = link.getAttribute("href");
     const isStylesheet = rel.includes("stylesheet");
     addHost(href, isStylesheet ? "code" : "link");
     if (isStylesheet && href) stylesheetHrefs.add(href);
   }
-  for (const s of doc.querySelectorAll("script[src]")) {
+  for (const s of querySelectorAllOutsideNoscript(doc, "script[src]")) {
     addHost(s.getAttribute("src"), "code");
   }
-  for (const img of doc.querySelectorAll("img[src]")) {
+  for (const img of querySelectorAllOutsideNoscript(doc, "img[src]")) {
     addHost(img.getAttribute("src"), "resource");
   }
 
@@ -118,18 +141,14 @@ export function fingerprintPage(
   }
 
   const cssVars = new Set<string>();
-  for (const style of doc.querySelectorAll("style")) {
+  for (const style of querySelectorAllOutsideNoscript(doc, "style")) {
     const css = style.textContent ?? "";
-    for (const m of css.matchAll(CSS_VAR_RE)) {
-      cssVars.add(m[0].replace(/\s*:$/, "").toLowerCase());
-    }
+    for (const name of cssVarNames(css)) cssVars.add(name);
   }
   // Inline style on <html>/<body> sometimes carries theme tokens too.
   for (const el of [doc.documentElement, body]) {
     const inline = el?.getAttribute?.("style") ?? "";
-    for (const m of inline.matchAll(CSS_VAR_RE)) {
-      cssVars.add(m[0].replace(/\s*:$/, "").toLowerCase());
-    }
+    for (const name of cssVarNames(inline)) cssVars.add(name);
   }
 
   return {

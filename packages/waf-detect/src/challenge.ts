@@ -2,30 +2,25 @@ import type { WafChallengeResult } from "./types";
 import {
   CHALLENGE_200_SIGNATURES,
   CHALLENGE_INTERSTITIAL_MAX_TEXT,
-  CHALLENGE_INTERSTITIAL_PATTERNS,
+  CHALLENGE_MARKUP_SIGNATURES,
+  CHALLENGE_TEXT_PATTERNS,
   WAF_CHALLENGE_STATUS_CODES,
   getWafProviderName,
 } from "./providers";
 import { detectWaf } from "./detect";
+import { signatureViews, tagEnd } from "./views";
 
-function hasChallengeInterstitialMarkers(html: string): boolean {
-  const sample = html.slice(0, 10240);
-  return CHALLENGE_INTERSTITIAL_PATTERNS.some((pattern) => pattern.test(sample));
-}
-
-function tagEnd(html: string, start: number): number {
-  let quote: '"' | "'" | null = null;
-  for (let i = start; i < html.length; i++) {
-    const char = html[i];
-    if (quote) {
-      if (char === quote) quote = null;
-    } else if (char === '"' || char === "'") {
-      quote = char;
-    } else if (char === ">") {
-      return i;
-    }
-  }
-  return html.length - 1;
+/**
+ * Which kind of interstitial marker the page's opening carries, if any. Markup
+ * is checked first on purpose: a page with both is held to the markup rule.
+ * Each marker is read where it acts, so a page quoting one is not a challenge
+ * (#693).
+ */
+function challengeMarkers(html: string): "markup" | "text" | null {
+  const views = signatureViews(html.slice(0, 10240));
+  if (CHALLENGE_MARKUP_SIGNATURES.some(({ view, pattern }) => pattern.test(views[view]))) return "markup";
+  if (CHALLENGE_TEXT_PATTERNS.some((pattern) => pattern.test(views.text))) return "text";
+  return null;
 }
 
 function skipElement(lower: string, html: string, tag: string, start: number): number {
@@ -103,7 +98,8 @@ function visibleTextLength(html: string): number {
  * challenge status to avoid dropping real content.
  */
 function detectFingerprintedChallenge(html: string, status: number): WafChallengeResult {
-  const sample = html.slice(0, 20480);
+  // Every marker is a host or a script object, read where it acts (#693).
+  const sample = signatureViews(html.slice(0, 20480)).markup;
   const challengeStatus = WAF_CHALLENGE_STATUS_CODES.has(status);
   let tinyBody: boolean | null = null; // computed lazily, only once a marker matches
   for (const sig of CHALLENGE_200_SIGNATURES) {
@@ -149,10 +145,14 @@ export function detectWafChallengePage(page: {
     return { detected: false, provider: null };
   }
 
-  if (hasChallengeInterstitialMarkers(page.html)) {
+  const markers = challengeMarkers(page.html);
+  if (markers) {
     const statusSuggestsChallenge = WAF_CHALLENGE_STATUS_CODES.has(page.status);
     const wafResult = detectWaf(buildWafHeaders(page), page.html.slice(0, 10240));
-    if (statusSuggestsChallenge || wafResult.detected) {
+    // Challenge text alone is something any page can say, so on a 200 it takes
+    // challenge markup to call the page a challenge: a protected site's own
+    // pages carry its WAF's headers too (#666).
+    if (statusSuggestsChallenge || (markers === "markup" && wafResult.detected)) {
       return {
         detected: true,
         provider: wafResult.provider ? getWafProviderName(wafResult.provider) : null,

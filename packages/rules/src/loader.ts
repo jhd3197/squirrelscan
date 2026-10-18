@@ -2,6 +2,8 @@
 
 import type { Rule } from "./types";
 
+import { normalizeCategoryCode } from "./categories";
+
 import { rules as a11yRules } from "./a11y";
 import { rules as adblockRules } from "./adblock";
 import { rules as aiRules } from "./ai";
@@ -21,6 +23,7 @@ import { rules as linksRules } from "./links";
 import { rules as localRules } from "./local";
 import { rules as mobileRules } from "./mobile";
 import { rules as perfRules } from "./performance";
+import { rules as reliabilityRules } from "./reliability";
 import { rules as schemaRules } from "./schema";
 import { rules as securityRules } from "./security";
 import { rules as socialRules } from "./social";
@@ -46,6 +49,7 @@ const builtInNamespaces: RuleNamespace[] = [
   { name: "ai", rules: aiRules },
   { name: "ax", rules: axRules },
   { name: "perf", rules: perfRules },
+  { name: "reliability", rules: reliabilityRules },
   { name: "social", rules: socialRules },
   { name: "crawl", rules: crawlRules },
   { name: "url", rules: urlRules },
@@ -85,6 +89,19 @@ export function loadAllRules(options: LoaderOptions = {}): Map<string, Rule> {
   return rules;
 }
 
+/**
+ * Every rule a `[rule_options]` table can name, disabled ones included: a
+ * disabled rule's options can still be read outside the runner (the CLI sends
+ * the `gaps/*` options to the cloud), so config checks must know it (pub#510).
+ */
+export function loadKnownRules(options: LoaderOptions = {}): Map<string, Rule> {
+  const rules = new Map<string, Rule>();
+  for (const ns of getRuleNamespaces(options)) {
+    for (const rule of ns.rules) rules.set(rule.meta.id, rule);
+  }
+  return rules;
+}
+
 // Get all rule IDs
 export function getAllRuleIds(options: LoaderOptions = {}): string[] {
   const ids: string[] = [];
@@ -115,4 +132,24 @@ export function getNamespaces(options: LoaderOptions = {}): RuleNamespace[] {
     ...ns,
     rules: ns.rules.filter((r) => !r.meta.disabled),
   }));
+}
+
+/**
+ * Rules whose category is not their id prefix, read from the registry (pub#836):
+ * `links/broken-links` is a Reliability rule, but a pattern matches on the id, so
+ * `links/*` selects it and `reliability/*` does not. Anything that turns "this
+ * category" into rules by prefix (the CLI's `--rule-include reliability`, the
+ * `--fail-on score:reliability` check) has to add these. Legacy prefixes that name
+ * the same category after a rename (`adblock` and `blocking`) are not mismatches.
+ */
+export function getRulesOutsideTheirPrefixCategory(
+  options: LoaderOptions = {}
+): Array<{ id: string; category: string }> {
+  const out: Array<{ id: string; category: string }> = [];
+  for (const rule of loadAllRules(options).values()) {
+    const prefix = normalizeCategoryCode(rule.meta.id.split("/")[0] ?? "");
+    const category = normalizeCategoryCode(rule.meta.category);
+    if (prefix !== category) out.push({ id: rule.meta.id, category });
+  }
+  return out;
 }

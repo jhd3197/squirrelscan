@@ -20,9 +20,6 @@ Content rules read the words a visitor actually sees. Some of them catch pipelin
   <Card title="Freshness signals: the dates a page publishes about itself" icon="circle-info" href="/rules/content/freshness">
     squirrel inventories the date signals on a page: the Last-Modified header, schema dates, time elements and Open Graph article dates.
   </Card>
-  <Card title="LLM content quality score: what it measures" icon="circle-info" href="/rules/content/quality">
-    An optional language-model read of the page copy, scored 0 to 100 with written feedback. Off by default and needs an OpenRouter key.
-  </Card>
   <Card title="Visible date disagrees with schema: which date is wrong" icon="triangle-exclamation" href="/rules/content/date-agreement">
     A page states its date in several places and presence checks pass as soon as one exists. squirrel compares the byline, the schema and the URL year.
   </Card>
@@ -53,8 +50,17 @@ Content rules read the words a visitor actually sees. Some of them catch pipelin
   <Card title="Wrong Content-Type: header and extension disagree" icon="triangle-exclamation" href="/rules/content/mime-type">
     A stylesheet served as text/html is refused by the browser under nosniff. squirrel compares the response type against the URL extension.
   </Card>
+  <Card title="Fake phone numbers and example.com emails in production" icon="triangle-exclamation" href="/rules/content/placeholder-contact">
+    A 555-01xx phone number or an address at example.com means a theme's contact block shipped unedited. squirrel flags template-default contact details and fails them on contact and checkout pages.
+  </Card>
   <Card title="Lorem ipsum in production: placeholders and leftovers" icon="triangle-exclamation" href="/rules/content/placeholder-text">
     Filler copy, unrendered template syntax and a visible undefined all mean something shipped unfinished. squirrel names the family and shows a sample.
+  </Card>
+  <Card title="Misspellings and doubled words in English copy" icon="triangle-exclamation" href="/rules/content/common-misspellings">
+    A known typo in a title, a heading or a price table, and a doubled "the the", are the first things a visitor notices. squirrel names the correction and the pages it appears on.
+  </Card>
+  <Card title="Placeholder images and camera-default alt text" icon="triangle-exclamation" href="/rules/content/placeholder-media">
+    A via.placeholder.com image, a 1x1 stand-in or an alt of DSC_0001 means the media was never finished. squirrel names the image and why it was flagged.
   </Card>
   <Card title="Flesch reading ease: measuring how hard a page is to read" icon="circle-info" href="/rules/content/reading-level">
     squirrel computes a Flesch reading ease score and a Flesch-Kincaid grade level from the page text, and reports both without judging them.

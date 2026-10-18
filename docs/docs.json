@@ -76,10 +76,24 @@
             ]
           },
           {
+            "group": "Entity map",
+            "icon": "network",
+            "pages": [
+              "guides/entity-map/index",
+              "guides/entity-map/cli",
+              "guides/entity-map/cloud",
+              "guides/entity-map/mcp",
+              "guides/entity-map/format",
+              "guides/entity-map/fixing"
+            ]
+          },
+          {
             "group": "Concepts",
             "pages": [
               "projects",
               "crawl",
+              "guides/audit-levels",
+              "guides/link-checking",
               "reports",
               "guides/failed-audits",
               "guides/badges",
@@ -118,7 +132,8 @@
                 ]
               },
               "developers/mcp",
-              "developers/mcp-clients"
+              "developers/mcp-clients",
+              "developers/channel"
             ]
           },
           {
@@ -228,6 +243,7 @@
                   "rules/links/external-links",
                   "rules/links/invalid-links",
                   "rules/links/broken-links",
+                  "rules/links/broken-anchors",
                   "rules/links/broken-external-links",
                   "rules/links/dead-links",
                   "rules/links/redirect-chains",
@@ -257,7 +273,10 @@
                   "rules/content/author-info",
                   "rules/content/meta-in-body",
                   "rules/content/mime-type",
+                  "rules/content/placeholder-contact",
                   "rules/content/placeholder-text",
+                  "rules/content/placeholder-media",
+                  "rules/content/common-misspellings",
                   "rules/content/article-links",
                   "rules/content/quality",
                   "rules/content/stale-copyright",
@@ -285,6 +304,7 @@
                   "rules/schema/review",
                   "rules/schema/rating-scope",
                   "rules/schema/coverage-outlier",
+                  "rules/schema/expected-type",
                   "rules/schema/entity-identity",
                   "rules/schema/entity-split-identity",
                   "rules/schema/entity-dangling",
@@ -407,8 +427,10 @@
                   "rules/mobile/viewport-zoom",
                   "rules/mobile/tap-targets",
                   "rules/mobile/font-size",
+                  "rules/mobile/input-zoom",
                   "rules/mobile/horizontal-scroll",
-                  "rules/mobile/interstitials"
+                  "rules/mobile/interstitials",
+                  "rules/mobile/web-app-manifest"
                 ]
               },
               {
@@ -527,7 +549,15 @@
               "rules/perf/legacy-js",
               "rules/perf/duplicate-js",
               "rules/perf/critical-request-chains",
-              "rules/perf/browser-required"
+              "rules/perf/browser-required",
+              {
+                "group": "Reliability",
+                "pages": [
+                  "rules/reliability/index",
+                  "rules/reliability/broken-resources",
+                  "rules/reliability/broken-forms"
+                ]
+              }
             ]
           },
           {
@@ -558,6 +588,7 @@
                   "rules/security/http-to-https",
                   "rules/security/hsts",
                   "rules/security/csp",
+                  "rules/security/csp-blocks-own-resources",
                   "rules/security/x-frame-options",
                   "rules/security/x-content-type",
                   "rules/security/referrer-policy",
@@ -567,9 +598,14 @@
                   "rules/security/form-captcha",
                   "rules/security/new-tab",
                   "rules/security/leaked-secrets",
+                  "rules/security/token-storage",
+                  "rules/security/graphql-introspection",
+                  "rules/security/graphql-get-mutations",
                   "rules/security/third-party-cookies",
                   "rules/security/sri",
-                  "rules/security/cookie-flags"
+                  "rules/security/cookie-flags",
+                  "rules/security/security-txt",
+                  "rules/security/version-disclosure"
                 ]
               },
               {
@@ -627,20 +663,10 @@
         "icon": "terminal",
         "groups": [
           {
-            "group": "Entity map",
-            "pages": [
-              "entity-map/index",
-              "entity-map/cli",
-              "entity-map/cloud",
-              "entity-map/mcp",
-              "entity-map/format",
-              "entity-map/fixing"
-            ]
-          },
-          {
             "group": "CLI Reference",
             "pages": [
               "cli/index",
+              "cli/setup",
               "cli/audit",
               "cli/crawl",
               "cli/analyze",
@@ -653,6 +679,7 @@
               "cli/keys",
               "cli/credits",
               "cli/mcp",
+              "cli/channel",
               "cli/self",
               "cli/skills",
               "cli/debug"
@@ -666,9 +693,11 @@
               "configuration/crawler",
               "configuration/rules",
               "configuration/external-links",
+              "configuration/classifier",
               "configuration/output",
               "configuration/storage",
               "configuration/cloud",
+              "configuration/security",
               "configuration/rule-options",
               "configuration/examples"
             ]
@@ -764,6 +793,16 @@
     {
       "source": "/agents",
       "destination": "/developers/agents",
+      "permanent": true
+    },
+    {
+      "source": "/entity-map",
+      "destination": "/guides/entity-map",
+      "permanent": true
+    },
+    {
+      "source": "/entity-map/:slug*",
+      "destination": "/guides/entity-map/:slug*",
       "permanent": true
     }
   ]

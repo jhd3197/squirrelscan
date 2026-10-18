@@ -20,6 +20,7 @@ import { packSiteResourceOccurrences } from "@squirrelscan/core-contracts/site-r
 import { resolutionUrlHash } from "@squirrelscan/core-contracts/resolution";
 
 import { findingFingerprint } from "./fingerprint";
+import type { PageUrlSet } from "./scoring";
 
 const EMPTY_HASHES: readonly string[] = [];
 
@@ -159,16 +160,57 @@ export interface ComputeMergeInput {
    * pre-#1185.
    */
   resolution?: MergeResolutionInput;
+  /**
+   * (pub#474) Page checks whose fresh `items` this run are the page's COMPLETE
+   * item list, keyed by {@link pageCheckKey}. Consulted only where the
+   * {@link resolution} signal says the page still fails the check: a prior item
+   * finding there whose locator is not in this run's list is resolved instead of
+   * carried, because a complete list leaving it out is proof it is gone (fixed,
+   * or renamed by a rule change).
+   *
+   * Without it the signal branch carries every unmatched item on a still-failing
+   * page, since the signal is page-level. That carry is right when the list is a
+   * sample (a rule cap, a publish clip, an unfolded aggregate), which is why the
+   * caller lists only keys {@link itemListComplete} vouches for. Undefined →
+   * today's carry.
+   */
+  completeItemChecks?: Set<string>;
+  /**
+   * (#2658) The other half of {@link completeItemChecks}: page checks that still
+   * fail or warn this run with an item list that is a SAMPLE. Consulted where no
+   * signal speaks for the check (none sent, or the check is not in it): a prior
+   * finding there that this run's list does not match may sit past the clip, so
+   * it carries rather than resolving. Undefined → the pre-#2658 resolve.
+   */
+  incompleteItemChecks?: Set<string>;
+  /**
+   * (#2658) Page checks the published payload shows PASSING this run, with no
+   * failing row for the same page and check and no sampled failing rows for the
+   * check, keyed by {@link pageCheckKey}. Consulted only where a
+   * {@link resolution} signal was sent but lost its say for the page and check
+   * (its key truncated, or the page left off a clipped list): absence is then no
+   * evidence at all, so a prior finding resolves only on positive evidence (this,
+   * {@link notApplicablePages}, or a complete item list that no longer holds it)
+   * and carries otherwise. Undefined → none.
+   */
+  passedCheckPages?: Set<string>;
+  /**
+   * (#2658) Pages whose rule returned the noindex "does not apply" verdict this
+   * run, keyed by {@link pageRuleKey}: clean for every check of that rule, as the
+   * signal reads it. Positive evidence alongside {@link passedCheckPages}.
+   */
+  notApplicablePages?: Set<string>;
 }
 
 /** Pre-indexed form of the publish `ResolutionSignal` (#1185). */
 export interface MergeResolutionInput {
   /**
    * NORMALIZED URLs crawled this run per the unsampled signal. A superset of
-   * the sampled-payload-derived `crawledUrls` — used ONLY for the resolve
-   * decision, never for scoring denominators or site_pages (a clean page
-   * clipped from every sample must stay in `carriedPageUrls` so its synthetic
-   * pass keeps counting).
+   * the sampled-payload-derived `crawledUrls`, used for the resolve decision
+   * and (#2067) for `site_pages`: every page here gets an active row, so it
+   * counts as audited and is known to later runs. Never for this run's scoring
+   * denominator: a clean page clipped from every sample stays in
+   * `carriedPageUrls` exactly as before, so its synthetic pass keeps counting.
    */
   crawledUrls: Set<string>;
   /** `${ruleId}|${checkName}` → failing/warning page url-hash set (unsampled). */
@@ -181,6 +223,21 @@ export interface MergeResolutionInput {
   notEvaluatedByCheck: Map<string, Set<string>>;
   /** Keys whose hash set is incomplete → absence is non-authoritative. */
   truncatedChecks: Set<string>;
+  /**
+   * (#2658) False when the signal lists only part of the crawl (its byte budget
+   * clipped `crawledUrls`). Its page sets are then exact for the listed pages
+   * only, so a page outside `crawledUrls` gets no resolve authority from it and
+   * takes the pre-#1185 path. Undefined → the whole crawl is listed.
+   */
+  crawledComplete?: boolean;
+  /**
+   * (#2673) With a clipped list: the `resolutionUrlHash` of every crawled page
+   * the list leaves out. Membership only (a collision makes an uncrawled page
+   * look crawled): it tells the capped rescore which unlisted pages its tallies
+   * already count. Undefined → the producer did not send them (before #2673).
+   * (#2688) With them, `notEvaluatedByCheck` covers these pages too.
+   */
+  crawledHashes?: Set<string>;
 }
 
 const KEY_SEP = "|";
@@ -197,6 +254,79 @@ export function findingKey(
   locator: string
 ): string {
   return [normalizedUrl, ruleId, checkName, locator].join(KEY_SEP);
+}
+
+/** Key for one check on one page (a {@link findingKey} without the locator). */
+export function pageCheckKey(normalizedUrl: string, ruleId: string, checkName: string): string {
+  return [normalizedUrl, ruleId, checkName].join(KEY_SEP);
+}
+
+/** (#2658) A (page, rule) pair: the key of {@link ComputeMergeInput.notApplicablePages}. */
+export function pageRuleKey(normalizedUrl: string, ruleId: string): string {
+  return [normalizedUrl, ruleId].join(KEY_SEP);
+}
+
+/**
+ * (pub#474) Checks whose rule capped its items WITHOUT recording a remainder
+ * until pub#474, keyed `${ruleId}|${checkName}` → the cap. A publisher on an
+ * older release still sends those lists bare, so a list sitting exactly at the
+ * cap may be cut off. Current rules record `details.additional`, so a current
+ * list at the cap with no remainder carries once more than it needs to, which
+ * is the safe direction.
+ */
+export const LEGACY_SILENT_ITEM_CAPS: ReadonlyMap<string, number> = new Map([
+  ["a11y/identical-links-same-purpose|identical-links-same-purpose", 10],
+  ["a11y/label-content-name-mismatch|label-content-name-mismatch", 10],
+  ["a11y/link-in-text-block|link-in-text-block", 10],
+  ["a11y/tabindex|tabindex-very-high", 10],
+  ["a11y/tabindex|tabindex-positive", 10],
+  ["perf/animated-content|animated-gifs", 10],
+  ["perf/source-maps|source-maps-inline", 3],
+  ["schema/rating-scope|rating-visible", 10],
+  ["schema/rating-scope|rating-subject", 10],
+]);
+
+/**
+ * (pub#474) Checks whose rule stops at a work budget (elements walked, CSS or
+ * text read) and reports whether it did in `details.scanTruncated`. Only an
+ * explicit `false` proves the whole page was looked at: an older publisher
+ * sends neither value, and its list may stop short anywhere, not at a cap.
+ */
+export const SCAN_BUDGET_CHECKS: ReadonlySet<string> = new Set([
+  "content/hidden-text|hidden-text",
+  "content/dev-leakage|dev-leakage",
+]);
+
+/**
+ * (pub#474) True when a fail/warn check's `items` are its COMPLETE list, so an
+ * item missing from it is gone rather than cut off.
+ *
+ * Every cap that drops items records the remainder in `details.additional`: the
+ * rules' own caps, `clampCheckItemsOverflow`, the fold's item merge and the
+ * publish sampler. A rule that stops at a work budget before it has looked at
+ * the whole page sets `details.scanTruncated`. So a list with items and neither
+ * marker is complete, except a bare list at a cap an older release did not
+ * record ({@link LEGACY_SILENT_ITEM_CAPS}), or a budgeted check that does not
+ * say it finished ({@link SCAN_BUDGET_CHECKS}).
+ *
+ * The caller must also rule out what the check cannot show about itself: that
+ * it was rebuilt by `unfoldAggregateCheck`, or that another aggregate of the
+ * same rule and name holds more of this page's items (see `runCloudSmartAudits`).
+ * A check with no items is never "complete": it has no list to compare against.
+ */
+export function itemListComplete(ruleId: string, check: CheckResult): boolean {
+  const items = check.items;
+  if (!items || items.length === 0) return false;
+  const details = check.details;
+  if (details?.aggregated === true || details?.scanTruncated === true) return false;
+  // Any remainder that is not plainly zero counts, including a malformed one:
+  // reading a sample as complete resolves real findings, the reverse only carries.
+  const additional = details?.additional;
+  if (additional !== undefined && additional !== null && additional !== 0) return false;
+  const key = `${ruleId}${KEY_SEP}${check.name}`;
+  if (SCAN_BUDGET_CHECKS.has(key) && details?.scanTruncated !== false) return false;
+  const legacyCap = LEGACY_SILENT_ITEM_CAPS.get(key);
+  return legacyCap === undefined || items.length < legacyCap;
 }
 
 /**
@@ -681,6 +811,27 @@ export interface MergeSession {
   readonly sitePages: SitePageRecord[];
   readonly activePageUrls: Set<string>;
   /**
+   * (#497) What the streaming caller asks of the site's pages, answered without
+   * copying them: `sitePages` and `activePageUrls` are built on first read, and
+   * these are not. A site's pages are bounded by its history, not by the run.
+   */
+  readonly activePageCount: number;
+  /**
+   * The `sitePages` rows this run wrote: the pages it crawled or saw removed.
+   * Every other row is a prior page passed through unchanged, so a store that
+   * already holds `priorPages` reaches the same rows by upserting only these.
+   */
+  readonly changedSitePages: SitePageRecord[];
+  isActivePage(normalizedUrl: string): boolean;
+  /** A page some audit rendered: it has a prior `site_pages` row (#1652). */
+  everRendered(normalizedUrl: string): boolean;
+  /**
+   * Prior pages whose row is active and that this run neither crawled nor saw
+   * removed, in the prior pages' order (the last row winning for a url listed
+   * twice). The union scorer's carried pages; a view, not a copy.
+   */
+  readonly carriedPageUrls: PageUrlSet;
+  /**
    * Decide one batch of prior OPEN findings, pushing the results to the sink.
    * The decision is per row and never depends on how the priors are batched, so
    * any batching (one array, one page, one row) yields the same records in the
@@ -810,6 +961,10 @@ export function createMergeSession(
     now,
     sampledCheckPages,
     resolution,
+    completeItemChecks,
+    incompleteItemChecks,
+    passedCheckPages,
+    notApplicablePages,
   } = input;
 
   // Index fresh findings by key (latest wins on dup keys within a run).
@@ -837,19 +992,17 @@ export function createMergeSession(
   // the #1185 signal can mark a page crawled this run that never reached the
   // payload-derived crawled set, and such a page WAS rendered.
   //
-  // KNOWN BOUNDS — both err toward "unrendered", never toward inventing a prior
+  // KNOWN BOUND — errs toward "unrendered", never toward inventing a prior
   // audit, so the worst case is a missing "last seen" date rather than a false
-  // claim about an audit that did not happen:
-  //  - a page rendered ONLY per the #1185 signal gets no `site_pages` row (that
-  //    is deliberate — adding one would grow `carriedPageUrls` and with it the
-  //    synthetic-pass denominator, moving scores), so a later run that skips it
-  //    reads it as unrendered;
-  //  - a removed page whose `site_pages` row was pruned by retention and that is
-  //    later rediscovered loses its history the same way.
-  const everRenderedUrls = new Set<string>();
-  for (const p of priorPages) everRenderedUrls.add(p.normalizedUrl);
+  // claim about an audit that did not happen: a removed page whose `site_pages`
+  // row was pruned by retention and that is later rediscovered loses its
+  // history. (A page rendered ONLY per the #1185 signal used to lose it the same
+  // way; it gets a row since #2067, see step 3.)
+  //
+  // (#497) Read off the prior pages' index below rather than a set of its own:
+  // its keys are exactly the prior pages.
   const neverRendered = (normalizedUrl: string, renderedThisRun: boolean): boolean =>
-    !renderedThisRun && !everRenderedUrls.has(normalizedUrl);
+    !renderedThisRun && !known.index.has(normalizedUrl);
 
   // 3) Site pages — active set (crawled non-removed) ∪ prior actives minus removed.
   //
@@ -857,14 +1010,33 @@ export function createMergeSession(
   // FINDINGS, so it can be settled before a single prior streams in. The caller
   // needs `activePageUrls` to derive `carriedPageUrls`, and the carried scoring
   // fold needs THAT before it can fold the first carried page.
-  const sitePageMap = new Map<string, SitePageRecord>();
-  for (const p of priorPages) {
-    sitePageMap.set(p.normalizedUrl, p);
-  }
+  //
+  // (#2067) "Crawled" here includes the pages only the #1185 signal saw. A page
+  // crawled clean whose every check was clipped from the publish sample (or that
+  // produced no page check at all) is in no check's `pageUrl`, so it is missing
+  // from the payload-derived `crawledUrls`; without its own row it was neither
+  // counted as audited nor known to a later run. The row does NOT make it crawled
+  // for the finding decisions below — those keep reading `crawledUrls` and the
+  // signal separately — and it does not move this run's score: `runCloudSmartAudits`
+  // derives `carriedPageUrls` from `priorPages`, not from `activePageUrls`.
+  //
+  // (#497) Kept as the prior pages (the last row winning for a url listed twice)
+  // plus this run's changes, never as one merged copy: a site's pages outnumber a
+  // run's by orders of magnitude, so the counts the callers need are derived from
+  // the run's pages, and the merged list is built only when it is read.
+  const known = indexPriorPages(priorPages);
+  const priorOf = (url: string): SitePageRecord | undefined => {
+    const i = known.index.get(url);
+    return i === undefined ? undefined : known.pages[i];
+  };
+  const priorActive = (url: string): boolean => priorOf(url)?.state === "active";
+  /** Pages this run crawled or saw removed. Bounded by the run. */
+  const thisRun = new Map<string, SitePageRecord>();
+  const pageOf = (url: string): SitePageRecord | undefined => thisRun.get(url) ?? priorOf(url);
   // Crawled this run (excluding removed) → active with the real HTTP status.
-  for (const url of crawledUrls) {
-    if (removedUrls.has(url)) continue;
-    sitePageMap.set(url, {
+  const markCrawled = (url: string): void => {
+    if (removedUrls.has(url)) return;
+    thisRun.set(url, {
       siteKey,
       normalizedUrl: url,
       lastStatus: statusByUrl.get(url) ?? 200,
@@ -872,11 +1044,13 @@ export function createMergeSession(
       lastSeenCrawlId: crawlId,
       lastSeenAt: now,
     });
-  }
+  };
+  for (const url of crawledUrls) markCrawled(url);
+  if (resolution) for (const url of resolution.crawledUrls) markCrawled(url);
   // Removed this run → removed, recording the real 404/410 status.
   for (const url of removedUrls) {
-    const prior = sitePageMap.get(url);
-    sitePageMap.set(url, {
+    const prior = pageOf(url);
+    thisRun.set(url, {
       siteKey,
       normalizedUrl: url,
       lastStatus: statusByUrl.get(url) ?? prior?.lastStatus ?? 404,
@@ -886,10 +1060,43 @@ export function createMergeSession(
     });
   }
 
-  const sitePages = Array.from(sitePageMap.values());
-  const activePageUrls = new Set<string>(
-    sitePages.filter((p) => p.state === "active").map((p) => p.normalizedUrl)
-  );
+  // Active afterwards: the prior actives, corrected page by page for the run's own.
+  let activePageCount = known.active;
+  for (const [url, p] of thisRun) {
+    if (priorActive(url)) activePageCount -= 1;
+    if (p.state === "active") activePageCount += 1;
+  }
+  // Carried: the prior actives this run neither crawled nor saw removed.
+  let carriedPageCount = known.active;
+  for (const url of crawledUrls) if (priorActive(url)) carriedPageCount -= 1;
+  for (const url of removedUrls) {
+    if (!crawledUrls.has(url) && priorActive(url)) carriedPageCount -= 1;
+  }
+  const carriesPage = (url: string, p: SitePageRecord): boolean =>
+    p.state === "active" && !crawledUrls.has(url) && !removedUrls.has(url);
+  const carriedPageUrls: PageUrlSet = {
+    size: carriedPageCount,
+    has: (url) => {
+      const p = priorOf(url);
+      return p !== undefined && carriesPage(url, p);
+    },
+    *[Symbol.iterator]() {
+      for (const p of known.pages) if (carriesPage(p.normalizedUrl, p)) yield p.normalizedUrl;
+    },
+  };
+
+  /** The merged pages, in the order one map written prior-first would hold them. */
+  const buildSitePages = (): SitePageRecord[] => {
+    const pages = known.pages.slice();
+    for (const [url, p] of thisRun) {
+      const i = known.index.get(url);
+      if (i === undefined) pages.push(p);
+      else pages[i] = p;
+    }
+    return pages;
+  };
+  let sitePages: SitePageRecord[] | undefined;
+  let activePageUrls: Set<string> | undefined;
 
   /** This run's FRESH records — emitted by `finish()`, once every prior has had
    *  its chance to leave a `firstSeenAt` behind. */
@@ -979,21 +1186,46 @@ export function createMergeSession(
       // truncated (or absent — rule disabled, unknown shape, old CLI) gives no
       // authority and falls through to the pre-#1185 behavior.
       const checkKey = `${prior.ruleId}${KEY_SEP}${prior.checkName}`;
-      const priorHashes = resolution ? resolutionHashes(prior.normalizedUrl) : EMPTY_HASHES;
+      // (#2658) A signal that lists only part of the crawl speaks for the listed
+      // pages only: for any other page its sets are silent, not evidence of clean.
+      const signal =
+        resolution &&
+        (resolution.crawledComplete !== false || resolution.crawledUrls.has(prior.normalizedUrl))
+          ? resolution
+          : undefined;
+      const priorHashes = signal ? resolutionHashes(prior.normalizedUrl) : EMPTY_HASHES;
       // The check produced NO evaluated result for this page this run (the rule
       // `skipped` it — perf/ttfb without timing data — or emitted nothing for
       // it). Its absence from the fresh findings is not evidence the finding is
       // gone, so it can never resolve: carry regardless of what the sampled
       // payload suggests.
-      if (hasAnyHash(resolution?.notEvaluatedByCheck.get(checkKey), priorHashes)) {
+      if (hasAnyHash(signal?.notEvaluatedByCheck.get(checkKey), priorHashes)) {
         const carried: PageFindingRecord = { ...prior, provenance: "carried" };
         sink.persist(carried);
         sink.active(toMerged(carried, unrendered));
         return;
       }
-      const failingSet = resolution?.failingByCheck.get(checkKey);
+      const failingSet = signal?.failingByCheck.get(checkKey);
       if (failingSet) {
         if (hasAnyHash(failingSet, priorHashes)) {
+          // (pub#474) The page still fails the check, but this run's item list
+          // for it is complete and does not hold this locator (a fresh match
+          // returned above), so this item is gone: fixed, or renamed by a rule
+          // change. Carrying it would keep a ghost open for as long as the page
+          // fails the check for any other item.
+          if (
+            completeItemChecks?.has(
+              pageCheckKey(prior.normalizedUrl, prior.ruleId, prior.checkName)
+            )
+          ) {
+            sink.persist({
+              ...prior,
+              state: "resolved",
+              lastSeenCrawlId: crawlId,
+              lastSeenAt: now,
+            });
+            return;
+          }
           // Unlike the sample-guard carry below, this page WAS observed failing
           // this run — the signal is unsampled, so its presence is positive
           // evidence, not an absence we couldn't rule out. Refresh the
@@ -1011,7 +1243,7 @@ export function createMergeSession(
           sink.active(toMerged(carried, unrendered));
           return;
         }
-        if (!resolution!.truncatedChecks.has(checkKey)) {
+        if (!signal!.truncatedChecks.has(checkKey)) {
           sink.persist({
             ...prior,
             state: "resolved",
@@ -1044,6 +1276,45 @@ export function createMergeSession(
         return;
       }
 
+      const pageCheck = pageCheckKey(prior.normalizedUrl, prior.ruleId, prior.checkName);
+      // (#2658) A signal was sent but lost its say here: a count cap or the byte
+      // budget truncated the key, or the page is off a clipped list. What it
+      // would have said (still failing, not evaluated) is gone with it, so the
+      // finding's absence from the sampled payload proves nothing. Only positive
+      // evidence resolves: the payload shows the check passing on this page (or
+      // the rule's noindex verdict for it), or the page's complete item list no
+      // longer holds the finding (as the signal branch above resolves it).
+      if (resolution && (!signal || signal.truncatedChecks.has(checkKey))) {
+        const clean =
+          passedCheckPages?.has(pageCheck) ||
+          notApplicablePages?.has(pageRuleKey(prior.normalizedUrl, prior.ruleId)) ||
+          completeItemChecks?.has(pageCheck);
+        if (!clean) {
+          const carried: PageFindingRecord = { ...prior, provenance: "carried" };
+          sink.persist(carried);
+          sink.active(toMerged(carried, unrendered));
+          return;
+        }
+        sink.persist({
+          ...prior,
+          state: "resolved",
+          lastSeenCrawlId: crawlId,
+          lastSeenAt: now,
+        });
+        return;
+      }
+
+      // (#2658) No signal speaks for this check (none sent, or the check is not
+      // in it). The page still fails the check, and this run's item list for it
+      // is a sample (a rule cap, a publish clip): a finding it does not match may
+      // sit past the clip.
+      if (incompleteItemChecks?.has(pageCheck)) {
+        const carried: PageFindingRecord = { ...prior, provenance: "carried" };
+        sink.persist(carried);
+        sink.active(toMerged(carried, unrendered));
+        return;
+      }
+
       // Re-crawled and the finding is no longer present → resolved (evidence).
       sink.persist({
         ...prior,
@@ -1061,13 +1332,62 @@ export function createMergeSession(
   };
 
   return {
-    sitePages,
-    activePageUrls,
+    get sitePages() {
+      return (sitePages ??= buildSitePages());
+    },
+    get activePageUrls() {
+      if (!activePageUrls) {
+        activePageUrls = new Set<string>();
+        for (const p of (sitePages ??= buildSitePages())) {
+          if (p.state === "active") activePageUrls.add(p.normalizedUrl);
+        }
+      }
+      return activePageUrls;
+    },
+    // Taken once: `thisRun` is complete by now and nothing writes it later.
+    changedSitePages: Array.from(thisRun.values()),
+    activePageCount,
+    isActivePage: (url) => pageOf(url)?.state === "active",
+    everRendered: (url) => known.index.has(url),
+    carriedPageUrls,
     addPriorFindings: (priors) => {
       for (const prior of priors) addPrior(prior);
     },
     finish: emitFresh,
   };
+}
+
+/**
+ * (#497) The prior pages, one per url: at its FIRST position, holding its LAST
+ * row, which is what one `Map.set` per row keeps. `active` counts their active
+ * rows. A store's rows are unique by url, so the slower pass for a repeat is
+ * there for hand-built inputs only.
+ */
+function indexPriorPages(priorPages: readonly SitePageRecord[]): {
+  index: Map<string, number>;
+  pages: readonly SitePageRecord[];
+  active: number;
+} {
+  const index = new Map<string, number>();
+  for (let i = 0; i < priorPages.length; i++) index.set(priorPages[i]!.normalizedUrl, i);
+  let pages = priorPages;
+  if (index.size !== priorPages.length) {
+    index.clear();
+    const deduped: SitePageRecord[] = [];
+    for (const p of priorPages) {
+      const i = index.get(p.normalizedUrl);
+      if (i === undefined) {
+        index.set(p.normalizedUrl, deduped.length);
+        deduped.push(p);
+      } else {
+        deduped[i] = p;
+      }
+    }
+    pages = deduped;
+  }
+  let active = 0;
+  for (const p of pages) if (p.state === "active") active += 1;
+  return { index, pages, active };
 }
 
 function toMerged(

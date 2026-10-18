@@ -26,7 +26,19 @@ export {
   type ProjectNameContext,
 } from "./url";
 
-export { getAttrCI, hasAttrCI, querySelectorAllByAttrCI, querySelectorByAttrValueCI } from "./dom";
+export { isNonPublicHostname, isNonPublicUrl, nonPublicHostLabel } from "./non-public-host";
+
+export { decodeCloudflareEmail, isCloudflareEmailProtectionUrl } from "./cloudflare-email";
+
+export {
+  getAttrCI,
+  hasAttrCI,
+  isInsideNoscript,
+  querySelectorAllByAttrCI,
+  querySelectorAllOutsideNoscript,
+  querySelectorByAttrValueCI,
+  stripNoscriptMarkup,
+} from "./dom";
 
 export { isUUID, isShortId } from "./validation";
 
@@ -40,8 +52,12 @@ export {
 export { isHttpOrHttpsUrl, safeRedirectFetch, type SafeRedirectResult } from "./safe-fetch";
 
 export {
+  ContentDecodingError,
   DEFAULT_MAX_BODY_BYTES,
   DEFAULT_MAX_DOCUMENT_BODY_BYTES,
+  decodedBody,
+  fetchUndecoded,
+  isDecompressionError,
   readBodyCapped,
 } from "./response-body";
 
@@ -56,6 +72,8 @@ export {
   hasRichResultSchema,
   getRichResultTypes,
   flattenJsonLdNodes,
+  indexJsonLdIds,
+  resolveJsonLdRef,
 } from "./schema-rich-results";
 
 export {
@@ -63,6 +81,7 @@ export {
   emptyNapSignal,
   napAddressKey,
   napPhoneKey,
+  napPhoneToken,
   NAP_BUSINESS_SCHEMA_TYPES,
   NAP_MAX_ADDRESS_CHARS,
   NAP_MAX_PHONES_PER_PAGE,

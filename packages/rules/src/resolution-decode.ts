@@ -1,0 +1,282 @@
+// The server side of the compact resolution signal (#2658): inflate, bound and
+// validate a `CompactResolutionSignal` back into the `ResolutionSignal` the
+// smart-audits merge reads (the API's side; the producers' builder is
+// ./resolution). Inflates with node:zlib: Workers `nodejs_compat`, or Bun.
+//
+// node:zlib rather than DecompressionStream: workerd inflates a whole input
+// chunk before the first read, so a stream reader's byte cap comes too late (a
+// 258 KB body of deflated zeros raised a local workerd's RSS by ~215 MiB).
+// `inflateRawSync`'s `maxOutputLength` stops inside the inflate.
+
+import { Buffer } from "node:buffer";
+import { inflateRawSync } from "node:zlib";
+
+import type { ResolutionSignal } from "@squirrelscan/core-contracts";
+import {
+  REPORT_LIMITS,
+  RESOLUTION_PUBLISH_LIMITS,
+  RESOLUTION_SIGNAL_LIMITS,
+} from "@squirrelscan/core-contracts/limits";
+import {
+  type CompactResolutionPayload,
+  type CompactResolutionSignal,
+  resolutionUrlHash,
+} from "@squirrelscan/core-contracts/resolution";
+
+const isStringArray = (value: unknown, max: number, maxLength: number): value is string[] =>
+  Array.isArray(value) &&
+  value.length <= max &&
+  value.every((s) => typeof s === "string" && s.length <= maxLength);
+
+/**
+ * Inflate a {@link CompactResolutionSignal} back into the {@link ResolutionSignal}
+ * the merge reads: `crawledUrls` are the listed pages, and every index becomes
+ * the `resolutionUrlHash` of its URL, the value the original producer would
+ * have sent. Validates as strictly as the publish schema validates the original
+ * shape and THROWS on anything out of bounds; a caller that catches it should
+ * drop the signal, which only ever costs resolutions (findings carry), never
+ * causes one.
+ *
+ * Inflates at most RESOLUTION_PUBLISH_LIMITS.maxInflatedBytes, and parses only
+ * JSON whose containers and separators fit what a valid payload can hold, so a
+ * small hostile body cannot cost the API isolate (128 MB) more than a few MiB.
+ */
+export async function decodeResolutionSignal(
+  compact: CompactResolutionSignal,
+): Promise<ResolutionSignal> {
+  if (compact.v !== 1) throw new Error(`unknown compact resolution signal version ${compact.v}`);
+  // The publish schema bounds this too; the decoder does not rely on it.
+  if (typeof compact.data !== "string" || compact.data.length > RESOLUTION_PUBLISH_LIMITS.maxBytes) {
+    throw new Error("compact resolution signal: data past the signal's byte budget");
+  }
+  const json = inflateCapped(compact.data, RESOLUTION_PUBLISH_LIMITS.maxInflatedBytes);
+  assertParseBounded(json);
+  const payload = JSON.parse(json) as Partial<CompactResolutionPayload>;
+  const maxKey = REPORT_LIMITS.maxMediumString;
+  if (payload.v !== 1) throw new Error("compact resolution payload: bad version");
+  if (!isStringArray(payload.urls, limits.maxCrawledUrls, REPORT_LIMITS.maxUrlLength)) {
+    throw new Error("compact resolution payload: bad urls");
+  }
+  const other = payload.other ?? [];
+  if (!isStringArray(other, limits.maxHashesTotal, REPORT_LIMITS.maxUrlLength)) {
+    throw new Error("compact resolution payload: bad other");
+  }
+  if (typeof payload.complete !== "boolean") {
+    throw new Error("compact resolution payload: bad complete");
+  }
+  const urls = payload.urls;
+  const pages = payload.pages;
+  // Bounded by the crawl ceiling: the merge counts it as audited pages, and
+  // billing reads that count.
+  if (
+    typeof pages !== "number" ||
+    !Number.isSafeInteger(pages) ||
+    pages < urls.length ||
+    pages > REPORT_LIMITS.maxPages ||
+    // A complete list is every crawled page, deduped; `other` only rides with one.
+    (payload.complete && pages !== urls.length)
+  ) {
+    throw new Error("compact resolution payload: bad pages");
+  }
+  if (!payload.complete && other.length > 0) {
+    throw new Error("compact resolution payload: other with a partial list");
+  }
+  const truncated = payload.truncated ?? [];
+  if (!isStringArray(truncated, limits.maxChecks, maxKey)) {
+    throw new Error("compact resolution payload: bad truncated");
+  }
+
+  const hashes: string[] = [];
+  const hashAt = (index: number): string =>
+    (hashes[index] ??= resolutionUrlHash(
+      index < urls.length ? urls[index]! : other[index - urls.length]!,
+    ));
+  const decodeMap = <T>(
+    field: string,
+    record: Record<string, number[]> | undefined,
+    indexLimit: number,
+    value: (index: number) => T,
+  ): Record<string, T[]> => {
+    if (record === undefined) return {};
+    if (typeof record !== "object" || record === null || Array.isArray(record)) {
+      throw new Error(`compact resolution payload: bad ${field}`);
+    }
+    const entries = Object.entries(record);
+    if (entries.length > limits.maxChecks)
+      throw new Error(`compact resolution payload: ${field} keys`);
+    const out: Record<string, T[]> = {};
+    let total = 0;
+    for (const [key, gaps] of entries) {
+      if (key.length > maxKey || !Array.isArray(gaps) || gaps.length > limits.maxHashesPerCheck) {
+        throw new Error(`compact resolution payload: bad ${field} entry`);
+      }
+      total += gaps.length;
+      if (total > limits.maxHashesTotal)
+        throw new Error(`compact resolution payload: ${field} size`);
+      const set: T[] = [];
+      let index = -1;
+      for (const gap of gaps) {
+        if (typeof gap !== "number" || !Number.isSafeInteger(gap) || gap < 0) {
+          throw new Error(`compact resolution payload: bad ${field} index`);
+        }
+        index += gap + 1;
+        if (index >= indexLimit)
+          throw new Error(`compact resolution payload: ${field} index range`);
+        set.push(value(index));
+      }
+      out[key] = set;
+    }
+    return out;
+  };
+  if (payload.failing === undefined) throw new Error("compact resolution payload: no failing");
+  const failing = decodeMap("failing", payload.failing, urls.length + other.length, hashAt);
+  const notEvaluated = decodeMap("notEvaluated", payload.notEvaluated, urls.length, hashAt);
+
+  // (#2673) The unlisted crawled pages' hashes: one string of 8-hex values, only
+  // with a clipped list, at most one per crawled page the list leaves out.
+  let crawledHashes: string[] | undefined;
+  if (payload.hashes !== undefined) {
+    const hashes = payload.hashes;
+    if (
+      payload.complete ||
+      typeof hashes !== "string" ||
+      hashes.length % 8 !== 0 ||
+      hashes.length / 8 > pages - urls.length ||
+      !/^[0-9a-f]*$/.test(hashes)
+    ) {
+      throw new Error("compact resolution payload: bad hashes");
+    }
+    crawledHashes = [];
+    for (let i = 0; i < hashes.length; i += 8) crawledHashes.push(hashes.slice(i, i + 8));
+  }
+  // (#2688) The unlisted pages each key did not evaluate, by index into those
+  // hashes: folded into `notEvaluated`, within its caps, which then covers the
+  // whole crawl.
+  if (payload.hashesNotEvaluated !== undefined) {
+    const hashList = crawledHashes;
+    if (!hashList) {
+      throw new Error("compact resolution payload: hashesNotEvaluated without hashes");
+    }
+    const unlisted = decodeMap(
+      "hashesNotEvaluated",
+      payload.hashesNotEvaluated,
+      hashList.length,
+      (i) => hashList[i]!,
+    );
+    let total = 0;
+    for (const set of Object.values(notEvaluated)) total += set.length;
+    for (const [key, set] of Object.entries(unlisted)) {
+      const merged = [...(notEvaluated[key] ?? []), ...set];
+      total += set.length;
+      if (merged.length > limits.maxHashesPerCheck || total > limits.maxHashesTotal) {
+        throw new Error("compact resolution payload: notEvaluated size");
+      }
+      notEvaluated[key] = merged;
+    }
+  }
+
+  const removedByStatus = decodeMap("removed", payload.removed, urls.length, (i) => urls[i]!);
+  const removedPages: Array<{ url: string; status: number }> = [];
+  for (const [status, removedUrls] of Object.entries(removedByStatus)) {
+    if (status !== "404" && status !== "410") {
+      throw new Error("compact resolution payload: bad removed status");
+    }
+    for (const url of removedUrls) removedPages.push({ url, status: Number(status) });
+  }
+  const removedCount = payload.removedCount ?? 0;
+  if (
+    typeof removedCount !== "number" ||
+    !Number.isSafeInteger(removedCount) ||
+    removedCount < removedPages.length ||
+    removedCount > pages ||
+    (payload.complete && removedCount !== removedPages.length)
+  ) {
+    throw new Error("compact resolution payload: bad removedCount");
+  }
+
+  return {
+    crawledUrls: urls,
+    failing,
+    ...(Object.keys(notEvaluated).length > 0 ? { notEvaluated } : {}),
+    ...(truncated.length > 0 ? { truncated } : {}),
+    ...(payload.complete ? {} : { crawledComplete: false, crawledCount: pages }),
+    ...(removedPages.length > 0 ? { removedPages } : {}),
+    ...(removedCount > 0 ? { removedCount } : {}),
+    ...(crawledHashes && crawledHashes.length > 0 ? { crawledHashes } : {}),
+  };
+}
+
+/**
+ * base64 → raw inflate → UTF-8, never more than `maxBytes` of output: past it
+ * the inflate itself stops and this throws.
+ */
+function inflateCapped(base64: string, maxBytes: number): string {
+  let out: Buffer;
+  try {
+    out = inflateRawSync(Buffer.from(base64, "base64"), { maxOutputLength: maxBytes });
+  } catch (err) {
+    if (err instanceof RangeError || (err as { code?: string })?.code === "ERR_BUFFER_TOO_LARGE") {
+      throw new Error(`compact resolution signal inflates past ${maxBytes} bytes`);
+    }
+    throw err;
+  }
+  return out.toString("utf8");
+}
+
+// What a valid payload can hold, from the limits the decoder checks it against:
+// the root, its lists and maps, and one array per key of `failing`,
+// `notEvaluated`, `hashesNotEvaluated` (#2688) and `removed` (containers); one
+// separator per list element, key and field (`notEvaluated` and
+// `hashesNotEvaluated` share one element budget); one string per URL in `urls`
+// and `other`, per key of the four maps and of `truncated`, and per field name
+// (strings).
+const limits = RESOLUTION_SIGNAL_LIMITS;
+const MAX_CONTAINERS = 4 * limits.maxChecks + 16;
+const MAX_STRINGS = limits.maxCrawledUrls + limits.maxHashesTotal + 5 * limits.maxChecks + 16;
+/** The longest string a valid payload holds: `hashes` (#2673), 8 hex per crawled page. */
+const MAX_STRING_CHARS = 8 * limits.maxCrawledUrls;
+const MAX_SEPARATORS =
+  limits.maxCrawledUrls + 4 * limits.maxHashesTotal + 4 * limits.maxChecks + 16;
+/** Root, a map, its arrays. */
+const MAX_DEPTH = 3;
+
+/**
+ * Refuse JSON whose shape no valid payload has, before `JSON.parse` builds it:
+ * a few KB of deflated `{},` (or `"a",`) under an unknown key would otherwise
+ * allocate hundreds of thousands to millions of values, and one long string
+ * (#2673's `hashes` is the longest valid one) megabytes. One pass; a string's
+ * contents are skipped, the string itself is counted and measured.
+ */
+function assertParseBounded(json: string): void {
+  let containers = 0;
+  let separators = 0;
+  let strings = 0;
+  let depth = 0;
+  let inString = false;
+  let stringStart = 0;
+  for (let i = 0; i < json.length; i++) {
+    const c = json.charCodeAt(i);
+    if (inString) {
+      if (c === 92 /* \ */) i++;
+      else if (c === 34 /* " */) inString = false;
+      if (i - stringStart > MAX_STRING_CHARS) {
+        throw new Error("compact resolution payload: shape past the signal's bounds");
+      }
+      continue;
+    }
+    if (c === 34 /* " */) {
+      inString = true;
+      stringStart = i;
+      if (++strings > MAX_STRINGS) {
+        throw new Error("compact resolution payload: shape past the signal's bounds");
+      }
+    } else if (c === 123 /* { */ || c === 91 /* [ */) {
+      if (++containers > MAX_CONTAINERS || ++depth > MAX_DEPTH) {
+        throw new Error("compact resolution payload: shape past the signal's bounds");
+      }
+    } else if (c === 125 /* } */ || c === 93 /* ] */) depth--;
+    else if (c === 44 /* , */ && ++separators > MAX_SEPARATORS) {
+      throw new Error("compact resolution payload: shape past the signal's bounds");
+    }
+  }
+}

@@ -264,4 +264,98 @@ describe("links/redirects — a chain ending in a rate limit (#1829)", () => {
     expect(check(checks, "redirect-to-error")!.status).toBe("fail");
     expect(check(checks, "redirect-rate-limited")).toBeUndefined();
   });
+
+  test("the status is written so a report merge never widens it (#2244)", () => {
+    // `(404)` alone in parentheses reads as a count, so pages ending in 404 and
+    // 500 would merge into `(404 to 500)`.
+    const message = (statusCode: number) =>
+      check(
+        validateRedirectChain(
+          chain({
+            endsInError: true,
+            hops: [
+              { url: `${BASE}/a`, statusCode: 301, type: "http" as const },
+              { url: `${BASE}/b`, statusCode, type: "http" as const },
+            ],
+          }),
+        ),
+        "redirect-to-error",
+      )!.message;
+    expect(message(404)).toBe("Redirect chain ends in error (HTTP 404)");
+    expect(message(500)).toBe("Redirect chain ends in error (HTTP 500)");
+    expect(
+      check(validateRedirectChain(chain({ endsRateLimited: true })), "redirect-rate-limited")!.message,
+    ).toContain("(HTTP 429)");
+  });
+});
+
+// #2307: where the reported external links sit.
+describe("links/broken-external-links — link sections (#2307)", () => {
+  /** Pages whose parsed links carry the given sections, so the rule can say where each link sits. */
+  function sectionedCtx(
+    externalLinks: ExternalLinkCheckData[],
+    sections: Record<string, Array<string | undefined>>,
+  ): RuleContext {
+    const ctx = externalCtx(externalLinks);
+    const pages = [
+      {
+        url: `${BASE}/`,
+        parsed: {
+          links: Object.entries(sections).flatMap(([url, list]) =>
+            list.map((section) => ({
+              url,
+              text: "t",
+              isInternal: false,
+              ...(section ? { section } : {}),
+            })),
+          ),
+        },
+      },
+    ];
+    ctx.site!.pages = pages as never;
+    return ctx;
+  }
+
+  test("a broken link says where it sits and carries meta.sections", () => {
+    const { checks } = brokenExternalLinksRule.run(
+      sectionedCtx([link({ href: "https://gone.example/", status: 404 })], {
+        "https://gone.example/": ["footer", "footer", "content"],
+      }),
+    );
+    const item = check(checks, "broken-external-links")!.items![0]!;
+
+    expect(item.label).toBe("https://gone.example/ (404), linked in the footer and the page content");
+    expect(item.meta).toEqual({ status: 404, error: null, sections: { footer: 2, content: 1 } });
+  });
+
+  test("WAF-blocked and rate-limited links say it too", () => {
+    const { checks } = brokenExternalLinksRule.run(
+      sectionedCtx(
+        [
+          link({ href: "https://wall.example/", status: 403, wafBlocked: true, wafProvider: "Cloudflare" }),
+          link({ href: "https://slow.example/", status: 429 }),
+        ],
+        { "https://wall.example/": ["navigation"], "https://slow.example/": ["sidebar"] },
+      ),
+    );
+
+    expect(check(checks, "waf-blocked-external-links")!.items![0]!.label).toBe(
+      "https://wall.example/ (unverified: Cloudflare), linked in the navigation",
+    );
+    expect(check(checks, "rate-limited-external-links")!.items![0]!.label).toBe(
+      "https://slow.example/ (429), linked in the sidebar",
+    );
+  });
+
+  test("links no section is known for keep their label", () => {
+    const { checks } = brokenExternalLinksRule.run(
+      sectionedCtx([link({ href: "https://gone.example/", status: 404 })], {
+        "https://gone.example/": [undefined],
+      }),
+    );
+    const item = check(checks, "broken-external-links")!.items![0]!;
+
+    expect(item.label).toBe("https://gone.example/ (404)");
+    expect(item.meta).toEqual({ status: 404, error: null });
+  });
 });

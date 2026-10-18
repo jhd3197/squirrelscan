@@ -6,6 +6,7 @@
 // cache). The check itself is a summary — per-link findings are reported by
 // links/broken-external-links; this rule never re-scores them (info only).
 
+import { EXTERNAL_LINKS_NOT_CHECKED_SKIP_REASON } from "@squirrelscan/core-contracts";
 import { isRateLimitStatus } from "@squirrelscan/utils/rate-limit";
 
 import type { Rule, RuleContext, RuleResult, CheckResult } from "../types";
@@ -29,18 +30,48 @@ export const deadLinksRule: Rule = {
     const checks: CheckResult[] = [];
     const externalLinks = ctx.site?.externalLinks;
 
+    // External link checking was off for this audit (repo#2729). A paid run
+    // would skip it the same way, so it stays off the locked upsell; the
+    // report's "Not checked" note says how to turn checking on.
     if (!externalLinks) {
       checks.push({
         name: "dead-links",
         status: "skipped",
-        message: "No external link check data available",
-        skipReason: "External link checking did not run",
+        message: "External link checking was off for this audit, so external links were not verified",
+        skipReason: EXTERNAL_LINKS_NOT_CHECKED_SKIP_REASON,
       });
       return { checks };
     }
 
     // Zero external links is a real result, not a locked one (#656): no plan
     // could verify anything here, so the upsell must not advertise this rule.
+    // repo#2759: links that look like actions or carry a token are never sent.
+    const linkCheck = ctx.site?.externalLinkCheck;
+    const notRequested = linkCheck?.notRequested ?? 0;
+    if (externalLinks.length === 0 && linkCheck && notRequested > 0 && notRequested >= linkCheck.found) {
+      checks.push({
+        name: "dead-links",
+        status: "info",
+        message: `No external links were verified: all ${notRequested} look like actions or carry a token, so they were not requested`,
+        value: 0,
+        expected: 0,
+      });
+      return { checks };
+    }
+
+    // repo#2613: links were selected, but the check ran out of time before any
+    // was answered. Nothing was verified; that is not "no links".
+    if (externalLinks.length === 0 && linkCheck?.outOfTime) {
+      checks.push({
+        name: "dead-links",
+        status: "info",
+        message: `No external links were verified: the link check ran out of time before reaching any of the ${linkCheck.outOfTime} selected`,
+        value: 0,
+        expected: 0,
+      });
+      return { checks };
+    }
+
     if (externalLinks.length === 0) {
       checks.push({
         name: "dead-links",
@@ -53,15 +84,15 @@ export const deadLinksRule: Rule = {
     }
 
     const checked = externalLinks.filter((l) => l.status !== null || l.error !== null);
-    // Mirror links/broken-external-links: WAF-blocked 403s and rate-limited
-    // targets are not broken (#1829).
+    // Mirror links/broken-external-links: unverifiable (a wall, a timeout,
+    // pub#800) and rate-limited targets are not broken (#1829).
     const rateLimited = checked.filter(
       (l) => l.rateLimited === true || isRateLimitStatus(l.status),
     );
     const rateLimitedSet = new Set(rateLimited.map((l) => l.href));
     const broken = checked.filter((l) => {
       if (l.error) return true;
-      if (l.status === 403 && l.wafBlocked) return false;
+      if (l.wafBlocked) return false;
       if (rateLimitedSet.has(l.href)) return false;
       if (l.status && l.status >= 400) return true;
       return false;

@@ -42,6 +42,7 @@ const DEFAULT_SETTINGS: UserSettings = {
   channel: "stable",
   last_update_check: null,
   auto_update: true,
+  skills_auto_update: true,
   update_check_interval_hours: DEFAULT_UPDATE_CHECK_INTERVAL_HOURS,
   notifications: true,
   telemetry: true,
@@ -60,6 +61,7 @@ const DEFAULT_SETTINGS: UserSettings = {
   cloud_render_consent: null,
   cloud_spend_ack: null,
   auto_publish_notice_shown: null,
+  link_pricing_notice_shown: null,
   first_publish_at: null,
   publish_nudge_shown: null,
 };
@@ -418,6 +420,7 @@ function parseSettingValue(
       return ok(value);
 
     case "auto_update":
+    case "skills_auto_update":
     case "notifications":
     case "telemetry":
     case "tips":

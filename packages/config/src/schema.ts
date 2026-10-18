@@ -2,14 +2,20 @@
 // Shared across CLI, cloud runner, and any other consumer.
 // TOML loading and file discovery are NOT here — those are CLI adapters.
 
+import { AUDIT_LEVELS, parseAuditLevel } from "@squirrelscan/core-contracts/audit-levels";
 import { isValidHeaderName, isValidHeaderValue } from "@squirrelscan/utils/headers";
 import { z } from "zod";
+
+import { parseByteSize } from "./byte-size";
+import { PROBE_LEVELS, parseProbeBudget } from "./probe";
 
 // ============================================
 // SUB-SCHEMAS
 // ============================================
 
-export const COVERAGE_MODES = ["quick", "surface", "full"] as const;
+// The audit levels, under the name the config key has always used. One
+// definition: @squirrelscan/core-contracts/audit-levels.
+export const COVERAGE_MODES = AUDIT_LEVELS;
 export type CoverageMode = (typeof COVERAGE_MODES)[number];
 
 // Authoritative crawl-concurrency defaults (the CLI + cloud runner both derive
@@ -28,11 +34,18 @@ export const CrawlerConfigSchema = z.object({
   max_pages: z.number().default(100),
   // Optional crawl-depth ceiling (#318); unset = unlimited (preserves default behavior).
   max_depth: z.number().int().min(1).optional(),
-  // Unset (optional, not defaulted) so the CLI can distinguish "user picked a
-  // mode" from "use the auth-aware default" — signed-in paid plans default to
-  // `surface` (cloud rules + summary), free/anonymous to `quick`. Resolved in
-  // the audit/crawl commands; a config file value here is an explicit override.
-  coverage: z.enum(COVERAGE_MODES).optional(),
+  // The audit level (quick, surface, full). Unset (optional, not defaulted) so
+  // the CLI can distinguish "user picked a level" from "use the auth-aware
+  // default": any signed-in account defaults to `surface`, anonymous to
+  // `quick`. Resolved in the audit/crawl commands; a config file value here is
+  // an explicit choice. `fast` is the old name for `quick` and still reads as
+  // quick; anything else fails validation with the list of levels.
+  coverage: z
+    .preprocess(
+      (value) => (typeof value === "string" ? (parseAuditLevel(value) ?? value) : value),
+      z.enum(COVERAGE_MODES),
+    )
+    .optional(),
   delay_ms: z.number().default(100),
   timeout_ms: z.number().default(30000),
   user_agent: z.string().default(""),
@@ -77,6 +90,14 @@ export const CrawlerConfigSchema = z.object({
   // Default false (#790): audits are site-owner initiated, so directives
   // aimed at uninvited crawlers don't apply unless explicitly opted in.
   respect_robots: z.boolean().default(false),
+  // Pre-crawl discovery probes (#409): llms.txt, markdown negotiation, the
+  // well-known sweep (/.well-known/*, /openapi.json, /swagger.json, AGENTS.md,
+  // …), the homepage as GPTBot/Claude-User, and RSL. true sends none of them,
+  // for hosts whose firewall bans a client that asks for /swagger.json.
+  // robots.txt, sitemaps and the seed page still run. Optional, and unset means
+  // probes on: a config without the key (every cloud run) behaves exactly as
+  // before, and code that builds a Config by hand does not have to learn it.
+  disable_discovery_probes: z.boolean().optional(),
   // Incremental re-scan: send conditional GETs (ETag/Last-Modified) so unchanged pages return 304; --refresh forces a full fetch. (#125)
   incremental: z.boolean().default(true),
   breadth_first: z.boolean().default(true),
@@ -103,6 +124,20 @@ export const ProjectConfigSchema = z.object({
 export const RulesConfigSchema = z.object({
   enable: z.array(z.string()).default(["*"]),
   disable: z.array(z.string()).default([]),
+  /**
+   * Wall-clock budget (ms) for one rule on one page; a site rule gets this much
+   * per page, capped at 60 s. A backstop against a pattern that matches slowly
+   * on hostile content. Unset = the engine default (1000); 0 turns it off (#578).
+   * Lower than the default is refused: a rule that ends just past its deadline
+   * can stop the audit (#880), and a lower budget makes that common.
+   */
+  time_budget_ms: z
+    .number()
+    .int()
+    .refine((ms) => ms === 0 || ms >= 1000, {
+      message: "time_budget_ms must be 0 (off) or at least 1000",
+    })
+    .optional(),
 });
 
 export const PluginCapabilitySchema = z.enum(["rules", "listeners"]);
@@ -123,6 +158,30 @@ export const ExternalLinksConfigSchema = z.object({
   cache_ttl_days: z.number().int().min(1).default(7),
   timeout_ms: z.number().int().min(1000).max(60000).default(10000),
   concurrency: z.number().int().min(1).max(20).default(5),
+  // Most distinct external links one audit checks, most-linked first; the rest
+  // are reported as not checked (repo#2729). Unset = the audit's page budget,
+  // at least LINK_CHECK_LIMITS.externalPerAuditMin.
+  max_links: z.number().int().min(1).max(100_000).optional(),
+});
+
+// Internal link checks (repo#2729): a status-only HEAD (GET only on 405/501)
+// for each internal link target the crawl did not fetch, so a linked 404 is
+// found even when the crawl did not follow links (Quick, sitemap scope) or ran
+// out of page budget. Never an action link, never credentials (audit-engine
+// link-target-probe.ts). No render, no rules, no page charge. On by default.
+export const InternalLinksConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  // Most targets one audit status-checks, most-linked first; the rest are
+  // reported as not checked (0 checks none: use enabled = false to switch it
+  // off). Unset = LINK_CHECK_LIMITS.internalTargetProbes.
+  max_targets: z.number().int().min(0).max(10_000).optional(),
+});
+
+// Page classifier (#2307): a small model bundled with squirrel that fills in which part of the
+// page a link sits in (pagination, related content, ...) where the page's markup says nothing.
+// Runs on this machine, no network call, no credit cost. Markup always wins; off means markup only.
+export const ClassifierConfigSchema = z.object({
+  enabled: z.boolean().default(true),
 });
 
 export const OutputConfigSchema = z.object({
@@ -162,6 +221,31 @@ export const StorageConfigSchema = z.object({
       typeof value === "boolean" ? (value ? DEFAULT_KEEP_AUDITS : 0) : value,
     )
     .default(DEFAULT_KEEP_AUDITS),
+  /**
+   * Size cap for the local content store (`~/.squirrel/content-store.db`, the
+   * gzipped page bodies every audit reads back), in bytes or as a size string
+   * such as `"4GB"` (#2342). Unset = the CLI's default, 1 GB.
+   * `SQUIRREL_CONTENT_STORE_MAX_BYTES` overrides it for one run.
+   *
+   * The store is shared by every project on the machine, so this is the cap in
+   * force while THIS project audits; set it in `~/squirrel.toml` or the env var
+   * to apply it everywhere.
+   */
+  content_store_max_bytes: z
+    .union([z.number(), z.string()])
+    .transform((value, ctx) => {
+      const bytes = parseByteSize(value);
+      if (bytes === null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            'content_store_max_bytes must be a positive size, such as 4294967296 or "4GB"',
+        });
+        return z.NEVER;
+      }
+      return bytes;
+    })
+    .optional(),
 });
 
 export const CloudConfigSchema = z.object({
@@ -169,10 +253,11 @@ export const CloudConfigSchema = z.object({
   enabled: z.boolean().default(true),
   /**
    * Per-audit credit cap; prefetch truncates deterministically at the cap.
-   * 0 = unlimited. Default 1000 (was 200): cloud browser rendering is now the
-   * authed default (~2 credits/page), so the cap needs headroom to render a
-   * normal crawl plus the other cloud rules. TTY runs above `confirm_threshold`
-   * still prompt; `--yes`/non-TTY runs proceed unattended up to this cap.
+   * 0 = unlimited. Default 1000 (was 200). Every audited page costs 2 credits
+   * on top of the 50-credit base (pricing v11, #2290), so a signed-in audit's
+   * page cap is clamped to what this cap covers: (cap − 50) / 2 pages, 475 at
+   * the default. TTY runs above `confirm_threshold` still prompt; `--yes`/
+   * non-TTY runs proceed unattended up to this cap.
    */
   max_credits_per_audit: z.number().int().min(0).default(1000),
   /** Estimated spend above this prompts for TTY confirmation. 0 = always confirm. */
@@ -314,6 +399,28 @@ export const IntegrityConfigSchema = z.object({
   ),
 });
 
+// Probing intensity (see probe.ts): how hard each page is poked beyond what
+// the crawl fetched. Both keys are optional: unset `probe` means the context
+// default (signed-in local runs are active, anonymous ones passive), and unset
+// `budget` means the level's default. `--probe`, `--passive`/`--aggressive`
+// and `--probe-budget` override them for one run.
+export const SecurityConfigSchema = z.object({
+  probe: z.enum(PROBE_LEVELS).optional(),
+  /**
+   * Wall-clock cap for ALL probing in a run: "30s", "2m", or a number of
+   * seconds. Validated here but kept as written (parse with parseProbeBudget),
+   * so re-parsing an already-parsed config cannot reread milliseconds as
+   * seconds.
+   */
+  budget: z
+    .union([z.number(), z.string()])
+    .refine((value) => parseProbeBudget(value) !== null, {
+      message:
+        'budget must be a positive duration of at most 1h, such as "30s", "500ms" or "2m"',
+    })
+    .optional(),
+});
+
 // Pre-compute defaults once at module load
 const defaultProject = ProjectConfigSchema.parse({});
 const defaultCrawler = CrawlerConfigSchema.parse({});
@@ -336,6 +443,11 @@ export const ConfigSchema = z.object({
   rules: RulesConfigSchema.default(defaultRules),
   plugins: PluginsConfigSchema.default(defaultPlugins),
   external_links: ExternalLinksConfigSchema.default(defaultExternalLinks),
+  // Optional, unlike its siblings, so a Config built by hand (tests, the cloud
+  // container) needs no change: absent reads as every default (on).
+  internal_links: InternalLinksConfigSchema.optional(),
+  // Optional for the same reason: absent reads as the default (on).
+  classifier: ClassifierConfigSchema.optional(),
   output: OutputConfigSchema.default(defaultOutput),
   // Local disk retention (#1912) — how many audits a project keeps.
   storage: StorageConfigSchema.default(defaultStorage),
@@ -344,6 +456,10 @@ export const ConfigSchema = z.object({
   intel: IntelConfigSchema.default(defaultIntel),
   // Site-integrity feature (#115) — holds the opt-in cloaking probe (#118).
   integrity: IntegrityConfigSchema.default(defaultIntegrity),
+  // Probing intensity: [security] probe and budget. Optional, like
+  // disable_discovery_probes: unset means the context default, and code that
+  // builds a Config by hand does not have to learn it.
+  security: SecurityConfigSchema.optional(),
   rule_options: z.record(z.string(), z.record(z.string(), z.unknown())).default({}),
   /**
    * Smart audits (#110): persist per-page finding state across audits and score
@@ -370,11 +486,14 @@ export type PluginCapability = z.infer<typeof PluginCapabilitySchema>;
 export type PluginManifestItem = z.infer<typeof PluginManifestItemSchema>;
 export type PluginsConfig = z.infer<typeof PluginsConfigSchema>;
 export type ExternalLinksConfig = z.infer<typeof ExternalLinksConfigSchema>;
+export type InternalLinksConfig = z.infer<typeof InternalLinksConfigSchema>;
+export type ClassifierConfig = z.infer<typeof ClassifierConfigSchema>;
 export type OutputConfig = z.infer<typeof OutputConfigSchema>;
 export type StorageConfig = z.infer<typeof StorageConfigSchema>;
 export type CloudConfig = z.infer<typeof CloudConfigSchema>;
 export type CloakingProbeConfig = z.infer<typeof CloakingProbeConfigSchema>;
 export type IntegrityConfig = z.infer<typeof IntegrityConfigSchema>;
+export type SecurityConfig = z.infer<typeof SecurityConfigSchema>;
 
 // ============================================
 // DEFAULTS

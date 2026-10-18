@@ -22,7 +22,7 @@ The rule is site-wide. It splits each title on a separator set: `|`, `::` and `Â
 
 Deviations are grouped into four classes and ordered by group size, with the class order breaking ties. Each item is labelled in full: `3 of 240 page(s) have a title that is only the brand "Acme"`; `4 of 240 page(s) never mention "Acme", which 96% of titles carry`; `1 of 240 page(s) put "Acme" first but the norm is last`; `1 of 210 page(s) separate "Acme" with "-" but the norm is "|"`. Up to ten groups are listed with up to ten example URLs each. The separator norm needs its own sample of at least 10 votes and its own 70% agreement before a separator deviation is reported at all.
 
-Two guards keep it honest. On a multi-section site the brand candidate must appear in at least two sections, so a section label such as `Blog` cannot be mistaken for the brand in a lopsided crawl. And the homepage is exempt, since `Acme - tools for X` is a normal home title. A page with no title never votes and is never a deviant, because `core/meta-title` owns that case. Severity warning, weight 3.
+Two guards keep it honest. On a multi-section site the brand candidate must appear in at least two sections, so a section label such as `Blog` cannot be mistaken for the brand in a lopsided crawl. And the homepage is exempt, since `Acme - tools for X` is a normal home title. A page with no title never votes and is never a deviant, because `core/meta-title` owns that case. Pages marked `noindex` (robots meta tag or `X-Robots-Tag` header) are left out of the vote and never judged, since campaign or terms pages kept out of search often carry a short title on purpose; they still count toward the site page floor. This applies only when the site itself is indexable, so a staging host that is noindex everywhere is judged in full. See [pages kept out of search](/rules/index#pages-kept-out-of-search). Severity warning, weight 3.
 
 ## How to fix it
 
@@ -59,8 +59,9 @@ disable = ["content/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["content/title-pattern-outlier"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
@@ -77,7 +78,7 @@ Content findings ship in every audit next to the SEO, performance and agent expe
 
 ## Check your site
 
-Run `squirrel audit https://example.com` and open the Content section of the report. Each deviation class is listed with its page count and example URLs. Local audits are free.
+Run `squirrel audit https://example.com` and open the Content section of the report. Each deviation class is listed with its page count and example URLs. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">

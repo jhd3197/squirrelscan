@@ -13,12 +13,16 @@ The two cases differ in cost. Blocking a training crawler such as `GPTBot` is of
 
 The rule runs once per crawl. It uses three homepage fetches made during the prefetch phase, one with a browser user-agent, one as `GPTBot` and one as `Claude-User`, and compares each AI response against the browser baseline. It emits one or two checks: at most one per AI probe, or a single check covering all of them.
 
-- `agent-blocking`, skipped with the message `Agent-access probe data not available` when the prefetch did not run, or `Browser baseline did not return 2xx (status <status>) — cannot compare agent access` when the browser fetch itself failed, where `<status>` is the status it returned or `n/a` when the probe is missing entirely. Without a healthy baseline the site may be down for everyone, so the rule declines to blame the agents.
+- `agent-blocking`, skipped with the message `Agent access not checked: the discovery probe was not sent` and the value `not-checked` when the probes did not run or the browser probe was never sent, or `Browser baseline did not return 2xx (status <status>) — cannot compare agent access` when the browser fetch itself failed, where `<status>` is the status it returned or `n/a` when the probe is missing entirely. Without a healthy baseline the site may be down for everyone, so the rule declines to blame the agents.
 - `agent-access-payment`: reports at info status with the message `<agent> hit a pay-per-crawl wall (<signal>) — reported by ax/pay-per-crawl, not a block` when the response is a 402 or carries a payment signal. The parenthesised signal is omitted when the response named none. A deliberate payment wall is not an access block.
-- `agent-access`: at info status with `<agent> probe was inconclusive (<reason>)` when the request never completed. At warn status with `<agent> got the same status as the browser but only N% of the body — likely a soft-block / interstitial served to the agent` when the agent response was itself 2xx, the browser body was not empty, and the agent body came back under a fifth of its size. At warn status with `<agent> is blocked (<reason>) while the browser gets 200 — often an intentional training opt-out, but confirm it was deliberate` for a bot challenge, a 401, a 403 or a 5xx. The same condition on `Claude-User` is a fail with `Claude-User is blocked (<reason>) while the browser gets 200 — this breaks a live fetch a real user triggered inside an assistant, the worst case for agent access`.
+- `agent-access`: at info status with `<agent> not checked: the discovery probe was not sent` and the value `not-checked` when that probe was never sent, and with `<agent> probe was inconclusive (<reason>)` when it was sent and never completed. At warn status with `<agent> got the same status as the browser but only N% of the body — likely a soft-block / interstitial served to the agent` when the agent response was itself 2xx, the browser body was not empty, and the agent body came back under a fifth of its size. At warn status with `<agent> is blocked (<reason>) while the browser gets 200 — often an intentional training opt-out, but confirm it was deliberate` for a bot challenge, a 401, a 403 or a 5xx. The same condition on `Claude-User` is a fail with `Claude-User is blocked (<reason>) while the browser gets 200 — this breaks a live fetch a real user triggered inside an assistant, the worst case for agent access`.
 - `agent-blocking`: passes with `GPTBot and Claude-User reached the homepage like a browser`, naming the probes it ran, when none of them was classified as blocked, soft-blocked, inconclusive or payment-walled. An unchallenged 3xx or 404 counts as clean, since the rule is comparing access rather than status.
 
+A probe counts as a bot challenge when the response carries `cf-mitigated: challenge`, or when the first 10 KB of its body holds Cloudflare's challenge script (`/cdn-cgi/challenge-platform/h/…/orchestrate/`) or a `__cf_chl_` or `_cf_chl_opt` marker, or the first 4 KB holds a `<title>` that starts with `Just a moment`. The reason in the message names which: `cf-mitigated`, `challenge-platform`, `__cf_chl_` or `just-a-moment`. The JavaScript Detections script that Cloudflare adds to ordinary pages loads from `/cdn-cgi/challenge-platform/scripts/jsd/` and does not count, and neither does the phrase in page text.
+
 The soft-block threshold is a fifth of the browser body size. That is the shape of an interstitial: a 2xx with a fraction of the content. The rule's severity is error so that a blocked user-action fetcher badges as an error; a training-crawler block emits a warn check, which the report downgrades to a warning on its own.
+
+A probe goes unsent when [discovery probes](/configuration/crawler#discovery-probes) are turned off, when no rule that reads it was enabled for the crawl, or when the crawl's preamble time budget ran out first. A probe that went out and got no answer, a refused connection or a timeout, counts the same. None of those says anything about the site, so the result is `not-checked`, never absent.
 
 ## How to fix it
 
@@ -63,8 +67,9 @@ disable = ["ax/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["ax/agent-blocking"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
@@ -83,7 +88,7 @@ Agent experience findings ship in every audit next to the SEO, performance and s
 
 ## Check your site
 
-Run `squirrel audit https://example.com` and open the Agent Experience section of the report. Each probe shows its status and body size against the browser. Local audits are free.
+Run `squirrel audit https://example.com` and open the Agent Experience section of the report. Each probe shows its status and body size against the browser. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">

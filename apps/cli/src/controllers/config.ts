@@ -1,8 +1,10 @@
 // Generic config command - interface-agnostic
 
+import type { RuleOptionsProblem } from "@squirrelscan/rules";
+
 import { isUnsafeObjectKey } from "@squirrelscan/core-contracts/untrusted-keys";
 import { existsSync, readFileSync } from "node:fs";
-import { parse as parseTOML } from "smol-toml";
+import { parse as parseTOML, TomlError } from "smol-toml";
 
 import { ConfigSchema, type SquirrelScanConfig } from "@/config";
 import { redactValue } from "@/utils/redact";
@@ -96,11 +98,36 @@ export function showConfig(
     return err(
       commandError(
         ErrorCodes.FILE_READ_ERROR,
-        `Failed to read config: ${(error as Error).message}`,
+        `Failed to read config: ${readErrorDetail(error)}`,
         { path: configPath }
       )
     );
   }
+}
+
+export interface ValidateConfigResult extends ShowConfigResult {
+  /**
+   * `[rule_options]` problems the schema cannot see (pub#510): a table naming
+   * no rule, an option the rule does not declare, a value of the wrong type.
+   */
+  ruleOptionProblems: RuleOptionsProblem[];
+}
+
+/**
+ * `showConfig`, plus every rule option checked against the rule it names. The
+ * rules package loads only here, so `config show` and `config set` stay on the
+ * light startup path (#2023).
+ */
+export async function validateConfig(
+  configPath: string | null
+): Promise<Result<ValidateConfigResult>> {
+  const shown = showConfig(configPath);
+  if (!shown.ok) return shown;
+  const { checkRuleOptions } = await import("@squirrelscan/rules");
+  return ok({
+    ...shown.data,
+    ruleOptionProblems: checkRuleOptions(shown.data.config.rule_options),
+  });
 }
 
 /**
@@ -129,6 +156,12 @@ function parseValue(value: string): unknown {
   }
 
   return value;
+}
+
+/** The parser's detail, labelled when the file is not valid TOML (repo#2055). */
+function readErrorDetail(error: unknown): string {
+  if (error instanceof TomlError) return `TOML syntax error: ${error.message}`;
+  return (error as Error).message;
 }
 
 /**
@@ -163,7 +196,7 @@ export function setConfigValue(
     return err(
       commandError(
         ErrorCodes.FILE_READ_ERROR,
-        `Failed to read config: ${(error as Error).message}`,
+        `Failed to read config: ${readErrorDetail(error)}`,
         { path: configPath }
       )
     );
@@ -175,10 +208,11 @@ export function setConfigValue(
   // Set the value (supports dot notation for nested keys)
   // Note: writing back with stringifyTOML will lose any comments/formatting
   const keys = key.split(".");
-  // `config` comes from parseTOML and inherits Object.prototype, so descending
-  // into a `__proto__`/`constructor`/`prototype` segment hands back the shared
-  // prototype and the final write lands on every object in the process. No
-  // config key is named any of these, so reject rather than silently skip.
+  // parseTOML returns null-prototype tables, but the `{}` tables created below
+  // inherit Object.prototype, so descending into a `__proto__`/`constructor`/
+  // `prototype` segment of one hands back the shared prototype and the final
+  // write lands on every object in the process. No config key is named any of
+  // these, so reject rather than silently skip.
   const unsafeSegment = keys.find((segment) => isUnsafeObjectKey(segment));
   if (unsafeSegment) {
     return err(

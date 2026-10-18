@@ -15,7 +15,10 @@
 
 import type { UpgradeOffer } from "@squirrelscan/cloud-client";
 
-import { computeCost } from "@squirrelscan/core-contracts/credits";
+import {
+  computeCost,
+  minimumAuditCredits,
+} from "@squirrelscan/core-contracts/credits";
 import { getPlan } from "@squirrelscan/core-contracts/plans";
 
 import { fmt } from "@/cli/format";
@@ -23,9 +26,14 @@ import { fmt } from "@/cli/format";
 /** planId stays "starter" in the DB and Stripe; users only ever see "Pro". */
 const PRO = getPlan("starter");
 
-/** Cheapest possible audit: a balance under this can buy no cloud audit at all. */
+/** The flat per-audit charge. */
 export const AUDIT_BASE_CREDITS = computeCost("audit_base", 1);
-export const RENDER_PAGE_CREDITS = computeCost("render", 1);
+/** What every audited page costs, however it was fetched (#2290). */
+export const AUDIT_PAGE_CREDITS = computeCost("audit_page", 1);
+/** What one external link the cloud verifies for an audit costs, cloud or signed-in CLI (#2291, #801; verified only since squirrelscan/repo#2927). */
+export const EXTERNAL_LINK_CREDITS = computeCost("external_link", 1);
+/** Cheapest possible audit (base + one page): a balance under this can buy no cloud audit at all. */
+export const MIN_AUDIT_CREDITS = minimumAuditCredits();
 
 const UPGRADE_BASE = "https://squirrelscan.com/upgrade";
 
@@ -33,8 +41,23 @@ const UPGRADE_BASE = "https://squirrelscan.com/upgrade";
  * The one public upgrade URL. `src` is attribution only, so the surface that
  * sold the upgrade can be told apart from the ones that didn't.
  */
-export function upgradeUrl(src: "cli" | "cli-audit" | "cli-credits"): string {
+export function upgradeUrl(
+  src: "cli" | "cli-audit" | "cli-credits" | "mcp-audit"
+): string {
   return `${UPGRADE_BASE}?src=${src}`;
+}
+
+const PRICING_BASE = "https://squirrelscan.com/pricing";
+
+/**
+ * The plan comparison page, for someone who hit the wall and is not ready to
+ * buy. `src` is the same attribution value as {@link upgradeUrl}, and is what
+ * the site reads to recognise a credit-wall arrival. It is offered next to the
+ * upgrade link, never instead of it: the upgrade link can name the org that hit
+ * the wall, and the pricing page cannot.
+ */
+export function pricingUrl(src: "cli" | "cli-audit" | "cli-credits"): string {
+  return `${PRICING_BASE}?src=${src}`;
 }
 
 const n = (value: number) => value.toLocaleString("en-US");
@@ -53,11 +76,19 @@ export function proPitchLines(
     `  ${fmt.bold(PRO_HEADLINE)}`,
     `  ${fmt.dim(`Also unlocks daily audits on every site, faster crawls, and up to ${n(PRO.maxPagesPerAudit)} pages per audit.`)}`,
     `  Upgrade: ${fmt.cyan(upgradeUrl(src))}`,
+    `  Compare plans: ${fmt.cyan(pricingUrl(src))}`,
   ];
 }
 
 /** What an audit costs, stated in the same words everywhere. */
-export const AUDIT_PRICING_LINE = `Every cloud audit costs ${AUDIT_BASE_CREDITS} credits base plus ${RENDER_PAGE_CREDITS} per rendered page.`;
+export const AUDIT_PRICING_LINE = `A signed-in audit costs ${AUDIT_BASE_CREDITS} credits base plus ${AUDIT_PAGE_CREDITS} per audited page, plus ${EXTERNAL_LINK_CREDITS} per external link the cloud verifies for it (at most 1 per page).`;
+
+/**
+ * The one-time notice the first signed-in audit with external link checks
+ * prints after pricing v12 (#801): a CLI audit's cloud link checks used to be
+ * free, and every earlier release said so.
+ */
+export const LINK_PRICING_NOTICE = `Link checks now cost credits: ${EXTERNAL_LINK_CREDITS} per external link the cloud verifies for this audit, at most 1 per page of the audit's page limit, the same as a cloud audit. Links it can't answer in time are checked from this machine for free. Skip link checks with --no-external-links.`;
 
 /**
  * The upgrade pitch built from the SERVER's offer (#2183).
@@ -84,6 +115,7 @@ export function offerPitchLines(
     )}`,
     `  ${fmt.dim(`Also unlocks daily audits on every site, faster crawls, and up to ${n(PRO.maxPagesPerAudit)} pages per audit.`)}`,
     `  Upgrade: ${fmt.cyan(offer.url)}`,
+    `  Compare plans: ${fmt.cyan(pricingUrl(fallbackSrc))}`,
   ];
 }
 

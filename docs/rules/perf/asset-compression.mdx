@@ -20,6 +20,8 @@ The rule runs once per crawl over the CSS, image and script resources the crawl 
 
 An asset is judged only when its status was 2xx, it recorded no error, it was fetched on this run rather than reused from a cached record, its content encoding was observed on that fetch, and its content type is compressible. Those exclusions are the point: a record with no observed encoding cannot prove the server sent none, and reporting on it would invent a finding. Any declared coding counts as compressed, so a coding newer than this rule is never reported as uncompressed. `identity`, including a list of nothing but `identity` tokens, means no coding and does count.
 
+On a local or private-network host, such as `localhost` or `192.168.1.10`, the rule is skipped and left out of the score, because a dev server is not the production edge. See [Transport and delivery rules do not apply](/guides/local-audits-cli#transport-and-delivery-rules-do-not-apply).
+
 ## How to fix it
 
 ```nginx
@@ -73,8 +75,9 @@ disable = ["perf/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["perf/asset-compression"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
@@ -92,7 +95,7 @@ Performance findings ship in every audit next to the SEO, security and agent exp
 
 ## Check your site
 
-Run `squirrel audit https://example.com` and open the Performance section of the report. Every uncompressed asset is listed with its size, largest first. Local audits are free.
+Run `squirrel audit https://example.com` and open the Performance section of the report. Every uncompressed asset is listed with its size, largest first. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">

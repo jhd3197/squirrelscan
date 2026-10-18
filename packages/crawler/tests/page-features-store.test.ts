@@ -39,6 +39,9 @@ const NAP_COLUMNS = [
 /** The v22 site-chrome columns (#1371) — asserted on both the fresh and migrated paths. */
 const CHROME_COLUMNS = ["favicon_href", "theme_color", "og_image"];
 
+/** The v30 report-scalars column (#2343) — the report's own per-page fields. */
+const REPORT_COLUMNS = ["report_scalars"];
+
 function feat(over: Partial<PageFeatureRow> = {}): PageFeatureRow {
   return {
     normalizedUrl: "https://example.com/a",
@@ -72,6 +75,8 @@ function feat(over: Partial<PageFeatureRow> = {}): PageFeatureRow {
     faviconHref: null,
     themeColor: null,
     ogImage: null,
+    reportScalars: null,
+    hreflangAlternates: null,
     ...over,
   };
 }
@@ -515,6 +520,8 @@ describe("page_features migration (v17 → current)", () => {
     for (const col of NAP_COLUMNS) expect(cols).toContain(col);
     // v22 site-chrome columns present after migration.
     for (const col of CHROME_COLUMNS) expect(cols).toContain(col);
+    // v30 report-scalars column present after migration (#2343).
+    for (const col of REPORT_COLUMNS) expect(cols).toContain(col);
     check.close();
   });
 
@@ -548,6 +555,81 @@ describe("page_features migration (v17 → current)", () => {
     ).map((c) => c.name);
     for (const col of CHROME_COLUMNS) expect(cols).toContain(col);
     check.close();
+  });
+
+  test("v30 report-scalars column exists on a FRESH database (SCHEMA path, not the migration)", async () => {
+    const path = tmpDbPath();
+    const store = new SQLiteStorage(path);
+    await run(store.init());
+    await run(store.close());
+
+    const check = new Database(path);
+    const cols = (
+      check.prepare("PRAGMA table_info(page_features)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    for (const col of REPORT_COLUMNS) expect(cols).toContain(col);
+    check.close();
+  });
+
+  test("a DB already at v29 gains report_scalars and its old rows read back as null", async () => {
+    const path = tmpDbPath();
+    const seed = new SQLiteStorage(path);
+    await run(seed.init());
+    await run(
+      seed.upsertPageFeatures("c1", feat({ normalizedUrl: "https://example.com/legacy" }))
+    );
+    await run(seed.close());
+
+    const downgrade = new Database(path);
+    for (const col of REPORT_COLUMNS) {
+      downgrade.exec(`ALTER TABLE page_features DROP COLUMN ${col}`);
+    }
+    downgrade.exec("UPDATE schema_version SET version = 29");
+    downgrade.close();
+
+    const store = new SQLiteStorage(path);
+    await run(store.init());
+    const migrated = await run(store.getPageFeatures("c1", "https://example.com/legacy"));
+    // null, NOT a fabricated empty object: it is what makes the report's fallback
+    // parse reachable for a pre-v30 audit instead of reporting blank scalars.
+    expect(migrated?.title).toBe("Title A");
+    expect(migrated?.reportScalars).toBeNull();
+
+    // ...and the migrated table accepts a full v30 write that round-trips.
+    await run(
+      store.upsertPageFeatures(
+        "c1",
+        feat({
+          normalizedUrl: "https://example.com/fresh",
+          reportScalars: {
+            metaRobots: "index,follow",
+            ogTitle: "OG Title",
+            ogDescription: "OG Desc",
+            ogUrl: "https://example.com/fresh",
+            ogType: "article",
+            ogSiteName: "Example",
+            ogImage: "/relative-og.png",
+            twitterCard: "summary_large_image",
+            h1Count: 2,
+            thinContent: true,
+          },
+        })
+      )
+    );
+    const fresh = await run(store.getPageFeatures("c1", "https://example.com/fresh"));
+    expect(fresh?.reportScalars).toEqual({
+      metaRobots: "index,follow",
+      ogTitle: "OG Title",
+      ogDescription: "OG Desc",
+      ogUrl: "https://example.com/fresh",
+      ogType: "article",
+      ogSiteName: "Example",
+      ogImage: "/relative-og.png",
+      twitterCard: "summary_large_image",
+      h1Count: 2,
+      thinContent: true,
+    });
+    await run(store.close());
   });
 
   test("a DB already at v20 gains the site-chrome columns and keeps its existing rows", async () => {
@@ -648,5 +730,75 @@ describe("page_features migration (v17 → current)", () => {
     };
     expect(version.version).toBe(SCHEMA_VERSION);
     check.close();
+  });
+});
+
+// #489: the hreflang alternates the duplicate title and description rules read on
+// the streaming path. A row written before the column existed reads as null,
+// which the rules treat as "no alternates", the behaviour before #489.
+describe("page_features store: hreflang_alternates (v33)", () => {
+  const alternates = [
+    { hreflang: "en-gb", href: "https://example.com/en-gb/a" },
+    { hreflang: "en-us", href: "https://example.com/en-us/a" },
+  ];
+
+  test("round-trips the alternates, and stores none as null", async () => {
+    const store = await freshStore();
+    await run(store.upsertPageFeatures(CRAWL, feat({ hreflangAlternates: alternates })));
+    await run(
+      store.upsertPageFeatures(CRAWL, feat({ normalizedUrl: "https://example.com/b" }))
+    );
+    expect(
+      (await run(store.getPageFeatures(CRAWL, "https://example.com/a")))?.hreflangAlternates
+    ).toEqual(alternates);
+    expect(
+      (await run(store.getPageFeatures(CRAWL, "https://example.com/b")))?.hreflangAlternates
+    ).toBeNull();
+    await run(store.close());
+  });
+
+  test("a DB at v32 gains the column and its old rows read back as null", async () => {
+    const path = tmpDbPath();
+    const seed = new SQLiteStorage(path);
+    await run(seed.init());
+    await run(seed.upsertPageFeatures("c1", feat({ normalizedUrl: "https://example.com/legacy" })));
+    await run(seed.close());
+
+    const downgrade = new Database(path);
+    downgrade.exec("ALTER TABLE page_features DROP COLUMN hreflang_alternates");
+    downgrade.exec("UPDATE schema_version SET version = 32");
+    downgrade.close();
+
+    const store = new SQLiteStorage(path);
+    await run(store.init());
+    const legacy = await run(store.getPageFeatures("c1", "https://example.com/legacy"));
+    expect(legacy?.title).toBe("Title A");
+    expect(legacy?.hreflangAlternates).toBeNull();
+    await run(store.upsertPageFeatures("c1", feat({ hreflangAlternates: alternates })));
+    expect(
+      (await run(store.getPageFeatures("c1", "https://example.com/a")))?.hreflangAlternates
+    ).toEqual(alternates);
+    await run(store.close());
+  });
+
+  // A DB stamped at the current version without the column (a migration
+  // numbering collision) would otherwise fail every page-features write.
+  test("a DB stamped current but missing the column is repaired on open", async () => {
+    const path = tmpDbPath();
+    const seed = new SQLiteStorage(path);
+    await run(seed.init());
+    await run(seed.close());
+
+    const broken = new Database(path);
+    broken.exec("ALTER TABLE page_features DROP COLUMN hreflang_alternates");
+    broken.close();
+
+    const store = new SQLiteStorage(path);
+    await run(store.init());
+    await run(store.upsertPageFeatures("c1", feat({ hreflangAlternates: alternates })));
+    expect(
+      (await run(store.getPageFeatures("c1", "https://example.com/a")))?.hreflangAlternates
+    ).toEqual(alternates);
+    await run(store.close());
   });
 });

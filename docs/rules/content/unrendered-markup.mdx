@@ -59,8 +59,9 @@ disable = ["content/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["content/unrendered-markup"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
@@ -78,7 +79,7 @@ Content findings ship in every audit next to the SEO, performance and agent expe
 
 ## Check your site
 
-Run `squirrel audit https://example.com` and open the Content section of the report. Each page is listed with the markup families found and an example. Local audits are free.
+Run `squirrel audit https://example.com` and open the Content section of the report. Each page is listed with the markup families found and an example. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">

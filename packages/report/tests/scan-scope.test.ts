@@ -10,6 +10,7 @@ import { renderText } from "../src/output/text";
 import { renderMarkdown } from "../src/output/markdown";
 import { renderHtml } from "../src/output/html";
 import { renderLlm } from "../src/output/llm";
+import { renderXml } from "../src/output/xml";
 
 function baseReport(overrides: Partial<AuditReport> = {}): AuditReport {
   return {
@@ -53,6 +54,85 @@ describe("scanScopeLine (#1180)", () => {
       scanScope: { origin: "ci", pagesCrawled: 1, capped: false },
     });
     expect(scanScopeLine(report)).toBe("Scan: 1 page crawled from CI.");
+  });
+});
+
+describe("time-stopped scans", () => {
+  const timeStopped = baseReport({
+    scanScope: {
+      origin: "cloud",
+      maxPages: 250,
+      pagesCrawled: 87,
+      capped: false,
+      stopReason: "time",
+    },
+  });
+
+  test("scan line says it stopped early on time, not that the limit was reached", () => {
+    expect(scanScopeLine(timeStopped)).toBe(
+      "Scan: 87 pages crawled from squirrelscan cloud (page limit 250, stopped early on time).",
+    );
+  });
+
+  test("scan line keeps the clamp wording and adds the time stop", () => {
+    const report = baseReport({
+      scanScope: {
+        origin: "cloud",
+        maxPages: 100,
+        requestedMaxPages: 500,
+        pagesCrawled: 40,
+        capped: false,
+        stopReason: "time",
+      },
+    });
+    expect(scanScopeLine(report)).toBe(
+      "Scan: 40 pages crawled from squirrelscan cloud (page limit 100 of 500 requested, stopped early on time).",
+    );
+  });
+
+  test("hint is worded for a time stop and does not tell the reader to raise the limit", () => {
+    const hint = fullScanHint(timeStopped);
+    expect(hint).toContain("Partial scan: the crawl ran out of time");
+    expect(hint).not.toContain("page limit");
+    expect(hint).not.toContain("--max-pages");
+  });
+
+  test("a page-limit stop renders exactly as before when stopReason is absent", () => {
+    const report = baseReport({
+      scanScope: { origin: "cloud", maxPages: 250, pagesCrawled: 250, capped: true },
+    });
+    expect(scanScopeLine(report)).toBe(
+      "Scan: 250 pages crawled from squirrelscan cloud (page limit 250 reached).",
+    );
+    expect(fullScanHint(report)).toContain("the page limit stopped the crawl");
+  });
+
+  test("capped wins when both are set", () => {
+    const report = baseReport({
+      scanScope: {
+        origin: "cloud",
+        maxPages: 250,
+        pagesCrawled: 250,
+        capped: true,
+        stopReason: "time",
+      },
+    });
+    expect(scanScopeLine(report)).toContain("page limit 250 reached)");
+    expect(fullScanHint(report)).toContain("the page limit stopped the crawl");
+  });
+
+  test("renderers carry the note; llm output names the stop reason", () => {
+    expect(renderText(timeStopped)).toContain("stopped early on time");
+    expect(renderMarkdown(timeStopped)).toContain("Partial scan: the crawl ran out of time");
+    expect(renderHtml(timeStopped, { reportId: "TESTID" })).toContain("stopped early on time");
+    expect(renderLlm(timeStopped)).toContain('stop-reason="time"');
+  });
+
+  test("llm output omits stop-reason on an ordinary run", () => {
+    const report = baseReport({
+      scanScope: { origin: "cloud", maxPages: 250, pagesCrawled: 30, capped: false },
+    });
+    expect(renderLlm(report)).not.toContain("stop-reason");
   });
 });
 
@@ -217,5 +297,61 @@ describe("a reduced page limit (#1909)", () => {
     ]) {
       expect(rendered).toContain("4320 of 10000 requested");
     }
+  });
+});
+
+describe("XML scan scope (#350)", () => {
+  test("states origin, pages crawled, the limit, whether it bound, and a clamped request", () => {
+    const out = renderXml(
+      baseReport({
+        totalPages: 500,
+        scanScope: {
+          origin: "cloud",
+          maxPages: 500,
+          requestedMaxPages: 5000,
+          pagesCrawled: 500,
+          capped: true,
+        },
+      }),
+    );
+    expect(out).toContain(
+      '    <scan-scope origin="cloud" crawled="500" max-pages="500" requested-max-pages="5000" capped="true"/>',
+    );
+    // Inside <site>, after the raw count it qualifies.
+    expect(out.indexOf("<scan-scope")).toBeGreaterThan(out.indexOf("<pages-crawled>"));
+    expect(out.indexOf("<scan-scope")).toBeLessThan(out.indexOf("</site>"));
+  });
+
+  test("an uncapped run, and a time stop", () => {
+    const uncapped = renderXml(
+      baseReport({ scanScope: { origin: "cli", pagesCrawled: 12, capped: false } }),
+    );
+    expect(uncapped).toContain('<scan-scope origin="cli" crawled="12" capped="false"/>');
+    const timed = renderXml(
+      baseReport({
+        scanScope: { origin: "ci", maxPages: 100, pagesCrawled: 40, capped: false, stopReason: "time" },
+      }),
+    );
+    expect(timed).toContain(
+      '<scan-scope origin="ci" crawled="40" max-pages="100" capped="false" stop-reason="time"/>',
+    );
+  });
+
+  test("a report with no scanScope renders exactly as before, with no empty element", () => {
+    const out = renderXml(baseReport());
+    expect(out).not.toContain("scan-scope");
+    expect(out).toContain(
+      "  <site>\n    <url>https://example.com</url>\n    <pages-crawled>1</pages-crawled>\n    <audit-date>2026-06-16T14:30:00.000Z</audit-date>\n  </site>",
+    );
+  });
+
+  test("escapes the values through escapeXml", () => {
+    const out = renderXml(
+      baseReport({
+        scanScope: { origin: '"><x' as never, pagesCrawled: 1, capped: false },
+      }),
+    );
+    expect(out).toContain('origin="&quot;&gt;&lt;x"');
+    expect(out).not.toContain('origin=""><x');
   });
 });

@@ -16,17 +16,18 @@ squirrel audit <url> [options]
 
 | Argument | Description |
 |----------|-------------|
-| `url` | The URL to audit (required) |
+| `url` | The URL to audit (required). Without a scheme, `https://` is assumed, or `http://` for a local or private host such as `localhost:3000`, `192.168.1.10` or `myapp.test` (see [local audits](/guides/local-audits-cli#local-and-private-hosts-stay-local)) |
 
 ## Options
 
 | Option | Alias | Description | Default |
 |--------|-------|-------------|---------|
-| `--max-pages` | `-m` | Maximum pages to crawl | varies by coverage mode |
+| `--max-pages` | `-m` | Maximum pages to crawl | the [level's](/guides/audit-levels) page budget |
 | `--max-depth` | | Maximum crawl depth from the seed (start page = 0) | unlimited |
 | `--concurrency` | | Global crawl worker pool size (overrides `[crawler] concurrency`) | `5` |
 | `--per-host` | | Max concurrent requests per host (overrides `[crawler] per_host_concurrency`) | `5` |
-| `--coverage` | `-C` | Coverage mode: `quick`, `surface`, `full` | auth-aware (see below) |
+| `--level` | | [Audit level](/guides/audit-levels): `quick`, `surface`, `full` | auth-aware (see below) |
+| `--coverage` | `-C` | Older name for `--level`, still accepted (`fast` means `quick`) | |
 | `--format` | `-f` | Output format: `console`, `text`, `json`, `html`, `markdown`, `xml`, `llm` | `console` |
 | `--output` | `-o` | Output file path | auto |
 | `--refresh` | `-r` | Ignore cache, fetch all pages fresh (full re-scan) | `false` |
@@ -43,31 +44,104 @@ squirrel audit <url> [options]
 | `--visibility` | | Visibility: `public`, `unlisted`, `private` | `unlisted` |
 | `--yes` | `-y` | Skip confirmation prompts (e.g. cloud credit spend) | `false` |
 | `--render` | | Force cloud browser rendering for this run: alias of `--render-mode all` ([uses credits](/guides/browser-rendering); requires login) | auto |
-| `--render-mode` | | Render strategy: `off` (HTTP only) · `auto` (render only client-rendered pages) · `all` (render every page). Overrides `[cloud].render` | auto |
-| `--http` | | Force plain HTTP for this run: alias of `--render-mode off` (never render, never spend render credits) | auto |
-| `--offline` | | Run fully offline: skip cloud features, publishing, and telemetry | `false` |
+| `--render-mode` | | Render strategy: `off` (HTTP only) · `auto` (render only client-rendered pages) · `all` (render every page). Overrides `[cloud].render` | the level's: `auto` for quick, `all` for surface and full |
+| `--http` | | Force plain HTTP for this run: alias of `--render-mode off` (never render in the cloud; pages cost the same either way) | auto |
+| `--offline` | | Run fully offline: skip cloud features, publishing, and telemetry. Nothing on another site is checked: external links, third-party scripts, stylesheets and fonts, and sitemap URLs on another site are skipped. Internal link targets still are checked. See [Fully offline audit](#fully-offline-audit) for what a redirect can still reach | `false` |
+| `--external-links` | | Check links to other sites this run, even where `[external_links] enabled = false` turns them off. Cannot be combined with `--offline` or `--no-external-links` | the level's: on at every level |
+| `--no-external-links` | | Do not check links to other sites this run. The report shows them as **Not checked** | the level's |
+| `--no-internal-links` | | Do not status-check internal link targets the crawl did not fetch (one `HEAD` request each, on by default at every level). See [Link checking defaults](/rules/links#link-checking-defaults) | checked |
+| `--no-classifier` | | Do not run the bundled page classifier: link sections in findings come from page markup only. Same as `[classifier] enabled = false`. See [Page Classifier](/configuration/classifier) | on |
 | `--header` | `-H` | Custom HTTP header on every crawl request, `Name: Value` (repeatable). Merges over `[crawler] headers`; values are redacted in output. See [Web Bot Auth](/guides/web-bot-auth) | none |
 | `--fail-on` | | Exit `2` when a threshold trips, for CI gating (repeatable / comma-separated) | none |
 | `--rule-include` | | Only run these rule categories or rules, e.g. `ax,perf` or `core/meta-title` (repeatable / comma-separated). Replaces `[rules] enable` for this run | none |
 | `--rule-exclude` | | Skip these rule categories or rules, e.g. `images,social` (repeatable / comma-separated). Adds to `[rules] disable` for this run | none |
+| `--disable-discovery-probes` | | Skip the pre-crawl discovery probes (`llms.txt`, `/.well-known/*`, `/swagger.json` and the rest) for this run. Overrides `[crawler] disable_discovery_probes`; `=false` sends them even when the config turns them off. See [Discovery probes](/configuration/crawler#discovery-probes) | `false` |
+| `--probe` | `-P` | Probing intensity: `passive`, `active` or `aggressive`. Overrides `[security] probe`. See [Probing intensity](#probing-intensity) | the level's: `passive` for quick, `active` for surface and full |
+| `--passive` | | Shortcut for `--probe passive` | `false` |
+| `--aggressive` | | Shortcut for `--probe aggressive` | `false` |
+| `--probe-budget` | | Wall-clock cap for all probing in this run, such as `30s` or `2m` (max `1h`). Overrides `[security] budget` | `30s` active, `2m` aggressive |
+| `--pentest` | | Shortcut for `--level full --probe aggressive` | `false` |
 | `--summary` | | Print only the score, category breakdown, and issue counts — no per-issue detail. Console format only | `false` |
 
-### Coverage modes
+### Audit levels
 
-| Mode | Default Pages | Description |
-|------|---------------|-------------|
-| `quick` | 25 | Fast scan - seed URL + sitemaps only, no link discovery, no cloud rules |
-| `surface` | 100 | Smart sampling - one page per URL pattern, runs cloud rules + summary |
-| `full` | 500 | Comprehensive - crawl everything up to limit, runs cloud rules + summary |
+| Level | Pages | What it does |
+|-------|-------|--------------|
+| `quick` | 25 | The URL and its sitemaps, no link following, no cloud checks, internal links checked |
+| `surface` | 100 | Follows links, one page per URL pattern first, with the cloud checks and the editor's summary |
+| `full` | 500 | Every page it can reach up to the budget, with the cloud checks and the editor's summary |
 
-**Default coverage is auth-aware.** Any signed-in account (free or Pro) defaults to
-`surface`, so the cloud-backed rules (AI/EEAT/blocking) and the editor's summary run
-and a free report demos the full product. Only anonymous (not signed-in) runs default
-to `quick` (fast, no cloud calls, no credit spend). Pass `--coverage` (or set
-`[crawler] coverage` in config) to override either way. `quick` deliberately skips
-**all** networked cloud enrichment. Use `surface`/`full` (or just log in) to run the
-full rule set. Free and Pro run the same checks: Pro just grants more monthly credits
+A level also sets rendering, external link checks and probing. Every flag that
+changes one of those settings (`--max-pages`, `--render-mode`, `--http`,
+`--probe` and the rest) still works, and makes the audit **custom**. The banner
+says what changed:
+
+```text
+Level     custom (surface + max_pages 200)
+```
+
+**The default level is auth-aware.** Any signed-in account (free or Pro) defaults
+to `surface`, so the cloud checks and the editor's summary run and a free report
+demos the full product. Signed-out and `--offline` runs default to `quick`. Pass
+`--level` (or set `[crawler] coverage` in config) to choose either way.
+
+`quick` skips the cloud checks, and nothing else changes about billing: signed
+in, a quick audit is a cloud audit like any other level, at 50 credits plus 2
+per audited page (up to 100 for 25 pages), and it renders the pages that need
+JavaScript in the cloud browser. `--http` skips the browser, not the page
+charge. Free and Pro run the same checks: Pro just grants more monthly credits
 and lets you top up.
+
+See [Audit levels](/guides/audit-levels) for every setting of every level, custom
+levels, and the plan and credit limits.
+
+### Probing intensity
+
+Probing intensity says how hard each page is poked beyond what the crawl
+fetched. It is one of the [audit level's](/guides/audit-levels) settings, with
+the page budget and rendering.
+
+| Level | What it sends |
+|-------|---------------|
+| `passive` | No request beyond the crawl |
+| `active` | Quiet probes: a handful of requests that look like normal traffic |
+| `aggressive` | Loud probes: many requests and many 404s, which can trip a WAF |
+
+The audit level picks the default: `passive` for quick, `active` for surface and
+full. `aggressive` is never a default. The audit prints the level and its budget
+in the run banner:
+
+```text
+Level     surface · max 100 pages
+Probing   active · budget 30s
+```
+
+`--passive` and `--aggressive` are shortcuts for `--probe`. Using both is refused,
+as is a shortcut that contradicts `--probe`, the same way `--render` and `--http`
+are. An unknown level or budget fails before the crawl starts.
+
+`--probe-budget` caps the wall-clock time of **all** probing together, not each
+probe. Once it runs out, no new probe starts.
+
+The rules that probe, and exactly what each one sends, are listed in
+[Security configuration](/configuration/security#rules-that-probe).
+
+`--disable-discovery-probes` (or `[crawler] disable_discovery_probes = true`)
+keeps probing passive, and no probe sends a request.
+
+<Warning>
+`--aggressive` and `--pentest` request paths that `robots.txt` disallows, on
+purpose. Only use them on websites you own or are authorized to test.
+</Warning>
+
+```bash
+squirrel audit https://example.com --aggressive --probe-budget 1m
+squirrel audit https://example.com --pentest
+```
+
+To pick which rule families run, use `--rule-include` and `--rule-exclude`. See
+[Security configuration](/configuration/security) for `[security] probe` and
+`budget`, and the defaults for cloud audits.
 
 ## Examples
 
@@ -80,13 +154,13 @@ squirrel audit https://example.com
 ### Quick health check
 
 ```bash
-squirrel audit https://example.com -C quick
+squirrel audit https://example.com --level quick
 ```
 
 ### Full comprehensive audit
 
 ```bash
-squirrel audit https://example.com -C full
+squirrel audit https://example.com --level full
 ```
 
 ### Crawl more pages
@@ -167,14 +241,14 @@ Publishing requires authentication. Run `squirrel auth login` first; logged-out 
 </Note>
 
 <Note>
-An audit of a host no squirrelscan server can reach never publishes, never registers a run, and never renders in the cloud, even with `--publish` or `--render`. That covers `localhost`, loopback and private ranges such as `192.168.1.10`, and internal names such as `box.local` or anything under `.internal`. Hosted services cannot reach your machine or your private network, so there is nothing they could screenshot, re-render or re-audit. The audit itself runs and prints normally. See [Local audits with the CLI](/guides/local-audits-cli).
+An audit of a host no squirrelscan server can reach never publishes, never registers a run, and never renders in the cloud, even with `--publish` or `--render`. That covers `localhost`, loopback and private ranges such as `192.168.1.10`, and internal names such as `box.local` or anything under `.internal`. Hosted services cannot reach your machine or your private network, so there is nothing they could screenshot, re-render or re-audit. The audit itself runs and prints normally, except that the transport and delivery rules (HTTPS, HSTS, HTTP/2, compression, caching) are skipped and left out of the score. See [Local audits with the CLI](/guides/local-audits-cli), including [which rules are skipped and why](/guides/local-audits-cli#transport-and-delivery-rules-do-not-apply).
 </Note>
 
 ### Browser rendering
 
-When you're **logged in, audits render every page in a cloud browser by default** (2 credits/page) - so JavaScript-heavy sites are audited against their fully rendered HTML. The first time this would spend credits the CLI asks once and remembers your answer.
+When you're **logged in, audits render every page in a cloud browser by default**, so JavaScript-heavy sites are audited against their fully rendered HTML. A signed-in audit costs 50 credits plus 2 per audited page whether a page is rendered or fetched over plain HTTP, so rendering never changes the bill. At the levels that check external links it also pays 1 credit per external link the cloud verifies, at most 1 per page; links the cloud cannot answer in time are checked on your machine for free. The first time an audit would spend credits the CLI asks once and remembers your answer, and if your balance can't cover the page limit the CLI lowers the limit to what it covers and tells you. See [Credits and pricing](/cloud/credits).
 
-Force plain HTTP for a run (no rendering, no render credits):
+Force plain HTTP for a run (no cloud browser):
 
 ```bash
 squirrel audit https://example.com --http
@@ -190,9 +264,15 @@ For finer control, `--render-mode auto` renders **only** pages that need it (cli
 
 ### Fully offline audit
 
-Run an audit with zero network calls beyond the site being audited: no cloud
-analysis, no publishing, no update checks, no telemetry. Results are stored in
-the local database as usual:
+Run an audit with no cloud and no checks of other sites: no cloud analysis, no
+publishing, no update checks, no telemetry. External links are not checked, and
+neither are the third-party scripts, stylesheets and fonts the pages load, or
+sitemap URLs on another site. `reliability/broken-resources` reports the
+third-party ones as not measured, and `crawl/sitemap-4xx` says how many sitemap
+URLs on another site it skipped. Requests to the audited site can still end up
+on another host when the site sends them there: a page or asset redirect, or a
+sitemap that robots.txt lists on another host. Results are stored in the local
+database as usual:
 
 ```bash
 squirrel audit https://example.com --offline
@@ -253,10 +333,14 @@ squirrel audit https://example.com --rule-include ax --rule-include perf
 ```
 
 `--rule-include` replaces the categories that run for this audit;
+Excluding rules also skips the pre-crawl requests that only those rules read:
+`--rule-exclude ax` sends none of the
+[discovery probes](/configuration/crawler#discovery-probes).
+
 `--rule-exclude` skips categories on top of whatever would normally run. When
 either flag is set, the report is **partial**: the health score is recomputed
 from only the included categories and the console output prints a
-`partial audit: ...` notice under the score. Only console output carries that
+`partial audit: ...` notice in its Report detail section at the end. Only console output carries that
 notice: other formats (json, text, markdown, xml, llm) print a warning to
 stderr instead, so the report body itself is unchanged. An unknown category
 errors before crawling, listing the valid category codes. `--fail-on score:<category>`
@@ -293,7 +377,7 @@ Human-readable output with colored issue severity:
 squirrelscan v0.1.0
 ========================================
 Auditing  https://example.com
-Coverage  surface · max 100 pages
+Level     surface · max 100 pages
 Config    defaults
 Account   you@example.com · 500 credits
 Dashboard https://app.squirrelscan.com
@@ -379,6 +463,8 @@ A page replays only when every input its rules read is unchanged:
 - the page's exact HTML, byte for byte
 - its status, headers, redirect chain and response timings
 - the version of squirrel that produced the results
+- the rules' own code, so a rule fix that ships without a version change (or one
+  you make in a source checkout) still re-runs the rules on unchanged pages
 - which rules are enabled, and the options they run with
 
 Change any of them and that page is audited again. Rules that read the whole site

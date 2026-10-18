@@ -32,7 +32,7 @@ import { applyBrowserHeaders } from "@squirrelscan/crawler";
 import { detectSoft404, parsePage, type Soft404Confirmation } from "@squirrelscan/parser";
 import { detectWafChallengePage } from "@squirrelscan/waf-detect";
 
-import { DEFAULT_MAX_BODY_BYTES, readBodyCapped } from "./lib/capped-body-read";
+import { DEFAULT_MAX_BODY_BYTES, fetchUndecoded, readBodyCapped } from "./lib/capped-body-read";
 
 import type { ParsedPage } from "@squirrelscan/rules";
 
@@ -133,6 +133,7 @@ function detectionInput(statusCode: number, parsed: ParsedPage) {
   return {
     statusCode,
     document: parsed.document,
+    errorShell: parsed.errorShell,
     title: parsed.meta?.title,
     h1Texts: parsed.h1?.texts,
     robotsMeta: parsed.meta?.robots,
@@ -150,7 +151,8 @@ function defaultConfirmFetch(timeoutMs: number): ConfirmFetch {
       // confirmation. Custom headers set first win, matching the crawler.
       const reqHeaders = new Headers(headers);
       applyBrowserHeaders(reqHeaders, userAgent);
-      const res = await fetch(url, {
+      // Undecoded on every hop (#2717): readBodyCapped decodes within its cap.
+      const res = await fetchUndecoded(url, {
         headers: reqHeaders,
         redirect: "follow",
         signal: controller.signal,
@@ -174,6 +176,9 @@ function defaultConfirmFetch(timeoutMs: number): ConfirmFetch {
       return { status: 0, body: "", error: e instanceof Error ? e.message : String(e) };
     } finally {
       clearTimeout(timer);
+      // Closes the connection (#766): a capped read stops reading, but Bun
+      // keeps downloading the body until the signal aborts.
+      controller.abort();
     }
   };
 }

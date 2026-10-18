@@ -75,15 +75,17 @@ disable = ["crawl/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["crawl/all-noindex-pages"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
 - [crawl/indexability](/rules/crawl/indexability): the per-page version, with the directive named.
-- [crawl/indexability-conflicts](/rules/crawl/indexability-conflicts): robots.txt allowing what the page then noindexes, and the reverse.
+- [crawl/indexability-conflicts](/rules/crawl/indexability-conflicts): pages robots.txt blocks that carry no noindex.
 - [crawl/noindex-in-sitemap](/rules/crawl/noindex-in-sitemap): blocked pages you are still submitting in a sitemap.
 - [crawl/robots-txt](/rules/crawl/robots-txt): the file that produces the `robots.txt:disallowed` reason.
+- [Pages kept out of search](/rules#pages-kept-out-of-search): the title, description, H1, duplicate and orphan rules that skip the `meta:noindex` and `header:noindex` pages listed here. A page blocked only by robots.txt is not skipped.
 
 Crawlability findings ship in every audit next to the SEO, performance and agent experience rules. See [The Screaming Frog alternative for agents](https://squirrelscan.com/learn/screaming-frog-alternative) for how an agent works through a report.
 
@@ -94,7 +96,7 @@ Crawlability findings ship in every audit next to the SEO, performance and agent
 
 ## Check your site
 
-Run `squirrel audit https://example.com` and open the Crawlability section of the report. Every blocked page is listed by path with the reason it is blocked. Local audits are free.
+Run `squirrel audit https://example.com` and open the Crawlability section of the report. Every blocked page is listed by path with the reason it is blocked. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">

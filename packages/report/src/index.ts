@@ -138,6 +138,10 @@ export { getPathname } from "./url";
 // Docs
 export { getDocsUrl } from "./docs";
 
+// Rule text from the catalog (capped published reports carry none, #2656)
+export { ruleCatalogLookup, withCatalogRuleText } from "./rule-catalog";
+export type { RuleCatalogLookup, RuleCatalogText } from "./rule-catalog";
+
 // Output formatters
 export { renderHtml } from "./output/html";
 export { renderMarkdown } from "./output/markdown";
@@ -154,6 +158,26 @@ export {
   techChangeSummary,
   type TechGroup,
 } from "./technologies";
+
+// Page structure block helpers (#2307; report-only / non-scoring, shared across formats + CLI console)
+export {
+  CHROME_SECTIONS,
+  MIN_RULES_CONFIDENCE,
+  createStructureBuilder,
+  extractPageStructure,
+  pageTypePhrase,
+  structureAttr,
+  structureChromeLine,
+  structureDegradedLine,
+  structureNumber,
+  structurePageTypesLine,
+  structureRowDetail,
+  structureRows,
+  structureSectionName,
+  structureTotalsLine,
+  type StructureBuilder,
+  type StructureSource,
+} from "./structure";
 
 // Site profile section helpers (report-only / non-scoring; shared across formats + CLI console)
 export {
@@ -174,13 +198,34 @@ export {
   type SiteProfileRow,
 } from "./site-metadata";
 
+// Transport and delivery rules skipped for a local or private-network host (pub#629)
+export {
+  privateTargetLine,
+  privateTargetSkippedRules,
+  type PrivateTargetRule,
+  type PrivateTargetReportShape,
+} from "./private-target";
+
+// Checks that did not run for this audit: link checks off, links not followed (repo#2729)
+export {
+  notCheckedDetailLine,
+  notCheckedDetailLines,
+  notCheckedLine,
+  notCheckedLines,
+  notCheckedRules,
+  type NotCheckedReportShape,
+  type NotCheckedRule,
+} from "./not-checked";
+
 // Smart audits coverage + carried-finding provenance helpers (#110)
 // + scan scope disclosure (#1180) + refused off-site seed redirect (#1418)
 export {
+  auditLevelLine,
   coverageLine,
   carriedTag,
   timeAgo,
   scanScopeLine,
+  publishedReportNote,
   seedRedirect,
   seedRedirectLine,
   WITHHELD_SEED_REDIRECT_TARGET,
@@ -297,13 +342,54 @@ export {
   ruleCarriedPageCount,
   isPageUrl,
   isRedundantPageItem,
+  itemsNotListed,
+  itemsNotListedLine,
 } from "./affected-pages";
 export type { AffectedPages, RuleAffectedRollup } from "./affected-pages";
+
+// pub#837: an item's source pages as rows, each page once with its links and sections, and the
+// summary suffix that keeps links and pages apart. Shared by every renderer and the CLI console.
+export {
+  affectedPagesSuffix,
+  hasItemSources,
+  itemSourceList,
+  itemSourceView,
+  moreSourcePages,
+  sourceRowText,
+} from "./item-sources";
+export type { ItemSourceList, ItemSourceRow, ItemSourceView } from "./item-sources";
+
+// pub#846: a finding in a shared page region names the region instead of listing its pages.
+export {
+  REGION_SCOPE_MIN_PAGES,
+  REGION_SCOPE_MIN_SHARE,
+  TEMPLATE_REGIONS,
+  checkPagesScopedAway,
+  checkRegionScope,
+  checkScopeLine,
+  itemLabel,
+  itemRegionScope,
+  regionScopeData,
+  regionScopeLine,
+} from "./region-scope";
+export type { RegionScope, TemplateRegion } from "./region-scope";
+
+// pub#857: a finding on every page of one page type names the type instead of listing its pages.
+export {
+  PAGE_TYPE_SCOPE_MIN_PAGES,
+  PAGE_TYPE_SCOPE_MIN_SHARE,
+  PAGE_TYPE_SCOPE_SOURCE,
+  checkPageTypeScope,
+  pageTypeScopeData,
+  pageTypeScopeLine,
+} from "./page-type-scope";
+export type { PageTypeScope, PageTypeScopeCheck } from "./page-type-scope";
 
 // Failed/blocked audit notice copy (#792, #935) — single source of truth for
 // the static HTML report's FailureNotice and the dashboard's report-detail notice.
 export {
   getAuditFailureNotice,
+  refusedFetchLines,
   reportFailureReasonCode,
   type AuditFailureNotice,
 } from "./failure-notice";

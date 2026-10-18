@@ -1,4 +1,5 @@
 import { logger } from "../logger";
+import { frontDoorTest } from "../shared/front-door";
 // links/weak-internal-links - Pages with minimal internal link support
 
 import { z } from "zod";
@@ -7,6 +8,8 @@ import type { Rule, RuleContext, RuleResult, CheckResult } from "../types";
 
 import { matchesExcludePattern } from "@squirrelscan/utils";
 import { getPathname, normalizeUrl } from "@squirrelscan/utils";
+
+import { addSection, sectionMeta, withSection, type SectionCounts } from "./link-section-label";
 
 const SKIP_CHECK: CheckResult = {
   name: "weak-internal-links",
@@ -17,7 +20,10 @@ const SKIP_CHECK: CheckResult = {
 // Shared result builder — the legacy `site.pages` path and the streaming
 // `siteQuery` path feed it the SAME `weakPages` list, so the emitted check is
 // byte-identical regardless of how the incoming-link counts were sourced.
-function buildWeakLinksCheck(weakPages: string[]): CheckResult {
+function buildWeakLinksCheck(
+  weakPages: string[],
+  sectionsFor?: (url: string) => SectionCounts | undefined
+): CheckResult {
   if (weakPages.length > 0) {
     const pathList = weakPages
       .slice(0, 5)
@@ -31,7 +37,13 @@ function buildWeakLinksCheck(weakPages: string[]): CheckResult {
       name: "weak-internal-links",
       status: "warn",
       message: `${weakPages.length} page(s) have only 1 internal link`,
-      items: weakPages.map((url) => ({ id: url })),
+      items: weakPages.map((url) => {
+        // #2307: where the one link sits. Without section data the item stays bare.
+        const sections = sectionsFor?.(url);
+        return sections
+          ? { id: url, label: withSection(url, sections), meta: sectionMeta(sections) }
+          : { id: url };
+      }),
       details: { total: weakPages.length },
       value: pathList + suffix,
     };
@@ -50,15 +62,14 @@ function buildWeakLinksCheck(weakPages: string[]): CheckResult {
 function collectWeakPages(
   entries: Iterable<[string, number]>,
   excludePatterns: string[],
-  baseUrl: string
+  baseUrl: string,
+  entryUrls: readonly string[]
 ): string[] {
-  const normalizedBase = normalizeUrl(baseUrl);
+  const isFrontDoor = frontDoorTest(baseUrl, entryUrls);
   const weakPages: string[] = [];
   for (const [url, count] of entries) {
-    const normalizedUrl = normalizeUrl(url);
-
-    // Skip homepage
-    const isHomepage = normalizedUrl === normalizedBase || getPathname(url) === "/";
+    // Skip the homepage, and the page the crawl started on (pub#796)
+    const isHomepage = isFrontDoor(url);
     const isExcluded = matchesExcludePattern(url, excludePatterns);
 
     if (isHomepage || isExcluded) {
@@ -111,9 +122,13 @@ export const weakInternalLinksRule: Rule = {
       const weakPages = collectWeakPages(
         counts,
         excludePatterns,
-        ctx.site?.baseUrl || ""
+        ctx.site?.baseUrl || "",
+        ctx.site?.entryUrls ?? []
       );
-      checks.push(buildWeakLinksCheck(weakPages));
+      const sections = ctx.siteQuery.inboundSectionCounts?.();
+      checks.push(
+        buildWeakLinksCheck(weakPages, sections ? (url) => sections.get(url) : undefined)
+      );
       return { checks };
     }
 
@@ -127,6 +142,8 @@ export const weakInternalLinksRule: Rule = {
 
     // Build map of incoming dofollow link counts per URL
     const incomingLinkCount = new Map<string, number>();
+    // #2307: the same counted links, per link section, under the same normalized key.
+    const sections = new Map<string, SectionCounts>();
     const normalizedCache = new Map<string, string>();
 
     // Phase 1: Initialize all pages with 0 incoming links and cache normalized URLs
@@ -149,6 +166,7 @@ export const weakInternalLinksRule: Rule = {
             const current = incomingLinkCount.get(normalizedTarget);
             if (current !== undefined) {
               incomingLinkCount.set(normalizedTarget, current + 1);
+              addSection(sections, normalizedTarget, link.section);
             }
           } catch {
             invalidUrlCount++;
@@ -176,11 +194,17 @@ export const weakInternalLinksRule: Rule = {
           ]
       ),
       excludePatterns,
-      ctx.site?.baseUrl || ""
+      ctx.site?.baseUrl || "",
+      ctx.site?.entryUrls ?? []
     );
 
     // Report results
-    checks.push(buildWeakLinksCheck(weakPages));
+    checks.push(
+      buildWeakLinksCheck(weakPages, (url) => {
+        const key = normalizedCache.get(url);
+        return key === undefined ? undefined : sections.get(key);
+      })
+    );
 
     return { checks };
   },

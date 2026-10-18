@@ -6,23 +6,36 @@ import { Effect, Stream, PubSub, Duration, Deferred, Either } from "effect";
 import type {
   AuditFailureDetail,
   AuditFailureSource,
+  DiscoveryProbe,
   FrontierSource,
   LinkData,
   SitemapData,
 } from "@squirrelscan/core-contracts";
 import { isCacheHitReason } from "@squirrelscan/core-contracts";
+import { WELL_KNOWN_PATHS, isPermanentStorageError } from "@squirrelscan/core-contracts/storage";
 import { auditFailureDetail } from "@squirrelscan/core-contracts/failure-reason";
 import { COVERAGE_PAGE_LIMITS, REPORT_LIMITS } from "@squirrelscan/core-contracts/limits";
 
 import { extractCrawlableUrls } from "@squirrelscan/parser/extractors";
-import { parseDocument, parsePage, type ParsedPageCache } from "@squirrelscan/parser";
+import {
+  parseDocument,
+  parsePage,
+  type PageClassifierHook,
+  type ParsedPageCache,
+} from "@squirrelscan/parser";
 import { findClientRedirects } from "@squirrelscan/utils/client-redirects";
-import { DEFAULT_MAX_DOCUMENT_BODY_BYTES, readBodyCapped } from "@squirrelscan/utils/response-body";
+import {
+  DEFAULT_MAX_DOCUMENT_BODY_BYTES,
+  fetchUndecoded,
+  readBodyCapped,
+} from "@squirrelscan/utils/response-body";
 import { isHttpOrHttpsUrl } from "@squirrelscan/utils/safe-fetch";
+import { isCloudflareEmailProtectionUrl } from "@squirrelscan/utils/cloudflare-email";
 import { urlHostKey } from "@squirrelscan/utils/url";
 
 import { budgetRemainingMs, createPhaseBudget, withRequestDeadline } from "../deadline";
-import type { PhaseBudget } from "../deadline";
+import type { PhaseBudget, ProbeGate } from "../deadline";
+import { RefusalLog } from "../refusals";
 import {
   computeSitemapUrlCap,
   discoverSitemaps,
@@ -55,6 +68,7 @@ import type {
 
 import { createHostBackoff, type HostBackoffRegistry } from "../host-backoff";
 import {
+  contentTypeCharset,
   crawlErrorToFailureDetail,
   CrawlError,
   fetchPageWithRetry,
@@ -194,6 +208,19 @@ function failureHostOf(url: string): string | undefined {
 }
 
 /**
+ * The cause of a page the local store refused, short enough for the reason
+ * detail's 120 characters (#403). A StorageError's message carries the
+ * operation and, when the store is locked, a whole sentence of advice; this
+ * keeps only what names the cause.
+ */
+function storageFailureSummary(error: StorageError): string {
+  if (/database is locked|database table is locked|sqlite_busy|busy \(locked\)/i.test(error.message)) {
+    return "it was locked by another squirrel process";
+  }
+  return error.cause instanceof Error ? error.cause.message : error.message;
+}
+
+/**
  * Keep the most explanatory root failure (#1822): the first one recorded wins,
  * except that a failure on the audited entry URL always displaces one picked up
  * from a sitemap URL. Order matters because sitemap URLs and the seed are both
@@ -230,9 +257,10 @@ const PARSED_PAGE_CACHE_MAX_PAGES = COVERAGE_PAGE_LIMITS.quick;
 // perfectly well once the preamble is past.
 //
 // One budget spans those stages. Each request takes min(its own deadline, what
-// the budget has left); once it is spent the rest are skipped and store the same
-// "unreachable" shape a network failure gives them, so no probe's row goes
-// missing and every consumer keeps a reason to report.
+// the budget has left); once it is spent the rest are skipped. A skipped
+// well-known or agent-access probe stores the "unreachable" shape with the
+// budget reason; llms, markdown and RSL store no row (#409). Either way every
+// consumer keeps a reason to report, and it is "not checked", never missing.
 //
 // What this budget deliberately does NOT cover is sitemap discovery, which runs
 // after it on a progress window of its own (see SITEMAP_WALK_WINDOW_MS). The
@@ -354,7 +382,7 @@ function createHostScheduler(limitFor: HostConcurrencyLimit): HostScheduler {
     acquire,
     release,
 
-    waitForDelay: (host: string, delayMs: number) =>
+    waitForDelay: (host: string, delayMs: number, notAfter?: number) =>
       Effect.gen(function* () {
         // delayMs <= 0 disables staggering (e.g. cloud render path) — pure concurrency limit.
         if (delayMs <= 0) return;
@@ -362,6 +390,12 @@ function createHostScheduler(limitFor: HostConcurrencyLimit): HostScheduler {
         const state = getState(host);
         const now = Date.now();
         const scheduledStart = Math.max(now, state.nextFetchAt);
+        if (notAfter !== undefined && scheduledStart >= notAfter) {
+          // Past the caller's deadline: wait it out, reserve nothing (#409).
+          // The extra millisecond lands the caller past it, not on it.
+          yield* Effect.sleep(Duration.millis(Math.max(0, notAfter - now) + 1));
+          return;
+        }
         setState(host, { ...state, nextFetchAt: scheduledStart + delayMs });
         const waitMs = scheduledStart - now;
         if (waitMs > 0) {
@@ -380,6 +414,12 @@ export interface CreateCrawlerOptions {
   storage?: CrawlStorage;
   // Opt-in: retains each crawl-time ParsedPage so a same-process audit skips re-parse (#267)
   parsedPageCache?: ParsedPageCache;
+  /**
+   * Opt-in: run the page classifier on every parsed page (#2307). It fills `LinkData.section`
+   * where the markup is silent and stores the page type on the parsed page. Absent = markup rules
+   * only, exactly as before.
+   */
+  classify?: PageClassifierHook;
   // Opt-in: injectable fetch seam; defaults to the real fetchPageWithRetry (#315)
   fetcher?: CrawlFetcher;
   /**
@@ -460,6 +500,14 @@ export function createCrawler(
      * the order the workers interleave in. Seeded from storage on resume.
      */
     let rootFailure: AuditFailureDetail | undefined;
+    /**
+     * The first page this run lost to something other than its fetch: the
+     * local store refusing it, or processing throwing (#403). Written as the
+     * root failure only when the crawl stored nothing and saw no fetch failure,
+     * which is exactly when the audit would otherwise say only "No pages were
+     * crawled" while every page had in fact been fetched.
+     */
+    let processFailure: AuditFailureDetail | undefined;
 
     // Breadth-first tracking
     const prefixStats = new Map<string, { crawled: number; queued: number }>();
@@ -544,6 +592,64 @@ export function createCrawler(
           yield* Effect.sleep(Duration.millis(Math.min(waitMs, HOST_BACKOFF_POLL_MS)));
         }
       });
+
+    // The discovery probes' slots come from a scheduler of their own, sized by
+    // `discoveryProbePerHost` when the caller set one: a cloud-rendered crawl
+    // clamps the page limit to the plan's render concurrency (1 on free), and
+    // plain-HTTP probes queued behind that would run in series (#409).
+    const probeSlots = createHostScheduler(
+      (host) => config.discoveryProbePerHost?.concurrency ?? hostConcurrencyLimit(host),
+    );
+
+    /**
+     * Discovery probes queue behind per-host limits like page fetches (#409).
+     * They used to go out in one unthrottled burst of 20, so
+     * `per_host_concurrency = 1` and `per_host_delay_ms`, the settings for
+     * crawling a sensitive host politely, did nothing for the requests most
+     * likely to trip its firewall. Start spacing goes through the shared page
+     * scheduler, so the first page keeps its gap after the last probe.
+     *
+     * `per_host_delay_ms` only, not a robots.txt Crawl-delay: at the 2s cap,
+     * 28 probes would outlast the preamble budget and turn the later ones into
+     * "not checked" on every respect_robots audit of such a site.
+     *
+     * Queueing never outlasts the budget: a slot that would start past it is
+     * not taken, so the probes still waiting skip at the deadline instead of
+     * each sitting out its delay first. And the queue runs on its own fibers
+     * (the probe modules are promise-based), which `stop` cannot reach, so
+     * `interrupted` aborts them: nothing still queued goes out after the crawl
+     * was stopped.
+     */
+    const probeGate =
+      (budget: PhaseBudget, interrupted: AbortSignal): ProbeGate =>
+      (url, send) => {
+        // Budget already spent: `send` records a skip without a request, so
+        // there is nothing to throttle and no reason to queue for a slot.
+        if (budgetRemainingMs(budget) <= 0) return send();
+        const host = urlHostKey(url);
+        const delayMs = config.discoveryProbePerHost?.delayMs ?? config.perHostDelayMs;
+        return Effect.runPromise(
+          Effect.acquireUseRelease(
+            // Interruptible while queued, so a stop drains the queue at once;
+            // acquire's own onInterrupt hands on a slot granted mid-interrupt.
+            Effect.interruptible(probeSlots.acquire(host)),
+            () =>
+              Effect.gen(function* () {
+                // Spent while queued: skip at once, without taking a start slot.
+                if (budgetRemainingMs(budget) > 0) {
+                  yield* hostScheduler.waitForDelay(
+                    host,
+                    hostBackoff.delayFor(host, delayMs),
+                    budget.deadlineAt,
+                  );
+                }
+                return yield* Effect.promise(send);
+              }),
+            () => probeSlots.release(host),
+          ),
+          { signal: interrupted },
+        );
+      };
 
     // Shared cache seam (#147): same lookup logic runs local + cloud. Injectable
     // since #1899 so a caller whose previous crawl lives somewhere other than
@@ -640,6 +746,27 @@ export function createCrawler(
       return { normalized, decision };
     };
 
+    // An absolute include that allowedDomains refused is almost certainly a
+    // config the user expected to work, so say so once per include and host.
+    const vetoWarned = new Set<string>();
+    const warnIncludeVetoed = (include: string, host: string) =>
+      Effect.gen(function* () {
+        const key = `${include}\n${host}`;
+        if (vetoWarned.has(key)) return;
+        vetoWarned.add(key);
+        const message =
+          `include "${include}" matches ${host}, which allowedDomains does not list, so it was ` +
+          `not crawled. allowedDomains (the project \`domains\` setting) is a hard allowlist: add ` +
+          `${host} to it, or remove it to let the include reach that host`;
+        logger.warn("include vetoed by allowedDomains", message);
+        yield* emit({
+          type: "warning",
+          code: "include-vetoed-by-allowed-domains",
+          message,
+          timestamp: Date.now(),
+        });
+      });
+
     // ----------------------------------------
     // Enqueue URL
     // ----------------------------------------
@@ -657,6 +784,11 @@ export function createCrawler(
         const { normalized, decision } = normalizeAndCheckScope(rawUrl);
 
         if (!normalized) return;
+
+        // Cloudflare's email-protection link is an email address, never a page (pub#811,
+        // pub#838), whichever source names it: a sitemap, a carried finding, or a link from a
+        // page parsed before the parser left them out. A seed is the user's own choice.
+        if (source !== "seed" && isCloudflareEmailProtectionUrl(normalized)) return;
 
         // Depth ceiling (#318): never enqueue past maxDepth. Unset = unlimited (no-op).
         if (config.maxDepth != null && depth > config.maxDepth) return;
@@ -692,6 +824,9 @@ export function createCrawler(
 
         // Check scope
         if (!decision.allowed) {
+          if (decision.vetoedInclude) {
+            yield* warnIncludeVetoed(decision.vetoedInclude, new URL(normalized).host);
+          }
           logger.debug("url skipped (scope)", `${normalized} — ${decision.reason}`);
           yield* storage.upsertFrontier(crawlId, {
             normalizedUrl: normalized,
@@ -853,6 +988,14 @@ export function createCrawler(
     // ----------------------------------------
     // Reuse a cached page (304 / hash-match / origin-fresh / SWR)
     // ----------------------------------------
+    // Whether a processed page's outlinks may be followed. Quick/sitemap-only
+    // crawls (disableLinkDiscovery) fall back to discovery only when the sitemap
+    // yielded nothing to crawl. Read at call time: the pending count changes as
+    // the crawl runs. Shared by the fetch path and reuseCachedPage so the two
+    // can never disagree about it (#354).
+    const linkDiscoveryAllowed = (): boolean =>
+      !config.disableLinkDiscovery || config.sitemapPendingCount === 0;
+
     // Shared by every "no real fetch needed" path: copy the cached page +
     // links + images into the current crawl for reporting, re-discover links to
     // keep the frontier draining, mark done, emit an unchanged event, and bump
@@ -884,17 +1027,23 @@ export function createCrawler(
           yield* storage.upsertImage(crawlId, img);
         }
 
-        // Re-discover URLs from cached data to keep crawling. Fast path: use
-        // pre-parsed link data; fall back to re-parsing cached HTML.
+        // Re-discover URLs from cached data to keep crawling, unless link
+        // discovery is gated off (#354). Fast path: use pre-parsed link data;
+        // fall back to re-parsing cached HTML.
         let crawlableUrls: string[] = [];
-        if (cachedPage.parsedData) {
+        if (linkDiscoveryAllowed() && cachedPage.parsedData) {
           try {
             const parsed = JSON.parse(cachedPage.parsedData) as {
               links?: LinkData[];
             };
             if (parsed.links) {
               crawlableUrls = parsed.links
-                .filter((link) => link.isInternal && !link.isNofollow)
+                // A page cached before pub#811 still lists Cloudflare's email-protection link as
+                // internal; it is an email address, never a page to queue.
+                .filter(
+                  (link) =>
+                    link.isInternal && !link.isNofollow && !isCloudflareEmailProtectionUrl(link.url),
+                )
                 .map((link) => {
                   try {
                     const url = new URL(link.url);
@@ -911,6 +1060,7 @@ export function createCrawler(
           }
         }
         if (
+          linkDiscoveryAllowed() &&
           crawlableUrls.length === 0 &&
           cachedPage.html &&
           (isHtmlContentType(cachedPage.contentType) ||
@@ -1273,6 +1423,10 @@ export function createCrawler(
             // (subset of pagesFailed) so status derivation can say `blocked`
             // instead of a generic empty crawl (#792).
             const blockedFetch = error.type === "blocked";
+            // A body the runtime could not decode is a page the audit never
+            // saw. Counted (subset of pagesFailed) so the report can say its
+            // coverage was short instead of scoring the rest as complete.
+            const undecodableFetch = error.type === "decode";
             yield* storage.updateFrontierStatus(
               crawlId,
               entry.normalizedUrl,
@@ -1290,6 +1444,7 @@ export function createCrawler(
             yield* updateStats(crawlId, {
               pagesFailed: 1,
               ...(blockedFetch ? { pagesBlocked: 1 } : {}),
+              ...(undecodableFetch ? { pagesUndecodable: 1 } : {}),
               // #1822: the fetcher knows WHY (DNS, TLS, socket, timeout, 5xx).
               // Without this the reason is discarded here and a zero-page audit
               // can only say "No pages were crawled".
@@ -1489,6 +1644,15 @@ export function createCrawler(
               // deemed the content unchanged, so the hash represents current
               // content and is safe to trust.
               if (result.sourceHash) cachedPage.sourceHash = result.sourceHash;
+              // The response WAS fetched, so its Content-Type charset is current:
+              // a record stored before pub#674 has none, and the charset can
+              // change while the body does not.
+              cachedPage.headers = {
+                ...cachedPage.headers,
+                contentTypeCharset: contentTypeCharset(result.headers.contentType),
+                // Likewise the headers technology detection reads (pub#871).
+                techHeaders: result.headers.techHeaders ?? null,
+              };
               yield* reuseCachedPage(crawlId, entry, cachedPage, "hash_match", {
                 cacheFresh: false,
               });
@@ -1499,6 +1663,9 @@ export function createCrawler(
           // Build page record - use headers from result
           const headers: ResponseHeaders = {
             contentType: result.contentType,
+            // `contentType` is the media type only; the charset rides beside it
+            // so core/charset sees a header-only declaration (pub#674).
+            contentTypeCharset: contentTypeCharset(result.headers.contentType),
             contentEncoding: result.headers.contentEncoding ?? null,
             cacheControl: result.headers.cacheControl ?? null,
             expires: result.headers.expires ?? null,
@@ -1514,8 +1681,15 @@ export function createCrawler(
             xVercelCache: result.headers.xVercelCache ?? null,
             altSvc: result.headers.altSvc ?? null,
             acceptRanges: result.headers.acceptRanges ?? null,
+            // security/version-disclosure rule (#713).
+            xPoweredBy: result.headers.xPoweredBy ?? null,
+            xAspNetVersion: result.headers.xAspNetVersion ?? null,
+            xAspNetMvcVersion: result.headers.xAspNetMvcVersion ?? null,
+            xGenerator: result.headers.xGenerator ?? null,
             // security/cookie-flags rule (#748).
             setCookie: result.headers.setCookie ?? null,
+            // Technology detection in a local audit (pub#871).
+            techHeaders: result.headers.techHeaders ?? null,
           };
 
           const securityHeaders: SecurityHeaders = {
@@ -1554,7 +1728,7 @@ export function createCrawler(
             (!result.contentType && looksLikeHtml(result.body))
           ) {
             // Parse page data once (includes parseDocument internally)
-            const parsed = parsePage(result.body, result.finalUrl);
+            const parsed = parsePage(result.body, result.finalUrl, { classify: options.classify });
 
             // Retain the live ParsedPage so a same-process audit reuses its
             // DOM (#267) — capped: each retained DOM costs MBs for the rest
@@ -1646,9 +1820,7 @@ export function createCrawler(
             // Reuse document for URL extraction (no second parse)
             // Note: document can be null for error pages (4xx/5xx)
             // Skip link discovery in quick mode unless no sitemap URLs found
-            const shouldDiscoverLinks =
-              !config.disableLinkDiscovery || config.sitemapPendingCount === 0;
-            if (parsed.document && shouldDiscoverLinks) {
+            if (parsed.document && linkDiscoveryAllowed()) {
               const crawlableUrls = extractCrawlableUrls(parsed.document, result.finalUrl);
 
               for (const url of crawlableUrls) {
@@ -1702,8 +1874,10 @@ export function createCrawler(
             url: entry.normalizedUrl,
             status: result.status,
             loadTimeMs: result.loadTime,
+            ttfbMs: result.ttfb,
             sizeBytes: result.sizeBytes,
             depth: entry.depth,
+            fetcherId: result.fetcherId,
             timestamp: Date.now(),
             renderTimeMs: result.renderTimeMs,
             queueWaitMs: result.queueWaitMs,
@@ -1757,6 +1931,7 @@ export function createCrawler(
           pagesFailed: current.pagesFailed + (updates.pagesFailed ?? 0),
           pagesBlocked: (current.pagesBlocked ?? 0) + (updates.pagesBlocked ?? 0),
           pagesRateLimited: (current.pagesRateLimited ?? 0) + (updates.pagesRateLimited ?? 0),
+          pagesUndecodable: (current.pagesUndecodable ?? 0) + (updates.pagesUndecodable ?? 0),
           pagesSkipped: current.pagesSkipped + (updates.pagesSkipped ?? 0),
           pagesUnchanged: current.pagesUnchanged + (updates.pagesUnchanged ?? 0),
           pagesCacheFresh: (current.pagesCacheFresh ?? 0) + (updates.pagesCacheFresh ?? 0),
@@ -1824,6 +1999,7 @@ export function createCrawler(
         // Resume-safe for the same reason (#1822): a crawl continuing from
         // persisted stats keeps whatever root failure the earlier pass recorded.
         rootFailure = priorStats?.rootFailure;
+        processFailure = undefined;
         // Throttle verdicts do not survive a run. Exhaustion is terminal WITHIN
         // a run (an exhausted host is skipped before any request, so it can never
         // earn the successes that recover it), and carrying it forward would make
@@ -1962,7 +2138,7 @@ export function createCrawler(
 
         // Per-URL watchdog interrupts a wedged fetch and marks it failed so
         // the frontier keeps draining and the crawl ends.
-        const processEntry = (entry: FrontierRecord): Effect.Effect<void, never, never> =>
+        const processEntry = (entry: FrontierRecord): Effect.Effect<void, StorageError, never> =>
           processUrl(crawlId, entry).pipe(
             Effect.timeout(Duration.millis(urlTimeoutMs)),
             Effect.catchTag("TimeoutException", () =>
@@ -2000,7 +2176,24 @@ export function createCrawler(
               }),
             ),
             Effect.catchAll((error) => {
+              // #403: a store that cannot be written (read-only, not a
+              // database, disk full) fails every page the same way. Dropping
+              // them one by one ended the audit as "No pages were crawled";
+              // end the crawl with the store's own error instead.
+              if (error._tag === "StorageError" && isPermanentStorageError(error)) {
+                logger.warn("local store failed", error.message);
+                return Effect.fail(error);
+              }
               logger.debug("process error", entry.normalizedUrl, error.message);
+              processFailure ??= auditFailureDetail({
+                code: "unknown",
+                host: failureHostOf(entry.normalizedUrl),
+                detail:
+                  error._tag === "StorageError"
+                    ? `a page could not be saved to the local store (${storageFailureSummary(error)})`
+                    : `a page could not be processed (${error.message})`,
+                source: failureSourceFor(entry.source),
+              });
               return storage
                 .updateFrontierStatus(crawlId, entry.normalizedUrl, "failed", error.message)
                 .pipe(Effect.catchAll(() => Effect.void));
@@ -2102,6 +2295,12 @@ export function createCrawler(
         // overwrite this from their own crawlPhaseStopped flag right after
         // start() returns, so their behavior is unchanged.
         const wasStopped = !isRunning;
+        // Every page was fetched and then lost locally: give the empty audit
+        // that cause instead of none (#403). A fetch failure, when there was
+        // one, already names the better reason and is kept.
+        if (pagesCommitted === 0 && !rootFailure && processFailure) {
+          yield* updateStats(crawlId, { rootFailure: processFailure });
+        }
         const stats = yield* storage.getStats(crawlId);
         const durationMs = Date.now() - startTime;
 
@@ -2201,8 +2400,10 @@ export function createCrawler(
             const hopUrl = currentUrl;
             const redirectTo = await withRequestDeadline(
               Math.min(hopTimeoutMs, remainingMs),
+              // Undecoded (#2717): `redirect: "follow"` carries it to every
+              // hop, and the capped read below decodes within its cap.
               (signal) =>
-                fetch(hopUrl, {
+                fetchUndecoded(hopUrl, {
                   method: "GET",
                   signal,
                   redirect: "follow",
@@ -2299,6 +2500,109 @@ export function createCrawler(
         }
       });
 
+    /**
+     * The discovery probes (#409): every root request the preamble sends besides
+     * robots.txt, the seed and sitemap discovery. `config.discoveryProbes` picks
+     * which go out (unset = all), and each goes through the per-host throttle. A
+     * probe that is not sent stores nothing, so the rules that read it report
+     * "not checked" rather than a missing file.
+     */
+    const sendDiscoveryProbes = (
+      crawlId: string,
+      preamble: PhaseBudget,
+    ): Effect.Effect<void, StorageError, never> => {
+      const interrupted = new AbortController();
+      return Effect.gen(function* () {
+        const selected = config.discoveryProbes;
+        const wants = (probe: DiscoveryProbe): boolean => !selected || selected.includes(probe);
+        const gate = probeGate(preamble, interrupted.signal);
+        if (selected && selected.length === 0) {
+          logger.debug("discovery probes off", "no llms, markdown, well-known, agent or RSL requests");
+        }
+
+        // llms.txt + llms-full.txt at the root once, independent of robots.
+        if (wants("llms-txt")) {
+          const llms = yield* fetchLlmsTxt(
+            baseUrl,
+            config.userAgent,
+            config.headers,
+            preamble,
+            gate,
+          );
+          // null: the budget ran out first. No row, so the rule says "not checked".
+          if (llms) {
+            yield* storage.setLlmsTxt(crawlId, {
+              llmsTxt: {
+                url: llms.llmsTxt.url,
+                exists: llms.llmsTxt.exists,
+                content: llms.llmsTxt.content,
+                sizeBytes: llms.llmsTxt.sizeBytes,
+              },
+              llmsFullTxt: {
+                url: llms.llmsFullTxt.url,
+                exists: llms.llmsFullTxt.exists,
+                content: llms.llmsFullTxt.content,
+                sizeBytes: llms.llmsFullTxt.sizeBytes,
+              },
+              fetchedAt: Date.now(),
+            });
+          }
+        }
+
+        // Homepage markdown content-negotiation + .md variant once.
+        if (wants("markdown")) {
+          const markdown = yield* probeMarkdownResponse(
+            baseUrl,
+            config.userAgent,
+            config.headers,
+            preamble,
+            gate,
+          );
+          if (markdown) {
+            yield* storage.setMarkdownProbe(crawlId, { ...markdown, fetchedAt: Date.now() });
+          }
+        }
+
+        // Homepage access under AI-crawler UAs, ahead of the 20-path sweep:
+        // ax/agent-blocking is the heaviest probe reader (weight 3), so on a
+        // slow host it should be the last to lose its budget, not the first.
+        if (wants("agent-access")) {
+          const agentAccess = yield* probeAgentAccess(
+            baseUrl,
+            config.userAgent,
+            config.headers,
+            preamble,
+            gate,
+          );
+          yield* storage.setAgentAccess(crawlId, { ...agentAccess, fetchedAt: Date.now() });
+        }
+
+        // Well-known and agent files, then RSL licensing.
+        const wellKnownPaths = WELL_KNOWN_PATHS.filter(wants);
+        if (wellKnownPaths.length > 0) {
+          const wellKnown = yield* probeWellKnown(
+            baseUrl,
+            config.userAgent,
+            config.headers,
+            preamble,
+            { paths: wellKnownPaths, gate },
+          );
+          yield* storage.setWellKnownProbe(crawlId, { ...wellKnown, fetchedAt: Date.now() });
+        }
+
+        if (wants("rsl")) {
+          const rsl = yield* fetchRslLicensing(
+            baseUrl,
+            config.userAgent,
+            config.headers,
+            preamble,
+            gate,
+          );
+          if (rsl) yield* storage.setRsl(crawlId, { ...rsl, fetchedAt: Date.now() });
+        }
+      }).pipe(Effect.onInterrupt(() => Effect.sync(() => interrupted.abort())));
+    };
+
     const start = (
       targetUrl: string,
       originalUrl?: string,
@@ -2314,7 +2618,11 @@ export function createCrawler(
         // caller's own work between the two sits inside the window, so a slow
         // local storage lookup could arrive here with the budget already spent
         // and silently skip every probe on a perfectly healthy origin.
-        const preamble = createPhaseBudget(preambleBudgetMs(config.timeoutMs));
+        //
+        // The log rides on the budget so every root probe can note a request the
+        // site refused; persisted below so the rules say "refused", not "absent".
+        const refusals = new RefusalLog();
+        const preamble = createPhaseBudget(preambleBudgetMs(config.timeoutMs), Date.now(), refusals);
 
         // Follow redirects to get final URL (both HTTP and client-side)
         const rawFinalTargetUrl = yield* detectRedirects(targetUrl, preamble);
@@ -2457,56 +2765,10 @@ export function createCrawler(
           });
         }
 
-        // Fetch llms.txt + llms-full.txt at the root once, independent of robots.
-        const llms = yield* fetchLlmsTxt(baseUrl, config.userAgent, config.headers, preamble);
-        yield* storage.setLlmsTxt(crawlId, {
-          llmsTxt: {
-            url: llms.llmsTxt.url,
-            exists: llms.llmsTxt.exists,
-            content: llms.llmsTxt.content,
-            sizeBytes: llms.llmsTxt.sizeBytes,
-          },
-          llmsFullTxt: {
-            url: llms.llmsFullTxt.url,
-            exists: llms.llmsFullTxt.exists,
-            content: llms.llmsFullTxt.content,
-            sizeBytes: llms.llmsFullTxt.sizeBytes,
-          },
-          fetchedAt: Date.now(),
-        });
-
-        // Probe homepage markdown content-negotiation + .md variant once.
-        const markdown = yield* probeMarkdownResponse(
-          baseUrl,
-          config.userAgent,
-          config.headers,
-          preamble,
-        );
-        yield* storage.setMarkdownProbe(crawlId, { ...markdown, fetchedAt: Date.now() });
-
-        // AX prefetches: well-known/agent files, homepage access under AI-crawler
-        // UAs, and RSL licensing — fetched unconditionally like llms/markdown.
-        const wellKnown = yield* probeWellKnown(
-          baseUrl,
-          config.userAgent,
-          config.headers,
-          preamble,
-        );
-        yield* storage.setWellKnownProbe(crawlId, { ...wellKnown, fetchedAt: Date.now() });
-
-        const agentAccess = yield* probeAgentAccess(
-          baseUrl,
-          config.userAgent,
-          config.headers,
-          preamble,
-        );
-        yield* storage.setAgentAccess(crawlId, { ...agentAccess, fetchedAt: Date.now() });
-
-        const rsl = yield* fetchRslLicensing(baseUrl, config.userAgent, config.headers, preamble);
-        yield* storage.setRsl(crawlId, { ...rsl, fetchedAt: Date.now() });
+        yield* sendDiscoveryProbes(crawlId, preamble);
 
         // The budget running out is not a failure of the crawl — every probe
-        // above degrades to its not-attempted shape and the crawl goes on —
+        // above degrades to "not checked" and the crawl goes on —
         // but it is the one fact that explains a report whose AX probes are
         // all "unknown", so say it once, here, where it is knowable (#1699).
         if (budgetRemainingMs(preamble) <= 0) {
@@ -2550,8 +2812,20 @@ export function createCrawler(
             maxUrls: sitemapUrlCap,
             customHeaders: config.headers,
             walkWindowMs: sitemapWalkWindowMs(config.timeoutMs),
+            refusals,
           },
         );
+
+        // Every root probe has run (robots, llms, markdown, sitemaps). A site
+        // that refused any of them has not told us the file is missing.
+        const refusedFetches = refusals.list();
+        if (refusedFetches.length > 0) {
+          logger.warn(
+            "root fetches refused",
+            `${refusedFetches.length} root request(s) were refused; absence is unconfirmed`,
+          );
+          yield* storage.updateStats(crawlId, { refusedFetches });
+        }
 
         // The walk is bounded by its own progress window, NOT the preamble
         // budget: truncating it costs pages rather than AX metadata, and a site
@@ -2655,6 +2929,12 @@ export function createCrawler(
           "sitemaps discovered and stored",
           `${sitemapResult.discovered.length} discovered, ${sitemapResult.all.length} total, ${config.sitemapPendingCount}/${config.sitemapUrlCount} enqueued (rest filtered)`,
         );
+        // repo#2729: the gate above is now settled for this crawl. Record that
+        // links will not be followed, so links/broken-links can say it did not
+        // fetch the targets instead of passing on targets it never saw.
+        if (!linkDiscoveryAllowed()) {
+          yield* storage.updateStats(crawlId, { linkDiscoveryOff: true });
+        }
 
         // Seed the crawl queue — the resolved URL when its redirect was adopted,
         // the user's own URL when it was refused as off-site.
@@ -2779,6 +3059,11 @@ export function createCrawler(
             "restored sitemap-discovery gate",
             `${gate.sitemapPendingCount}/${gate.sitemapUrlCount} sitemap URL(s) pending`,
           );
+          // repo#2729: a crawl interrupted before start() recorded it, or begun
+          // on an older release, still says it did not follow links.
+          if (!linkDiscoveryAllowed()) {
+            yield* storage.updateStats(crawlId, { linkDiscoveryOff: true });
+          }
         }
 
         // Rebuild breadth-first state from existing frontier entries
@@ -2911,53 +3196,7 @@ export function createCrawler(
           }
         }
 
-        // Fetch llms.txt + llms-full.txt at the root once, independent of robots.
-        const llms = yield* fetchLlmsTxt(baseUrl, config.userAgent, config.headers, preamble);
-        yield* storage.setLlmsTxt(crawlId, {
-          llmsTxt: {
-            url: llms.llmsTxt.url,
-            exists: llms.llmsTxt.exists,
-            content: llms.llmsTxt.content,
-            sizeBytes: llms.llmsTxt.sizeBytes,
-          },
-          llmsFullTxt: {
-            url: llms.llmsFullTxt.url,
-            exists: llms.llmsFullTxt.exists,
-            content: llms.llmsFullTxt.content,
-            sizeBytes: llms.llmsFullTxt.sizeBytes,
-          },
-          fetchedAt: Date.now(),
-        });
-
-        // Probe homepage markdown content-negotiation + .md variant once.
-        const markdown = yield* probeMarkdownResponse(
-          baseUrl,
-          config.userAgent,
-          config.headers,
-          preamble,
-        );
-        yield* storage.setMarkdownProbe(crawlId, { ...markdown, fetchedAt: Date.now() });
-
-        // AX prefetches: well-known/agent files, homepage access under AI-crawler
-        // UAs, and RSL licensing — fetched unconditionally like llms/markdown.
-        const wellKnown = yield* probeWellKnown(
-          baseUrl,
-          config.userAgent,
-          config.headers,
-          preamble,
-        );
-        yield* storage.setWellKnownProbe(crawlId, { ...wellKnown, fetchedAt: Date.now() });
-
-        const agentAccess = yield* probeAgentAccess(
-          baseUrl,
-          config.userAgent,
-          config.headers,
-          preamble,
-        );
-        yield* storage.setAgentAccess(crawlId, { ...agentAccess, fetchedAt: Date.now() });
-
-        const rsl = yield* fetchRslLicensing(baseUrl, config.userAgent, config.headers, preamble);
-        yield* storage.setRsl(crawlId, { ...rsl, fetchedAt: Date.now() });
+        yield* sendDiscoveryProbes(crawlId, preamble);
 
         // Seed the crawl queue with root URL
         yield* enqueueUrl(crawlId, baseUrl, 0, undefined, "seed");

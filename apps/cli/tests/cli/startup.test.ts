@@ -18,6 +18,7 @@ describe("shouldRunBackgroundTasks (#170)", () => {
     ["report", ["report"]],
     ["keys", ["keys", "list"]],
     ["skills", ["skills", "install"]],
+    ["skills update", ["skills", "update"]],
     ["self doctor", ["self", "doctor"]],
     ["self version", ["self", "version"]],
   ])("%s runs them (so an applied update is announced)", (_name, args) => {
@@ -31,10 +32,16 @@ describe("shouldRunBackgroundTasks (#170)", () => {
     ["--help", ["--help"]],
     ["-h", ["audit", "-h"]],
     // JSON-RPC on stdout: nothing may pollute the stream.
+    // setup --dry-run promises to change nothing.
+    ["setup --dry-run", ["setup", "--dry-run"]],
     ["mcp", ["mcp"]],
+    ["channel", ["channel"]],
     // self install resets settings; self update IS the updater.
     ["self install", ["self", "install"]],
     ["self update", ["self", "update", "--auto"]],
+    // The detached skills refresh is part of the updater too, and must not
+    // start another one.
+    ["skills update --auto", ["skills", "update", "--auto"]],
     ["self uninstall", ["self", "uninstall"]],
     // --offline promises zero network.
     ["--offline", ["audit", "https://example.com", "--offline"]],
@@ -95,6 +102,7 @@ describe("light startup path (#2023)", () => {
       "feedback",
       "keys",
       "mcp",
+      "channel",
       "self",
       "skills",
     ]) {

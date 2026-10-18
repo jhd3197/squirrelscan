@@ -31,13 +31,14 @@
 //   - Structural validity is untouched: schema/review still owns ratingValue /
 //     ratingCount and its messages are unchanged.
 
-import { getPathname } from "@squirrelscan/utils";
+import { getPathname, indexJsonLdIds, resolveJsonLdRef } from "@squirrelscan/utils";
 import { EEAT_PAGE_PATTERNS, LOCAL_BUSINESS_TYPES } from "@squirrelscan/utils/constants";
 
 import type { Document } from "linkedom";
 
 import type { CheckItem } from "@squirrelscan/core-contracts";
 
+import { getPageSeparatedText } from "../content/text-content";
 import { isPrivacyPage } from "../shared/privacy-page";
 import type { CheckResult, Rule, RuleContext, RuleResult } from "../types";
 
@@ -211,11 +212,37 @@ function collectRatedEntities(ctx: RuleContext): RatedEntity[] {
     found.push(entity);
   };
 
-  for (const node of ctx.parsed.schemas.all) {
-    walkForRatings(node, null, 0, push);
+  // pub#869: `aggregateRating` may be a node reference (`{"@id": …}`) to an
+  // AggregateRating elsewhere on the page. It is read from that node, for the
+  // entity that references it, and the node is not counted again on its own
+  // with no entity. A dangling reference is judged as written.
+  const nodes = ctx.parsed.schemas.all as Record<string, unknown>[];
+  // The id index also takes the untyped nodes: a referenced rating may carry
+  // no `@type` of its own.
+  const ids = indexJsonLdIds([...nodes, ...ctx.parsed.schemas.untypedNodes], ctx.page.url);
+  const walk: RatingWalk = {
+    push,
+    resolve: (value) => resolveJsonLdRef(value, ids, ctx.page.url),
+    referenced: new Set(),
+    unattributed: [],
+  };
+  for (const node of nodes) {
+    walkForRatings(node, null, 0, walk);
+  }
+  for (const rating of walk.unattributed) {
+    if (!walk.referenced.has(rating)) push(toEntity(null, rating));
   }
 
   return found;
+}
+
+interface RatingWalk {
+  push: (entity: RatedEntity) => void;
+  resolve: (value: unknown) => unknown;
+  /** AggregateRating nodes some entity reached by reference. */
+  referenced: Set<Record<string, unknown>>;
+  /** Standalone AggregateRating nodes with no enclosing entity, pushed last. */
+  unattributed: Record<string, unknown>[];
 }
 
 /**
@@ -226,12 +253,12 @@ function walkForRatings(
   value: unknown,
   carrier: Record<string, unknown> | null,
   depth: number,
-  push: (entity: RatedEntity) => void,
+  walk: RatingWalk,
 ): void {
   if (depth > MAX_DEPTH || !value || typeof value !== "object") return;
 
   if (Array.isArray(value)) {
-    for (const item of value) walkForRatings(item, carrier, depth + 1, push);
+    for (const item of value) walkForRatings(item, carrier, depth + 1, walk);
     return;
   }
 
@@ -240,15 +267,20 @@ function walkForRatings(
   const nextCarrier = isRatingNode ? carrier : hasType(node) ? node : carrier;
 
   if (isRatingNode) {
-    push(toEntity(nextCarrier, node));
+    if (nextCarrier) walk.push(toEntity(nextCarrier, node));
+    else walk.unattributed.push(node);
   } else if (node["aggregateRating"]) {
-    const rating = firstObject(node["aggregateRating"]);
-    if (rating) push(toEntity(node, rating));
+    const ref = firstObject(node["aggregateRating"]);
+    const rating = ref ? firstObject(walk.resolve(ref)) : null;
+    if (rating) {
+      if (rating !== ref) walk.referenced.add(rating);
+      walk.push(toEntity(node, rating));
+    }
   }
 
   for (const [key, child] of Object.entries(node)) {
     if (key === "aggregateRating" || key.startsWith("@")) continue;
-    walkForRatings(child, nextCarrier, depth + 1, push);
+    walkForRatings(child, nextCarrier, depth + 1, walk);
   }
 }
 
@@ -328,7 +360,7 @@ function buildVisibilityCheck(
     name: VISIBILITY_CHECK,
     status: "warn",
     message:
-      `${describeRating(primary)} on ${describeEntity(primary)} is not visible anywhere on ` +
+      `${describeRating(primary)} on ${describeEntityType(primary)} is not visible anywhere on ` +
       `${pagePhrase(label)} — a rating readers cannot see is a structured-data policy violation ` +
       "and risks a manual action, not just a lost rich result",
     details: {
@@ -338,6 +370,7 @@ function buildVisibilityCheck(
       ratingValue: primary.ratingValue,
       ratingCount: primary.ratingCount,
       reason: "no-visible-rating",
+      ...itemsOverflow(entities),
     },
     items: toItems(entities),
   };
@@ -347,9 +380,15 @@ function buildVisibilityCheck(
  * Rendered page text plus the attributes a badge is commonly rendered into.
  * `content.textContent` drops `<svg>`, so a star-glyph SVG badge would otherwise
  * read as "no rating on the page".
+ *
+ * `content.textContent` also glues adjacent elements, so `<h3>Customer
+ * rating</h3><p>5/5</p>` reads `Customer rating5/5` and no pattern below finds a
+ * word boundary in it. The element-separated text is searched as well (pub#739).
+ * Both are kept: every test here asks whether a rating appears anywhere, so more
+ * text can only clear the check, never trip it.
  */
 function visibleText(ctx: RuleContext, doc: Document): string {
-  const parts = [ctx.parsed.content?.textContent ?? ""];
+  const parts = [ctx.parsed.content?.textContent ?? "", getPageSeparatedText(doc)];
   for (const el of doc.querySelectorAll("[alt], [aria-label], [title]")) {
     parts.push(
       el.getAttribute("alt") ?? "",
@@ -417,8 +456,8 @@ function buildSubjectCheck(entities: RatedEntity[], kind: IneligiblePageKind): C
     name: SUBJECT_CHECK,
     status: "warn",
     message:
-      `AggregateRating on ${describeEntity(primary)} is not the subject of this ${label} page — ` +
-      "sitewide rating markup on a page that cannot be rated is a structured-data policy " +
+      `AggregateRating on ${describeEntityType(primary)} is not the subject of this ${label} page. ` +
+      "Sitewide rating markup on a page that cannot be rated is a structured-data policy " +
       "violation and risks a manual action, not just a lost rich result",
     details: {
       pageType: label,
@@ -427,6 +466,7 @@ function buildSubjectCheck(entities: RatedEntity[], kind: IneligiblePageKind): C
       ratingValue: primary.ratingValue,
       ratingCount: primary.ratingCount,
       reason: "entity-not-page-subject",
+      ...itemsOverflow(offenders),
     },
     items: toItems(offenders),
   };
@@ -488,10 +528,20 @@ function describeEntity(entity: RatedEntity): string {
   return "an untyped entity";
 }
 
+/** The entity's type only: a name is per-page content and would split one finding's identity (#231). */
+function describeEntityType(entity: RatedEntity): string {
+  return entity.type ?? "an untyped entity";
+}
+
 function describeRating(entity: RatedEntity): string {
   if (!entity.ratingValue) return "AggregateRating";
   const count = entity.ratingCount ? ` from ${entity.ratingCount} reviews` : "";
   return `AggregateRating ${entity.ratingValue}${count}`;
+}
+
+/** The entities {@link toItems} leaves out, recorded so the list is not read as complete. */
+function itemsOverflow(entities: RatedEntity[]): { additional?: number } {
+  return entities.length > MAX_ITEMS ? { additional: entities.length - MAX_ITEMS } : {};
 }
 
 function toItems(entities: RatedEntity[]): CheckItem[] {

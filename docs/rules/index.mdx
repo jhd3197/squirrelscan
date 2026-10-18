@@ -1,11 +1,11 @@
 ---
 title: "Rules reference"
-description: "All 295 audit rules organized by score group and category"
+description: "All 300+ audit rules organized by score group and category"
 ---
 
-squirrelscan includes **295 rules** across **21 categories**, plus opt-in cloud gap analysis. Every category rolls up into one of four score groups: **SEO**, **Performance**, **Security**, and **Agents**. These are the four scores you see on reports and in the dashboard, alongside the overall health score.
+squirrelscan includes **300+ rules** across **22 categories**, plus opt-in cloud gap analysis. Every category rolls up into one of four score groups: **SEO**, **Performance**, **Security**, and **Agents**. These are the four scores you see on reports and in the dashboard, alongside the overall health score.
 
-Most rules run locally for free. A handful of [cloud rules](/cloud/rules) use AI analysis, full filter lists, or live search data - they require login and are skipped when you're not logged in. Cloud rules carry a notice banner on their doc pages.
+Most rules run locally and need no login. A handful of [cloud rules](/cloud/rules) use AI analysis, full filter lists, or live search data - they require login and are skipped when you're not logged in. Cloud rules carry a notice banner on their doc pages.
 
 ## SEO
 
@@ -20,13 +20,13 @@ Search visibility: crawling, indexing, content, markup, and accessibility.
     Essential meta tags and page structure for search engines (14 rules)
   </Card>
   <Card title="Links" icon="folder" href="/rules/links">
-    Internal and external link health and structure (15 rules)
+    Internal and external link health and structure (13 rules)
   </Card>
   <Card title="Content" icon="folder" href="/rules/content">
-    Text quality, readability, and content structure (21 rules)
+    Text quality, readability, and content structure (24 rules)
   </Card>
   <Card title="Structured Data" icon="folder" href="/rules/schema">
-    Structured data and rich snippet eligibility (25 rules)
+    Structured data and rich snippet eligibility (26 rules)
   </Card>
   <Card title="Images" icon="folder" href="/rules/images">
     Image optimization and accessibility (15 rules)
@@ -38,7 +38,7 @@ Search visibility: crawling, indexing, content, markup, and accessibility.
     Accessibility for users with disabilities (61 rules)
   </Card>
   <Card title="Mobile" icon="folder" href="/rules/mobile">
-    Mobile-friendliness and responsive design (6 rules)
+    Mobile-friendliness and responsive design (8 rules)
   </Card>
   <Card title="URL Structure" icon="folder" href="/rules/url">
     URL structure, length, and formatting (9 rules)
@@ -72,6 +72,9 @@ Page speed and loading behavior.
   <Card title="Performance" icon="folder" href="/rules/perf">
     Page speed and loading performance (30 rules)
   </Card>
+  <Card title="Reliability" icon="folder" href="/rules/reliability">
+    Runtime errors, broken resources and failed requests (5 rules)
+  </Card>
 </CardGroup>
 
 ## Security
@@ -83,7 +86,7 @@ Transport security, compromise signals, compliance, and blocked content.
     Signs of compromise: injected pages, phishing kits, malware, SEO spam (9 rules)
   </Card>
   <Card title="Security" icon="folder" href="/rules/security">
-    HTTPS, headers, and safe link practices (16 rules)
+    HTTPS, headers, and safe link practices (22 rules)
   </Card>
   <Card title="Legal Compliance" icon="folder" href="/rules/legal">
     Privacy policy and legal compliance signals (4 rules)
@@ -102,6 +105,69 @@ Agent Experience (AX): whether AI agents can read, reach, discover, and act on y
     Agent experience across five pillars: readable, reachable, discoverable, declared, actionable (17 rules)
   </Card>
 </CardGroup>
+
+## Content inside noscript
+
+A browser with scripting enabled reads `<noscript>` content as plain text, so nothing in it loads, renders or reaches the accessibility tree. Sites put tracking pixels, Google Tag Manager iframes, lazy-load fallback images and fallback stylesheets there for visitors without JavaScript, so reporting them flags markup that never runs.
+
+The rules that describe what a browser loads or renders skip elements inside `<noscript>`, so a page with a `<noscript>` fallback gets the same result as the same page without it:
+
+- Accessibility: [aria-required-children](/rules/a11y/aria-required-children), [frame-title](/rules/a11y/frame-title), [image-redundant-alt](/rules/a11y/image-redundant-alt), [meta-refresh](/rules/a11y/meta-refresh)
+- Images: [alt-text](/rules/images/alt-text), [aspect-mismatch](/rules/images/aspect-mismatch), [broken-images](/rules/images/broken-images), [dimensions](/rules/images/dimensions), [filename-quality](/rules/images/filename-quality), [lazy-loading](/rules/images/lazy-loading), [modern-format](/rules/images/modern-format), [offscreen-lazy](/rules/images/offscreen-lazy), [optimized](/rules/images/optimized), [picture-element](/rules/images/picture-element), [responsive-size](/rules/images/responsive-size), [srcset](/rules/images/srcset)
+- Performance: [animated-content](/rules/perf/animated-content), [carousel-hidden-eager](/rules/perf/carousel-hidden-eager), [cls-hints](/rules/perf/cls-hints), [critical-request-chains](/rules/perf/critical-request-chains), [duplicate-js](/rules/perf/duplicate-js), [font-delivery](/rules/perf/font-delivery), [font-loading](/rules/perf/font-loading), [inp-hints](/rules/perf/inp-hints), [js-libraries](/rules/perf/js-libraries), [lazy-above-fold](/rules/perf/lazy-above-fold), [lcp-fetchpriority](/rules/perf/lcp-fetchpriority), [lcp-hints](/rules/perf/lcp-hints), [legacy-js](/rules/perf/legacy-js), [preconnect](/rules/perf/preconnect), [render-blocking](/rules/perf/render-blocking), [source-maps](/rules/perf/source-maps), [total-byte-weight](/rules/perf/total-byte-weight), [unminified-css](/rules/perf/unminified-css), [unminified-js](/rules/perf/unminified-js)
+- Security: [csp-blocks-own-resources](/rules/security/csp-blocks-own-resources), [mixed-content](/rules/security/mixed-content), [sri](/rules/security/sri), [third-party-cookies](/rules/security/third-party-cookies)
+- Blocking and integrity: [blocked-links](/rules/adblock/blocked-links), [template-discontinuity](/rules/integrity/template-discontinuity)
+
+Same-domain scripts, stylesheets and images that appear only inside `<noscript>` are not fetched for the file-size and compression rules either. Links inside `<noscript>` are still collected for crawling, and the remaining rules read the page as before.
+
+## Pages kept out of search
+
+A page marked `noindex` will not show up in search results, so findings about how it would look there are noise. Nine rules leave these pages alone:
+
+- [core/meta-title](/rules/core/meta-title), [core/meta-description](/rules/core/meta-description) and [core/h1](/rules/core/h1) skip the page. Each records one skipped check, such as `Skipped: page is set to noindex via robots meta tag` (or `via X-Robots-Tag header`), in place of its usual result.
+- [core/title-unique](/rules/core/title-unique), [content/duplicate-title](/rules/content/duplicate-title) and [content/duplicate-description](/rules/content/duplicate-description) leave the page out when they group pages by title or description.
+- [crawl/sitemap-coverage](/rules/crawl/sitemap-coverage) never lists the page as missing from the sitemap, since a noindex page should not be in it.
+- [content/title-pattern-outlier](/rules/content/title-pattern-outlier) leaves the page out when it learns the site's title template, and never reports it as an outlier.
+- [links/orphan-pages](/rules/links/orphan-pages) never reports the page as an orphan. Its own links still count toward the pages they point to.
+
+**What counts as noindex.** The page's `<meta name="robots">` content or its `X-Robots-Tag` response header contains `noindex`. This is the same test [crawl/indexability](/rules/crawl/indexability) uses, so a header scoped to one crawler, such as `X-Robots-Tag: googlebot: noindex`, counts too. A URL blocked by robots.txt is not a noindex, and crawler-specific meta tags such as `<meta name="googlebot">` are not read.
+
+**Staging sites and preview deployments.** Pages are skipped only when the site itself is being indexed. squirrelscan decides that from the homepage, which is the page at `/` on the audited host (with or without `www.`, over http or https, with no query string), or, when the homepage was not fetched or answered with an error, from the page the audit started from. If the crawl holds more than one copy of that page, such as both the http and https homepage, any copy marked noindex counts.
+
+| That page is | Result |
+|---|---|
+| indexable | noindex pages are skipped |
+| noindex | nothing is skipped |
+| not fetched (neither the homepage nor the start page) | nothing is skipped |
+
+A site-wide `noindex` usually means the audit is checking a site before launch, which is when title, description and H1 findings matter most. Vercel, Netlify and Cloudflare Pages preview deployments send `X-Robots-Tag: noindex` on every page by default, so an audit of a preview URL runs every rule.
+
+**In reports and scores.** A skipped check is not an issue. It does not appear in the issue list in any report format, it is not counted as passed, warning or failed, and the [health score](/reports#health-score) leaves it out. A page left out of a site rule's grouping simply is not in it.
+
+**Everything else still runs.** Accessibility, security and performance rules, and every link rule other than orphan pages, check noindex pages as usual, and so do [core/robots-meta](/rules/core/robots-meta), [crawl/indexability](/rules/crawl/indexability) and [crawl/all-noindex-pages](/rules/crawl/all-noindex-pages), which report the noindex pages themselves.
+
+## Rule time budget
+
+Rules read content the audited site controls, so a page can be built to make a pattern match very slowly. The first line of defence is the rules themselves: their patterns are written to avoid catastrophic backtracking. The time budget is the backstop for whatever still gets through, such as a rule repeating a slow match across thousands of elements or pages.
+
+Every rule runs under it: one second per page for a page rule, and one second per page of the site for a site rule, capped at 60 seconds. A rule that runs past it is abandoned for that page, and the audit carries on with the next rule. The budget is checked between operations, not in the middle of a single pattern match, so a rule can overrun it by about one runaway match before it is abandoned: in testing, a 200 ms budget abandoned a catastrophic pattern after about 430 ms, roughly twice the budget. It is wall-clock time, so on a heavily loaded machine an ordinary page can run out of time too.
+
+The report records it as a failed check named after the rule with `-error` on the end, such as `content/hidden-text-error`, against the first page where it happened (or the whole site, for a site rule), with the message `Rule error: exceeded its 1000 ms time budget and was abandoned` (the number is the budget in force). Its details carry `timedOut: true` and `pages`, the number of pages it timed out on. A rule that times out is reported once per audit, not once per page: later pages show a skipped check, so one slow pattern cannot flood the report or lower the score. The audit also gets one info check named after the rule with `-timeouts` on the end, such as `content/hidden-text-timeouts`, whose details carry `pagesNotChecked`: the final count of pages that rule did not check. That rule's own result for those pages is not in the report.
+
+A timed-out rule did not check those pages. For a security rule, such as `security/leaked-secrets`, that means no finding on those pages is not a clean result: the pages were not scanned, so treat them as unchecked and look at them yourself.
+
+Ordinary pages never come close on an idle machine: the slowest rule takes a few milliseconds per page. If you see this on a page that looks normal and the machine was not busy, [open an issue](https://github.com/squirrelscan/squirrelscan/issues) with the page URL.
+
+### Changing the budget
+
+Set [`time_budget_ms`](/configuration/rules#time_budget_ms) in the `[rules]` section of `squirrel.toml`:
+
+```toml squirrel.toml
+[rules]
+time_budget_ms = 3000  # three seconds per rule per page
+```
+
+Raise it when rules time out on ordinary pages because the machine is slow or busy, such as a shared CI runner. It can only be raised for now: a value below 1000 is refused. A site rule gets the same amount per page of the site, capped at 60 seconds, or at the budget itself if you set it above that. `0` turns the budget off, which lets one hostile page stall the audit, so leave it on for sites you do not control. The setting applies to audits the CLI runs; cloud audits use the default.
 
 ## Configuration
 

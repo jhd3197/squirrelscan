@@ -1,6 +1,6 @@
 {
   "name": "@squirrelscan/cli",
-  "version": "0.0.96",
+  "version": "0.0.117",
   "description": "Free CLI for SEO, performance & security audits. Built for Claude Code, Cursor, and AI workflows.",
   "bin": {
     "squirrelscan": "./build/squirrelscan"
@@ -16,7 +16,7 @@
     "format:check": "oxfmt src/ tests/ --check"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/server": "2.3.1",
     "@sinclair/typebox": "^0.34.49",
     "@squirrelscan/api-client": "workspace:*",
     "@squirrelscan/audit-engine": "workspace:*",
@@ -25,6 +25,7 @@
     "@squirrelscan/core-contracts": "workspace:*",
     "@squirrelscan/crawler": "workspace:*",
     "@squirrelscan/fetchers": "workspace:*",
+    "@squirrelscan/page-classifier": "workspace:*",
     "@squirrelscan/parser": "workspace:*",
     "@squirrelscan/report": "workspace:*",
     "@squirrelscan/rules": "workspace:*",
@@ -38,7 +39,7 @@
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "robots-parser": "^3.0.1",
-    "smol-toml": "^1.8.0",
+    "smol-toml": "^1.9.0",
     "ts-edge": "^1.0.4",
     "user-agents": "^1.1.675",
     "uuidv7": "^1.2.1",
@@ -46,6 +47,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "2.3.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@types/semver": "^7.7.1",

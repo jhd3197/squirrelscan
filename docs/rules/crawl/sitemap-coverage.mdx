@@ -11,13 +11,15 @@ A crawled, indexable page that is not in the sitemap relies on internal links to
 
 ## What squirrel checks
 
-The rule is site-wide. It uses the sitemap processor's precomputed missing and orphan lists, and falls back to computing the missing list itself when that is empty. The fallback skips pages whose status is not 200 and pages carrying a `noindex` in the `robots` meta, then checks both the page URL and its final URL against the normalised sitemap URLs.
+The rule is site-wide. It uses the sitemap processor's precomputed missing and orphan lists, and falls back to computing the missing list itself when that is empty. Pages marked `noindex`, by robots meta tag or `X-Robots-Tag` header, are never listed as missing, because a noindex page should not be in the sitemap. This applies only when the site itself is indexable (the homepage is not noindex), so a staging host that is noindex everywhere is still reported from the sitemap processor's list (the fallback has always left meta-noindex pages out, and still does); see [pages kept out of search](/rules/index#pages-kept-out-of-search). The fallback also skips pages whose status is not 200, then checks both the page URL and its final URL against the normalised sitemap URLs.
 
 - Skipped when no sitemap was discovered. Message: `No sitemap to compare`.
 - Skipped when no pages were crawled. Message: `No pages to compare`.
 - `sitemap-coverage` warns when indexable pages are missing. Message: `23 indexable page(s) not in sitemap (18%)`, where the percentage is of all crawled pages. It passes otherwise with `All indexable pages are in sitemap`. Severity warning, weight 5.
-- `sitemap-orphans` warns for sitemap URLs the crawl did not reach. Message: `31 sitemap URL(s) were not crawled`.
-- `sitemap-orphans` reports info instead when the crawl hit its page cap and the sitemap holds more URLs than that cap. Message: `31 sitemap URL(s) not audited this run (crawl capped at 25 pages)`.
+- `sitemap-orphans` warns for sitemap URLs the crawl did not reach. Message: `N sitemap URL(s) were not crawled`.
+- `sitemap-orphans` reports info instead when the crawl hit its page cap and the sitemap holds more URLs than that cap. Message: `N sitemap URL(s) not audited this run (crawl capped at M pages)`.
+
+`N` is the exact count, even past the 10,000-URL list the audit engine hands the rule. The check lists the first 50 URLs; `details.total` holds the count, and past 50, `additional` and `pagesTruncated` record the rest.
 
 The capped case matters because a shallow crawl profile against a large sitemap would otherwise report a crawl-budget artefact as a coverage defect.
 
@@ -56,8 +58,9 @@ disable = ["crawl/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["crawl/sitemap-coverage"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
@@ -75,7 +78,7 @@ Crawlability findings ship in every audit next to the SEO, performance and agent
 
 ## Check your site
 
-Run `squirrel audit https://example.com` and open the Crawlability section of the report. Both gaps are listed by URL, with the missing-page share as a percentage. Local audits are free.
+Run `squirrel audit https://example.com` and open the Crawlability section of the report. Both gaps are listed by URL, with the missing-page share as a percentage. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">

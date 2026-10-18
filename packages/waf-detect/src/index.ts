@@ -1,9 +1,20 @@
 export type { WafProvider, WafDetectionResult, WafChallengeResult } from "./types";
-export { detectWaf, detectWafFromHeaders, detectWafFromContent, isLikelyWafBlock } from "./detect";
+export {
+  cookieNamesFromHeaders,
+  detectWaf,
+  detectWafFromContent,
+  detectWafFromCookies,
+  detectWafFromHeaders,
+  isLikelyWafBlock,
+} from "./detect";
 export { detectWafChallengePage } from "./challenge";
 export {
   getWafProviderName,
   getWafProviderIcon,
   WAF_CHALLENGE_STATUS_CODES,
-  CHALLENGE_INTERSTITIAL_PATTERNS,
+  CHALLENGE_MARKUP_PATTERNS,
+  CHALLENGE_TEXT_PATTERNS,
+  CLOUDFLARE_CHALLENGE_SCRIPT,
+  HEADER_PATTERNS,
+  PROVIDER_PRECEDENCE,
 } from "./providers";

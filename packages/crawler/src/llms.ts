@@ -2,9 +2,10 @@ import { Effect } from "effect";
 import { byteLength, truncateToBytes } from "@squirrelscan/utils/bytes";
 import { readBodyCapped } from "@squirrelscan/utils/response-body";
 
-import { budgetedTimeoutMs, safeFetchWithDeadline } from "./deadline";
+import { budgetedTimeoutMs, safeFetchWithDeadline, ungated } from "./deadline";
+import { noteRefusal } from "./refusals";
 
-import type { PhaseBudget } from "./deadline";
+import type { PhaseBudget, ProbeGate } from "./deadline";
 import type { LlmsTxtData, LlmsTxtFile } from "@squirrelscan/core-contracts";
 
 const LLMS_FETCH_TIMEOUT_MS = 30_000;
@@ -15,22 +16,28 @@ function emptyFile(url: string): LlmsTxtFile {
   return { url, exists: false, content: null, sizeBytes: 0 };
 }
 
-// Fetch one well-known file; a 404/error/oversize file is "absent", never a throw.
+// Fetch one well-known file; a 404/error-status/oversize file is "absent", never
+// a throw. null when there was no answer at all: the budget was spent before the
+// request went out, it failed or timed out in flight, or the site refused it
+// (401/403/429, a bot wall). Nothing learned (#409).
 async function fetchOne(
   url: string,
   userAgent: string,
   customHeaders?: Record<string, string>,
   budget?: PhaseBudget,
-): Promise<LlmsTxtFile> {
-  // Budget spent: same "absent" shape a 404 or a network failure produces.
+): Promise<LlmsTxtFile | null> {
   const timeoutMs = budgetedTimeoutMs(budget, LLMS_FETCH_TIMEOUT_MS);
-  if (timeoutMs === null) return emptyFile(url);
+  if (timeoutMs === null) return null;
   try {
     return await safeFetchWithDeadline(
       url,
       { headers: { "User-Agent": userAgent, Accept: "text/plain, text/markdown, */*", ...customHeaders } },
       timeoutMs,
       async (response) => {
+        if (noteRefusal(budget?.refusals, url, "llms.txt", response)) {
+          await response.body?.cancel().catch(() => {});
+          return null;
+        }
         if (response.status === 404 || !response.ok) {
           await response.body?.cancel().catch(() => {});
           return emptyFile(url);
@@ -54,24 +61,30 @@ async function fetchOne(
       },
     );
   } catch {
-    return emptyFile(url);
+    return null;
   }
 }
 
-// Fetch /llms.txt + /llms-full.txt from the domain root once per audit.
+// Fetch /llms.txt + /llms-full.txt from the domain root once per audit. null
+// when /llms.txt got no answer (skipped by the budget, refused, timed out):
+// there is no finding to store, and the rule reports "not checked" rather than
+// a missing file (#409).
 export function fetchLlmsTxt(
   baseUrl: string,
   userAgent: string,
   customHeaders?: Record<string, string>,
   budget?: PhaseBudget,
-): Effect.Effect<LlmsTxtData, never, never> {
+  gate: ProbeGate = ungated,
+): Effect.Effect<LlmsTxtData | null, never, never> {
   const llmsUrl = new URL("/llms.txt", baseUrl).toString();
   const fullUrl = new URL("/llms-full.txt", baseUrl).toString();
   return Effect.promise(async () => {
     const [llmsTxt, llmsFullTxt] = await Promise.all([
-      fetchOne(llmsUrl, userAgent, customHeaders, budget),
-      fetchOne(fullUrl, userAgent, customHeaders, budget),
+      gate(llmsUrl, () => fetchOne(llmsUrl, userAgent, customHeaders, budget)),
+      gate(fullUrl, () => fetchOne(fullUrl, userAgent, customHeaders, budget)),
     ]);
-    return { llmsTxt, llmsFullTxt };
+    if (!llmsTxt) return null;
+    // A skipped /llms-full.txt only ever costs the rule a note, so it records as absent.
+    return { llmsTxt, llmsFullTxt: llmsFullTxt ?? emptyFile(fullUrl) };
   });
 }

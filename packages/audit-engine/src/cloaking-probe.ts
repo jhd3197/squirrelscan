@@ -13,10 +13,11 @@
 // inbound-link analysis that only exists once pages are parsed. OFF by default and
 // capped to `maxPages` so it never multiplies crawl cost.
 
+import { datePeriod } from "@squirrelscan/utils/date-period";
 import { getPathname, normalizeUrl } from "@squirrelscan/utils/url";
 import { stripHtmlForText } from "@squirrelscan/utils";
 
-import { DEFAULT_MAX_BODY_BYTES, readBodyCapped } from "./lib/capped-body-read";
+import { DEFAULT_MAX_BODY_BYTES, fetchUndecoded, readBodyCapped } from "./lib/capped-body-read";
 
 import type { CloakingProbeData } from "@squirrelscan/core-contracts";
 
@@ -91,11 +92,16 @@ export type ProbeFetch = (
 
 // ── selection ───────────────────────────────────────────────────────
 
-/** Parse a lastmod string to ms epoch, or null if absent/unparseable. */
-export function parseLastmod(value: string | null): number | null {
-  if (!value) return null;
-  const t = Date.parse(value);
-  return Number.isNaN(t) ? null : t;
+/**
+ * When a lastmod last says the page changed, as ms epoch, or null if absent or
+ * unparseable (#772): the END of the period it names, capped at `now`. A bare
+ * `2026` names the whole year, so with `now` inside it the page may have
+ * changed today; read as 1 January it would never be recent.
+ */
+export function parseLastmod(value: string | null, now: number = Date.now()): number | null {
+  const period = datePeriod(value);
+  if (!period || period.start > now) return period ? period.start : null;
+  return Math.min(period.end, now);
 }
 
 /**
@@ -103,13 +109,16 @@ export function parseLastmod(value: string | null): number | null {
  * from the sitemap — same heuristic as integrity/orphan-page) and recently
  * modified pages (sitemap lastmod within `recentDays`). Orphans rank first (the
  * stronger compromise signal), then most-recently-modified. Capped at `maxPages`.
+ * Recent pages are ranked by the START of their lastmod's period, so a page
+ * dated yesterday outranks one stamped only with the current year, which may
+ * name today but says least about when (#772).
  */
 export function selectSuspiciousPaths(
   candidates: CloakingCandidate[],
   opts: { maxPages: number; recentDays: number; hasSitemap: boolean; now: number },
 ): SelectedProbe[] {
   const orphans: SelectedProbe[] = [];
-  const recent: { probe: SelectedProbe; lastmodMs: number }[] = [];
+  const recent: { probe: SelectedProbe; rankMs: number }[] = [];
   const seen = new Set<string>();
 
   for (const c of candidates) {
@@ -121,7 +130,7 @@ export function selectSuspiciousPaths(
     // no sitemap at all, absence is meaningless → zero inbound links alone.
     const isOrphan = c.inboundCount === 0 && (opts.hasSitemap ? !c.inSitemap : true);
 
-    const lastmodMs = parseLastmod(c.lastmod);
+    const lastmodMs = parseLastmod(c.lastmod, opts.now);
     const isRecent =
       lastmodMs !== null &&
       lastmodMs <= opts.now &&
@@ -133,12 +142,13 @@ export function selectSuspiciousPaths(
     if (isOrphan) {
       orphans.push({ url: c.url, reason: "orphan" });
     } else {
-      // lastmodMs is non-null here: isRecent requires it.
-      recent.push({ probe: { url: c.url, reason: "recent-lastmod" }, lastmodMs: lastmodMs! });
+      // The period is non-null here: isRecent requires it.
+      const rankMs = datePeriod(c.lastmod)!.start;
+      recent.push({ probe: { url: c.url, reason: "recent-lastmod" }, rankMs });
     }
   }
 
-  recent.sort((a, b) => b.lastmodMs - a.lastmodMs);
+  recent.sort((a, b) => b.rankMs - a.rankMs);
   return [...orphans, ...recent.map((r) => r.probe)].slice(0, Math.max(0, opts.maxPages));
 }
 
@@ -209,7 +219,8 @@ function defaultProbeFetch(timeoutMs: number): ProbeFetch {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(url, {
+      // Undecoded on every hop (#2717): readBodyCapped decodes within its cap.
+      const res = await fetchUndecoded(url, {
         headers: {
           "User-Agent": userAgent,
           Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -229,6 +240,9 @@ function defaultProbeFetch(timeoutMs: number): ProbeFetch {
       return { status: 0, body: "", error: e instanceof Error ? e.message : String(e) };
     } finally {
       clearTimeout(timer);
+      // Closes the connection (#766): a capped read stops reading, but Bun
+      // keeps downloading the body until the signal aborts.
+      controller.abort();
     }
   };
 }
@@ -320,6 +334,8 @@ export interface CloakingProbePage {
 
 export interface CloakingProbeSiteInput {
   baseUrl: string;
+  /** Where the crawl started (seed after redirects + the URL given); never probed (#788). */
+  entryUrls?: string[];
   pages: CloakingProbePage[];
   /** Flat list of sitemap URLs (loc + optional lastmod). */
   sitemapUrls: { loc: string; lastmod?: string }[];
@@ -362,10 +378,12 @@ export function probeSiteForCloaking(
   }
 
   const normalizedBase = input.baseUrl ? normalizeUrl(input.baseUrl) : "";
+  const entryPages = new Set((input.entryUrls ?? []).map((u) => normalizeUrl(u)));
   const candidates: CloakingCandidate[] = [];
   for (const p of input.pages) {
     const n = normalizeUrl(p.url);
-    if (n === normalizedBase || getPathname(p.url) === "/") continue; // never the homepage
+    // Never the homepage, nor the page the crawl started on (integrity/orphan-page).
+    if (n === normalizedBase || getPathname(p.url) === "/" || entryPages.has(n)) continue;
     candidates.push({
       url: p.url,
       normalizedUrl: n,

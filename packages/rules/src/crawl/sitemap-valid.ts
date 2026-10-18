@@ -1,12 +1,39 @@
 // crawl/sitemap-valid - Sitemap validation
 
+import type { CheckItem } from "@squirrelscan/core-contracts";
 import { SITEMAP_NOT_CHECKED_ERROR } from "@squirrelscan/core-contracts/storage";
+import { w3cDatePeriod } from "@squirrelscan/utils/date-period";
 
 import type { Rule, RuleContext, RuleResult, CheckResult } from "../types";
+
+import { sampleUrlItems } from "../shared/sample-items";
 
 const MAX_URLS_PER_SITEMAP = 50000;
 // The protocol limit for an index file counts CHILD SITEMAPS, not URLs.
 const MAX_CHILDREN_PER_INDEX = 50000;
+
+/**
+ * The W3C Datetime forms the sitemap protocol allows for `<lastmod>`: a year, a
+ * month, a day, or a datetime with a `T` and a zone (`Z` or `+hh:mm`).
+ */
+const W3C_DATETIME = /^\d{4}(?:-\d{2}(?:-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2}))?)?)?$/;
+/** A W3C datetime with the zone left off, which the protocol does not allow. */
+const W3C_DATETIME_NO_ZONE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
+
+/**
+ * How a `<lastmod>` falls short of the protocol (#781), or null when it does
+ * not. A real date in the right shape is fine; a datetime with no zone is
+ * named as that, since it reads as a date, just not one in a known zone;
+ * anything else (`2024/09/10`, `2024-9`, `2024-09-31`, an RFC 1123 date) is not
+ * W3C Datetime, and a search engine may ignore it.
+ */
+function lastmodProblem(value: string): "no-zone" | "not-w3c" | null {
+  const text = value.trim();
+  const readable = w3cDatePeriod(text) !== null;
+  if (readable && W3C_DATETIME.test(text)) return null;
+  if (readable && W3C_DATETIME_NO_ZONE.test(text)) return "no-zone";
+  return "not-w3c";
+}
 
 export const sitemapValidRule: Rule = {
   meta: {
@@ -134,13 +161,55 @@ export const sitemapValidRule: Rule = {
       });
     }
 
-    // Check for orphan pages (in sitemap but not crawled)
+    // `<lastmod>` values outside W3C Datetime (#781). Count plus sample, as a
+    // generator that writes one bad format writes it on every URL. No pass
+    // check: one would add a passed check to every audit's score for this rule.
+    const notW3c: CheckItem[] = [];
+    const noZone: CheckItem[] = [];
+    for (const sitemap of sitemaps.discovered) {
+      for (const entry of sitemap.urls) {
+        if (entry.lastmod === undefined) continue;
+        const problem = lastmodProblem(entry.lastmod);
+        if (!problem) continue;
+        const item = { id: entry.loc, label: `lastmod "${entry.lastmod}"` };
+        (problem === "no-zone" ? noZone : notW3c).push(item);
+      }
+    }
+    if (notW3c.length > 0) {
+      const { items, truncation } = sampleUrlItems(notW3c);
+      checks.push({
+        name: "sitemap-lastmod-format",
+        status: "warn",
+        message: `${notW3c.length} sitemap lastmod value(s) are not in W3C Datetime format`,
+        items,
+        details: { ...truncation, total: notW3c.length },
+      });
+    }
+    if (noZone.length > 0) {
+      const { items, truncation } = sampleUrlItems(noZone);
+      checks.push({
+        name: "sitemap-lastmod-zone",
+        status: "warn",
+        message: `${noZone.length} sitemap lastmod datetime(s) have no time zone`,
+        items,
+        details: { ...truncation, total: noZone.length },
+      });
+    }
+
+    // Check for orphan pages (in sitemap but not crawled). Count plus sample,
+    // with the exact count from before the engine's array cap (repo#2320).
     if (sitemaps.orphanPages.length > 0) {
+      const total = Math.max(sitemaps.orphanPagesTotal ?? 0, sitemaps.orphanPages.length);
+      const { items, truncation } = sampleUrlItems(
+        sitemaps.orphanPages.map((url) => ({ id: url })),
+        total
+      );
       checks.push({
         name: "sitemap-orphans",
         status: "info",
-        message: `${sitemaps.orphanPages.length} URL(s) in sitemap not found during crawl`,
-        items: sitemaps.orphanPages.map((url) => ({ id: url })),
+        message: `${total} URL(s) in sitemap not found during crawl`,
+        items,
+        details: { ...truncation, total },
       });
     }
 

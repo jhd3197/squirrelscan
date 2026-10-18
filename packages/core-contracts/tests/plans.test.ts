@@ -28,6 +28,14 @@ describe("plan definitions", () => {
     }
   });
 
+  test("broken link alerts are a paid-plan flag: every paid plan has them, free does not", () => {
+    // squirrelscan/repo#2772: a flag only, no price or credit change.
+    expect(PLANS.free.brokenLinkAlerts).toBe(false);
+    for (const id of ALL_PLAN_IDS.filter((plan) => plan !== "free")) {
+      expect(PLANS[id].brokenLinkAlerts).toBe(true);
+    }
+  });
+
   test("enterprise is the only unmetered plan", () => {
     const unmetered = ALL_PLAN_IDS.filter((id) => PLANS[id].unlimitedCredits);
     expect(unmetered).toEqual(["enterprise"]);
@@ -46,7 +54,8 @@ describe("plan definitions", () => {
     const plan = PLANS.enterprise;
     expect(plan.maxWebsites).toBe(-1);
     expect(plan.maxMembers).toBe(-1);
-    expect(plan.renderConcurrency).toBe(10);
+    // Like the page ceiling below: never narrower than the tier under it.
+    expect(plan.renderConcurrency).toBeGreaterThanOrEqual(PLANS.team.renderConcurrency);
     expect(plan.scheduledCrawls).toBe(true);
     expect(plan.customHeaders).toBe(true);
     expect(plan.maxPagesPerAudit).toBe(10000);
@@ -85,6 +94,12 @@ describe("getPlan", () => {
 
   test("still falls back to free for an unknown id", () => {
     expect(getPlan("platinum").id).toBe("free");
+  });
+
+  test("falls back to free for Object.prototype property names (#223)", () => {
+    for (const id of ["constructor", "__proto__", "toString"]) {
+      expect(getPlan(id)).toBe(PLANS.free);
+    }
   });
 });
 

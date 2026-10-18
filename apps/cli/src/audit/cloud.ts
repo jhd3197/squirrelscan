@@ -27,8 +27,13 @@ import {
   releaseSiteContextDocuments,
   renderedPageUrlsFrom,
   type CloudPrefetchResult,
+  type ExternalCheckResult,
 } from "@squirrelscan/audit-engine";
-import { computeCost } from "@squirrelscan/core-contracts";
+import {
+  computeCost,
+  externalLinkBudget,
+  parseUnverifiedReason,
+} from "@squirrelscan/core-contracts";
 import { SERVICE_LIMITS } from "@squirrelscan/core-contracts/limits";
 import {
   buildEditorSummaryRequest,
@@ -40,6 +45,10 @@ import {
   type RuleCloudSpec,
 } from "@squirrelscan/rules";
 import { hasUnsafeUrlScheme } from "@squirrelscan/utils";
+import {
+  overlayTechHeaders,
+  techCookieNames,
+} from "@squirrelscan/utils/headers";
 import { isRateLimitStatus } from "@squirrelscan/utils/rate-limit";
 
 import type { ExternalBulkChecker, SiteContextPage } from "@/audit/adapter";
@@ -379,6 +388,12 @@ export interface RunCloudPrefetchOptions {
   siteContext: SiteContextPage[];
   baseUrl: string;
   auditId: string;
+  /**
+   * The registered cloud run (#2290): the raw-vs-rendered `render` batches carry
+   * it so their pages are billed once, as audited pages, not as standalone
+   * renders on top. Absent when the run is not registered.
+   */
+  runId?: string;
   /** Stage-1 gating policy (CLI-owned) threaded into the engine's prefetch. */
   gate?: (meta: SiteMetadata, service: CloudServiceId) => boolean;
   confirm?: (
@@ -442,6 +457,7 @@ export async function runCloudPrefetch(
     metadataPages,
     gate: opts.gate,
     auditId: opts.auditId,
+    ...(opts.runId ? { runId: opts.runId } : {}),
     confirm: opts.confirm,
     onProgress: opts.onProgress,
     // Skip the raw-vs-rendered `render` service only when the crawl rendered EVERY page (#673). "auto" is
@@ -654,6 +670,7 @@ export async function runCloudPrefetchFromPayloads(
     metadataPages: payloads.metadataPages,
     gate: opts.gate,
     auditId: opts.auditId,
+    ...(opts.runId ? { runId: opts.runId } : {}),
     confirm: opts.confirm,
     onProgress: opts.onProgress,
     crawlRendered: opts.crawlRendered ?? false,
@@ -671,21 +688,33 @@ export async function runCloudPrefetchFromPayloads(
 /**
  * Build the cloud dead-links bulk checker for the external-links phase, or
  * null when cloud is off / logged out / the `links/dead-links` rule is not
- * enabled (its meta.cloud is the enable gate). Each call submits ≤200 urls;
- * the server charges `dead_links` per 100 urls. Throwing (402/auth/network)
- * is safe — the adapter falls back to local per-link checks.
+ * enabled (its meta.cloud is the enable gate). Each call submits ≤200 urls.
+ * Pricing v12 (#801): each call carries the audit's registered run, and the
+ * server bills it 1 credit per distinct external link it answers, at most one
+ * per page of the run's page cap, the same as a cloud audit. What it leaves
+ * unanswered is checked locally and costs nothing. The server reports what it
+ * charged as `charged`.
+ * Throwing (402/auth/network) is safe — the adapter falls back to local
+ * per-link checks.
  */
 function buildDeadLinksBulkChecker(
   client: CloudServicesClient,
   auditId: string,
+  runId: string,
   onSpend?: (units: number, credits: number) => void
 ): ExternalBulkChecker {
   return async (urls) => {
-    const res = await client.deadLinks({ auditId, urls });
-    // Only successful calls are charged client-side: the server debits per
-    // call (ceil(urls/100) credits) and refunds on total provider failure —
-    // a failure throws above and is never counted here.
-    onSpend?.(urls.length, computeCost("dead_links", urls.length));
+    const res = await client.deadLinks({ auditId, urls, runId });
+    // Only successful calls are counted client-side: the server refunds a
+    // total provider failure, which throws above and is never counted here.
+    // Prefer the server's own figure; an older server omits it, and charged
+    // nothing for a run then. Units are the links it answered (a status, an
+    // error, or unverifiable); a link it never requested comes back with
+    // none of those, and the rest are checked here, free.
+    const answered = res.results.filter(
+      (r) => r.status !== null || r.error != null || r.wafBlocked === true
+    ).length;
+    onSpend?.(answered, res.charged ?? 0);
     return new Map(
       res.results.map((r) => [
         r.url,
@@ -699,10 +728,49 @@ function buildDeadLinksBulkChecker(
           // to the status for 429/430 so a service that predates the field still
           // stops reporting throttled links as dead.
           rateLimited: r.rateLimited === true || isRateLimitStatus(r.status),
+          // squirrelscan/repo#2818: a link the service could not verify (bot
+          // protection, a timeout from its network, a first 404 awaiting its
+          // confirming check) is listed as unverifiable, never as broken.
+          ...(r.wafBlocked === true
+            ? {
+                wafBlocked: true,
+                wafProvider: knownWafProvider(r.wafProvider),
+                // pub#821: why, when the service says and the value is one
+                // this client knows.
+                unverifiedReason: parseUnverifiedReason(r.unverifiedReason),
+              }
+            : {}),
         },
       ])
     );
   };
+}
+
+type WafProvider = NonNullable<ExternalCheckResult["wafProvider"]>;
+
+/**
+ * The engine's vendor vocabulary, taken from its own type (no new dependency):
+ * a vendor added there fails to compile here until it is listed.
+ */
+const WAF_PROVIDERS: ReadonlySet<string> = new Set(
+  Object.keys({
+    cloudflare: true,
+    akamai: true,
+    "aws-waf": true,
+    sucuri: true,
+    imperva: true,
+    datadome: true,
+    perimeterx: true,
+    kasada: true,
+    unknown: true,
+  } satisfies Record<WafProvider, true>)
+);
+
+/** A vendor the service named, held to the engine's vocabulary: anything else reads as `unknown`. */
+function knownWafProvider(provider: string | undefined): WafProvider {
+  return provider !== undefined && WAF_PROVIDERS.has(provider)
+    ? (provider as WafProvider)
+    : "unknown";
 }
 
 /**
@@ -720,13 +788,15 @@ function countExternalLinks(siteContext: SiteContextPage[]): number {
 /**
  * Resolve the cloud dead-links bulk checker for the external-links phase,
  * applying the SAME spend-confirmation gate as the STEP 2.4 cloud prefetch so
- * the user is never surprise-charged for `dead_links`.
+ * the user is never surprise-charged for its link checks (`external_link`,
+ * pricing v12, #801).
  *
  * The dead-links charge happens in STEP 1.5, which runs BEFORE the prefetch
  * confirm in STEP 2.4 and lives outside its estimate + max_credits_per_audit
  * cap. Rather than reordering the external-links phase (its results feed rules
- * and storage), we gate the checker here: estimate `dead_links` credits from
- * the external link count, and when a TTY confirm callback exists and the
+ * and storage), we gate the checker here: estimate `external_link` credits
+ * from the external link count (at most one per page of the cap), and when a
+ * TTY confirm callback exists and the
  * estimate exceeds `confirm_threshold`, prompt BEFORE the phase. A decline (or
  * cloud off / logged out / rule not enabled) returns null → the adapter falls
  * back to plain local per-link checks, preserving the never-fail invariant.
@@ -756,6 +826,19 @@ export async function resolveDeadLinksBulkChecker(opts: {
    * dead-links spend into `report.cloudSpend`.
    */
   onSpend?: (units: number, credits: number) => void;
+  /**
+   * The audit's registered run (#801), which the cloud bills the checks to.
+   * Waits for registration. No run (an org API key, which cannot register
+   * one, or a failed registration) means no cloud link checks: the links are
+   * checked locally and nothing is charged.
+   */
+  getRunId?: () =>
+    | string
+    | undefined
+    | null
+    | Promise<string | undefined | null>;
+  /** The audit's page cap: the cloud bills at most one external link per page. */
+  maxPages?: number;
 }): Promise<ExternalBulkChecker | null> {
   const { client, config, auditId, confirm } = opts;
   if (!client || !config.cloud.enabled) return null;
@@ -768,7 +851,21 @@ export async function resolveDeadLinksBulkChecker(opts: {
     opts.externalLinkCount ?? countExternalLinks(opts.siteContext ?? []);
   if (linkCount === 0) return null;
 
-  const estimate = computeCost("dead_links", linkCount);
+  const runId = (await opts.getRunId?.()) ?? null;
+  if (!runId) {
+    logger.debug(
+      "dead-links: no registered run to bill the checks to; checking links locally"
+    );
+    return null;
+  }
+
+  // At most one billed link per page of the cap, the same rule the server
+  // applies to the run.
+  const billable =
+    opts.maxPages !== undefined && opts.maxPages > 0
+      ? Math.min(linkCount, externalLinkBudget(opts.maxPages))
+      : linkCount;
+  const estimate = computeCost("external_link", billable);
 
   // Mirror the prefetch confirm gate: only prompt above the threshold, and only
   // when a confirm callback is available (TTY). Non-TTY/--yes proceeds silently,
@@ -790,7 +887,7 @@ export async function resolveDeadLinksBulkChecker(opts: {
     if (!proceed) return null;
   }
 
-  return buildDeadLinksBulkChecker(client, auditId, opts.onSpend);
+  return buildDeadLinksBulkChecker(client, auditId, runId, opts.onSpend);
 }
 
 // ── Cloud technology detection (credited, report-only) ─────────────
@@ -832,13 +929,26 @@ function extractMetaTags(html: string): Record<string, string> {
   return out;
 }
 
-/** Map the crawler's curated response/security headers to a lowercase header map. */
+/**
+ * The cookie names a Set-Cookie value sets, one `name=` per line, for a record
+ * stored before the crawler kept them in `techHeaders`. Technology fingerprints
+ * match the name only, and the value (a session id) never leaves the machine.
+ */
+function setCookieNames(setCookie: string | null | undefined): string | null {
+  return setCookie ? techCookieNames(setCookie.split("\n")) : null;
+}
+
+/** Map the crawler's stored response/security headers to a lowercase header map. */
 function buildHeaderMap(page: SiteContextPage["page"]): Record<string, string> {
   const out: Record<string, string> = {};
   const put = (k: string, v: string | null | undefined) => {
     if (v) out[k] = v;
   };
   const h = page.headers;
+  put("set-cookie", setCookieNames(h.setCookie));
+  put("x-powered-by", h.xPoweredBy);
+  put("x-aspnet-version", h.xAspNetVersion);
+  put("x-generator", h.xGenerator);
   put("content-type", h.contentType);
   put("server", h.server);
   put("x-cache", h.xCache);
@@ -853,7 +963,10 @@ function buildHeaderMap(page: SiteContextPage["page"]): Record<string, string> {
   // CSP often allowlists vendor script origins (stripe, sentry, …) — a useful
   // detection signal carried in the curated security headers.
   put("content-security-policy", page.securityHeaders.csp);
-  return out;
+  // The headers stored for technology detection (pub#871) go last: a crawl
+  // that reuses an unchanged page refreshes them, not the curated fields, and
+  // they hold presence markers and cookie names in place of raw values.
+  return overlayTechHeaders(out, h.techHeaders);
 }
 
 /** Scripts the resource-fetch phase pulled (url always; content when fetched). */

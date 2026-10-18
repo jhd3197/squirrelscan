@@ -1,10 +1,11 @@
 import { Effect } from "effect";
 import { byteLength, truncateToBytes } from "@squirrelscan/utils/bytes";
 import { readBodyCapped } from "@squirrelscan/utils/response-body";
+import { CLOUDFLARE_CHALLENGE_SCRIPT } from "@squirrelscan/utils/waf";
 
-import { BUDGET_EXHAUSTED_ERROR, budgetedTimeoutMs, safeFetchWithDeadline } from "./deadline";
+import { BUDGET_EXHAUSTED_ERROR, budgetedTimeoutMs, safeFetchWithDeadline, ungated } from "./deadline";
 
-import type { PhaseBudget } from "./deadline";
+import type { PhaseBudget, ProbeGate } from "./deadline";
 import type {
   AgentAccessData,
   AgentAccessProbe,
@@ -27,10 +28,16 @@ interface ProbeIdentity {
 // Bot-challenge / interstitial markers. Returns the first signal that matched.
 export function detectChallenge(headers: Headers, body: string): string | null {
   if (headers.get("cf-mitigated") === "challenge") return "cf-mitigated";
-  const head = body.slice(0, 4_096);
-  if (head.includes("challenge-platform")) return "challenge-platform";
-  if (head.includes("__cf_chl_")) return "__cf_chl_";
-  if (head.includes("Just a moment")) return "just-a-moment";
+  // Challenge-only markup is looked for as far as waf-detect looks (10 KB): a
+  // managed challenge's inline styles can push its scripts past the head.
+  const sample = body.slice(0, 10_240);
+  // Not the bare /cdn-cgi/challenge-platform/ directory: JavaScript Detections
+  // loads a script from it on every ordinary page of a Cloudflare site (#666).
+  if (CLOUDFLARE_CHALLENGE_SCRIPT.test(sample)) return "challenge-platform";
+  if (sample.includes("__cf_chl_") || sample.includes("_cf_chl_opt")) return "__cf_chl_";
+  // The challenge page's title, not the phrase anywhere in a page. The title
+  // opens the document, so the first 4 KB holds it on any real challenge.
+  if (/<title\b[^>]*>\s*Just a moment/i.test(body.slice(0, 4_096))) return "just-a-moment";
   return null;
 }
 
@@ -117,6 +124,7 @@ export function probeAgentAccess(
   browserUserAgent: string,
   customHeaders?: Record<string, string>,
   budget?: PhaseBudget,
+  gate: ProbeGate = ungated,
 ): Effect.Effect<AgentAccessData, never, never> {
   const homeUrl = new URL("/", baseUrl).toString();
   const identities: ProbeIdentity[] = [
@@ -126,7 +134,7 @@ export function probeAgentAccess(
   ];
   return Effect.promise(async () => {
     const probes = await Promise.all(
-      identities.map((id) => probeOne(homeUrl, id, customHeaders, budget)),
+      identities.map((id) => gate(homeUrl, () => probeOne(homeUrl, id, customHeaders, budget))),
     );
     return { probes };
   });

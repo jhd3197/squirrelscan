@@ -638,6 +638,45 @@ runtime grows to under this path's churn, so the price is a multiple of their ow
 size. And the read and write batches were quartered (1,000 to 250 rows, 500 to 200)
 for ~15 MiB, because a batch's cost is the graph the driver builds around it, not
 the rows.
+
+### The site's page history, after the findings stopped costing
+
+[#503](https://github.com/squirrelscan/squirrelscan/pull/503) let the store hand
+the merge the untouched pages' findings as an aggregate plus a bounded report
+sample ([#497](https://github.com/squirrelscan/squirrelscan/issues/497)). The
+merge was still 2.3x slower on a site holding 250,000 carried findings than on one
+holding none. The findings were no longer the reason. The site's pages were: the
+merge session copied `site_pages` into a merged map, a merged array, an active set
+and a render-history set, the cloud merge built two more (its carried pages and
+the sample's render history), and then every page row went back to
+`upsertSitePages` whether this run had changed it or not.
+
+Now the session keeps the prior pages once, indexed, and this run's changes beside
+them. The active and carried counts are corrected from the run's own pages. The
+carried pages are a view (`PageUrlSet`) rather than a copy, and only the rows the
+run changed are upserted. The rows a store ends up holding are the same.
+
+One `runCloudSmartAudits` publish in complete-store mode with the untouched split,
+in-memory store, store aggregate computed before the clock starts: 2,000 fresh
+findings on 200 crawled pages, 40 page-scope rules, carried findings 10 per
+untouched page. One arm per process; base (`origin/main` at `ccf9c1f`) and head
+run alternately from the same script; minimum of five. 4 vCPU Xeon 2.1 GHz, Bun
+1.4.2. Harness: `packages/audit-engine/scripts/bench-untouched-carried.ts`.
+
+| | carried 0 | carried 250,000 (25,200 site pages) | ratio |
+|---|---|---|---|
+| base CPU | 41.4 ms | 122.3 ms | 2.95x |
+| head CPU | 42.5 ms | 67.4 ms | 1.59x |
+| base wall | 21.9 ms | 67.1 ms | 3.06x |
+| head wall | 20.4 ms | 35.1 ms | 1.72x |
+| base page rows upserted | 200 | 25,200 | |
+| head page rows upserted | 200 | 200 | |
+
+Store calls are 5 in every arm. The tallies, score, coverage, persisted count and
+serialized union hash identically on base and head in both arms. At 100 carried
+findings per page (2,700 site pages) base and head were already 1.46x and 1.43x
+on CPU: there the remaining excess is the report's carried sample, 25 checks per
+rule, which is the same at 2,500 carried findings as at 250,000.
 ## Disk: a project keeps every audit it has ever run
 
 Re-auditing writes a new crawl and retires nothing, so `project.db` grows by
@@ -1401,6 +1440,98 @@ is chrome, so a constructed pair can share it and still differ in a declared
 rule's inputs. Two things are not left to the declaration — the fan-out groups by
 page ORIGIN as well as by template (`security/sri` compares it), and a rule
 reading a response header is disqualified outright.
+
+### Decision on #275: tighten the fan-out grouping key
+
+Option 1 ships, narrowly. The fan-out groups on the chrome key, the page origin
+and a rule-input signature (`fanoutInputSignature`): the sorted `<script src>`
+and stylesheet `<link href>` lists with whether each carries `integrity`, every
+`<meta>`'s name, property, http-equiv and charset, the `content` of the metas a
+declared rule reads the value of (viewport, geo.*, ICBM, http-equiv refresh),
+and the `<main>` landmark count. The stored
+`template_fp` is unchanged, so `templateClusters()` and the parity gate are
+defined over the same key as before. The three constructed counterexamples (a
+missing viewport meta, a second `<main>`, a script path that differs on one host)
+each get a verdict from running the rule on their own page instead of inheriting
+one, pinned by `template-fanout-equivalence-golden.test.ts`, which fails on the
+old key and passes on the new one.
+
+Real crawls, measured 2026-10-10 (macOS arm64, Bun 1.3.14). Both keys were counted
+in one pass over each crawl (parse, chrome key, `fanoutInputSignature`, first
+page of a key is the representative, `DEFAULT_MAX_CLUSTERS` cap, no rules run).
+On openelectricity those counts match what `streamPageRules` itself reports
+with fan-out on:
+
+| crawl | auditable pages | main key: clusters / inherited | tightened key: clusters / inherited |
+| --- | --- | --- | --- |
+| www.gymshark.com (2026-09-22, 4000 pages) | 3983 | 37 / 3946 | 52 / 3931 |
+| openelectricity.org.au (fresh crawl 2026-10-10, `-C full -m 250`) | 250 | 11 / 239 | 11 / 239 |
+
+The tightened key costs gymshark 15 inherited pages (0.4%) and openelectricity
+none. `template-fanout-bench.ts --verify` on the openelectricity crawl is
+byte-identical with and without fan-out on both keys (250 pages compared, 239
+fanned, 5975 rule runs removed, about 40 s per run). On gymshark, `--verify`
+did not finish within 40 minutes (2,340 s CPU, 1.7 GB peak), so its
+byte-identity is not recorded here. The local openelectricity crawls from
+August had lost their HTML to content-store pruning, hence the fresh crawl.
+
+Before the real crawls, four synthetic estates of 360 pages and 6 chrome
+templates were run through `streamPageRules` with fan-out on, on `origin/main`
+and on this branch, each in its own process. They mimic the one thing the tighter key changes, the script
+list. Wall and CPU time were within 10% between the arms and between main and
+the branch (about 2.5 to 2.9 s wall per run), so they are not a result at this
+size; the counts below are.
+
+| estate | main: clusters / inherited | main: fanned equals reference | branch: clusters / inherited | branch: fanned equals reference |
+| --- | --- | --- | --- | --- |
+| stable bundles (2 per template) | 6 / 354 | yes | 6 / 354 | yes |
+| per-route hashed chunks (5 routes per template, each chunk shared by its route's pages) | 6 / 354 | no, 36 pages differ | 30 / 330 | yes |
+| hashed chunk on every third page only | 6 / 354 | no, 120 pages differ | 126 / 234 | yes |
+| worst case, a unique hashed chunk name on every page | 6 / 354 | no, 2 pages differ | 360 / 0 | yes |
+
+Reading it: the chrome-only key inherits the most pages and is wrong on every
+estate where pages of one chrome load different bundles (in the unique-name case
+the differing rule is `js-libraries-detected`, which reads the script url). The
+tighter key gives coverage up only where the inputs genuinely differ, and is
+byte-identical to running every rule everywhere on all four. A stable-bundle
+site loses nothing, and a realistic per-route estate keeps 330 of 354. Only the
+unique-name-per-page worst case falls to zero, and a real route does not produce
+it, because the pages of a route share its chunk.
+
+Normalising hash tokens out of the script name was tried to win that worst case
+back (354 inherited again) and rejected: it reproduced the same 2 differing
+pages as `main`, because a rule can match inside a hash. Byte-identity is the
+claim this feature rests on, so the key keeps the full script name.
+
+### #614: the root attributes and icon links join the signature
+
+Three declared rules read inputs the signature above did not cover:
+`a11y/html-xml-lang-mismatch` (`lang` and `xml:lang` on `<html>`),
+`a11y/aria-hidden-body` (`aria-hidden` on `<html>` and `<body>`) and
+`core/favicon` (the `rel` and `href` of icon links). `fanoutInputSignature`
+now includes all three (icon links as `[rel, href]` pairs in document order,
+since the rule lists formats in the order it finds them), and
+`template-fanout-equivalence-golden.test.ts` pins seven counterexamples (an
+`xml:lang` that contradicts `lang`, a different `lang` under one `xml:lang`,
+`aria-hidden` on `<html>`, on `<body>`, a missing favicon, a favicon in another
+format, the same favicons in another order) that share a chrome key, fail on
+the previous key and pass on this one.
+
+Re-measured 2026-10-11 the same way as the table above (one pass, parse, chrome
+key, both signatures, first page of a key is the representative,
+`DEFAULT_MAX_CLUSTERS` cap, no rules run). Gymshark is the same 2026-09-22 crawl;
+openelectricity is a fresh `--level full -m 250` crawl, because the 2026-10-10
+one is not in the local store. The previous key reproduces
+its row above on both, so the two rows compare like with like:
+
+| crawl | auditable pages | previous key: clusters / inherited | with #614: clusters / inherited |
+| --- | --- | --- | --- |
+| www.gymshark.com (2026-09-22, 4000 pages) | 3983 | 52 / 3931 | 72 / 3911 |
+| openelectricity.org.au (fresh crawl 2026-10-11, 250 pages) | 250 | 11 / 239 | 11 / 239 |
+
+The new inputs cost gymshark 20 inherited pages (0.5%) and openelectricity none.
+Which of the three inputs splits gymshark's 20 extra clusters was not broken
+down.
 
 ### Byte-identity
 

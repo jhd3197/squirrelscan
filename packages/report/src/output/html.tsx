@@ -10,8 +10,21 @@ import {
   PiUsersThree,
 } from "react-icons/pi";
 
-import type { ReportBranding } from "@squirrelscan/core-contracts";
+import type { CheckItem, ReportBranding, ReportStructure } from "@squirrelscan/core-contracts";
 import type { AuditReport } from "../types";
+import {
+  affectedPagesSuffix,
+  itemSourceView,
+  moreSourcePages,
+  type ItemSourceRow,
+} from "../item-sources";
+import {
+  checkPagesScopedAway,
+  checkScopeLine,
+  itemLabel,
+  itemRegionScope,
+  regionScopeLine,
+} from "../region-scope";
 import { getScoreGrade, getScoreColor, getGroupColor } from "../scoring";
 import {
   REPORT_COLLAPSE_THRESHOLD,
@@ -42,6 +55,14 @@ import {
   entityViewerMarkup,
   entityViewerScript,
 } from "../entities-viewer";
+import {
+  structureChromeLine,
+  structureDegradedLine,
+  structureRowDetail,
+  structurePageTypesLine,
+  structureRows,
+  structureTotalsLine,
+} from "../structure";
 import { groupTechnologies, techChangeSummary } from "../technologies";
 import {
   SITE_PROFILE_NOTE,
@@ -53,6 +74,8 @@ import {
   coverageLine,
   fullScanHint,
   scanScopeLine,
+  publishedReportNote,
+  auditLevelLine,
   seedRedirectLine,
   checkCarriedLabel,
   checkUnrenderedLabel,
@@ -72,9 +95,13 @@ import {
   ruleCarriedPageCount,
   isPageUrl,
   isRedundantPageItem,
+  itemsNotListed,
+  itemsNotListedLine,
 } from "../affected-pages";
 import { getAuditFailureNotice, reportFailureReasonCode } from "../failure-notice";
 import { lockedRulesMessage } from "../locked-rules";
+import { privateTargetLine } from "../private-target";
+import { notCheckedDetailLines } from "../not-checked";
 
 export interface HtmlRenderOptions {
   /** Report ID for OG meta tags (API use) */
@@ -122,6 +149,12 @@ h2 { font-size: 1.35rem; font-weight: 700; margin: 2.5rem 0 1rem; color: ${THEME
 
 .meta { color: ${THEME.colors.mutedForeground}; font-size: 0.875rem; margin-bottom: 0.5rem; }
 .scan-scope { color: ${THEME.colors.mutedForeground}; font-size: 0.8125rem; margin-top: 0.25rem; }
+.report-detail { margin: 2.5rem 0 1rem; }
+.report-detail h2 { margin-top: 0; }
+.report-detail h3 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: ${THEME.colors.mutedForeground}; font-weight: 600; margin: 1.5rem 0 0.5rem; }
+.report-detail ul { margin: 0; padding-left: 1.1rem; font-size: 0.875rem; }
+.report-detail li { margin: 0.3rem 0; }
+.report-detail .scan-scope, .report-detail .scan-hint { margin-top: 0.3rem; max-width: 52rem; }
 .scan-hint { color: ${THEME.colors.warn}; font-size: 0.8125rem; margin-top: 0.35rem; max-width: 42rem; }
 
 /* Header band: pixel-grid backdrop + primary rule, matching DecorativeHeader */
@@ -253,6 +286,8 @@ a.group-circle:hover { border-color: oklch(0.52 0.12 145 / 0.5); }
 .fix-group-name { font-weight: 600; color: ${THEME.colors.foreground}; }
 .fix-badge { display: inline-block; font-size: 0.62rem; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: ${THEME.colors.primary}; border: 1px solid ${THEME.colors.primary}; padding: 0.05rem 0.35rem; margin-right: 0.5rem; vertical-align: middle; white-space: nowrap; }
 .fix-badge-weak { color: ${THEME.colors.mutedForeground}; border-color: ${THEME.colors.border}; font-weight: 600; }
+/* pub#846: a finding in a shared region names the region instead of listing its pages. */
+.region-scope { font-size: 0.85rem; font-weight: 600; margin: 0.15rem 0 0.25rem; }
 
 details { margin: 0.5rem 0; }
 details > summary { cursor: pointer; color: ${THEME.colors.primary}; font-size: 0.875rem; }
@@ -617,7 +652,7 @@ function GroupScores({ report, issueGroups }: { report: AuditReport; issueGroups
           </div>
           <div className="group-circle-name">{getGroupName("ai")}</div>
           <div className="group-circle-counts">
-            not scored in quick coverage · re-run with -C surface or -C full
+            not scored at the quick level · re-run with --level surface or --level full
           </div>
         </div>
       )}
@@ -680,27 +715,6 @@ function ReportHeader({ report, branding }: { report: AuditReport; branding?: Re
                 {report.totalPages} page{report.totalPages === 1 ? "" : "s"} • Generated{" "}
                 {formatHumanDateTime(report.timestamp)}
               </div>
-              {/* Scan scope disclosure (#1180): the score always reads with its basis.
-                  A refused off-site seed redirect (#1418) sits with them: it is the
-                  same class of fact, that the score is not about the URL you might
-                  assume. React escapes the site-controlled finalUrl as a text child,
-                  and it is deliberately NOT a link: the point is that we did not go
-                  there. */}
-              {(() => {
-                const scope = scanScopeLine(report);
-                const cov = coverageLine(report);
-                const hint = fullScanHint(report);
-                const seedRedirect = seedRedirectLine(report);
-                return (
-                  <>
-                    {(scope || cov) && (
-                      <div className="scan-scope">{[scope, cov].filter(Boolean).join(" ")}</div>
-                    )}
-                    {seedRedirect && <div className="scan-hint">{seedRedirect}</div>}
-                    {hint && <div className="scan-hint">{hint}</div>}
-                  </>
-                );
-              })()}
             </div>
           </div>
           {/* `partial`/`completed`/absent fall through to the normal ring (#489). */}
@@ -771,9 +785,12 @@ function PagesList({
   carriedPages,
   count,
   summary,
+  collapsed,
 }: {
   pages: string[];
   carriedPages?: string[];
+  /** Start closed whatever the count: the check's findings name their region (pub#846). */
+  collapsed?: boolean;
   /**
    * #1023 R-F: authoritative affected-page total. `pages` is a labeled sample
    * (already sampled for publish + hard-capped here); `count` (≥ pages.length)
@@ -811,7 +828,7 @@ function PagesList({
     </a>
   );
   return (
-    <details open={total <= REPORT_COLLAPSE_THRESHOLD}>
+    <details open={!collapsed && total <= REPORT_COLLAPSE_THRESHOLD}>
       <summary>
         {summary ? summary(total) : `${total} page${total > 1 ? "s" : ""} affected`}
       </summary>
@@ -970,13 +987,80 @@ export function SiteResourceFixCards({ coverage }: { coverage: SiteResourceCover
   );
 }
 
+/**
+ * The pages an item was found on, one row each (pub#837): "from: /about (2 links, in the
+ * footer)". The first few show; the rest expand in place, so the full list sits inside the item
+ * rather than in the check's page list, which lists the check's pages, not this item's. Rows past
+ * the hard cap, and pages a published report does not list, are counted, never dropped silently.
+ */
+function ItemSources({
+  item,
+  structure,
+}: {
+  item: CheckItem;
+  structure: ReportStructure | undefined;
+}) {
+  const view = itemSourceView(item, structure);
+  const renderRow = (row: ItemSourceRow, j: number) => (
+    <div key={j}>
+      from:{" "}
+      <a href={sanitizeUrl(row.page)} target="_blank" rel="noopener noreferrer">
+        {getPathname(row.page) || "/"}
+      </a>
+      {row.detail ? ` (${row.detail})` : ""}
+    </div>
+  );
+  if (view.scope) {
+    // pub#846: one line for the region; every listed page stays in the item, collapsed.
+    const all = view.all.slice(0, REPORT_PAGES_HARD_CAP);
+    const total = Math.max(view.scope.pages + view.scope.otherPages, view.all.length);
+    return (
+      <div style={{ paddingLeft: "1rem", fontSize: "0.8rem" }}>
+        <div className="region-scope">{regionScopeLine(view.scope)}</div>
+        {all.length > 0 && (
+          <details className="pages-more">
+            <summary>
+              {all.length < total ? `${all.length} of ${total} pages` : `All ${all.length} pages`}
+            </summary>
+            {all.map(renderRow)}
+          </details>
+        )}
+      </div>
+    );
+  }
+  const { rows } = view;
+  if (rows.length === 0 && view.total === 0) return null;
+  const materialized = rows.slice(0, REPORT_PAGES_HARD_CAP);
+  const shown = materialized.slice(0, REPORT_SOURCE_PAGES_PREVIEW);
+  const rest = materialized.slice(REPORT_SOURCE_PAGES_PREVIEW);
+  const notShown = Math.max(0, view.total - materialized.length);
+  return (
+    <div style={{ paddingLeft: "1rem", fontSize: "0.8rem" }}>
+      {shown.map(renderRow)}
+      {rest.length > 0 && (
+        <details className="pages-more">
+          <summary>{moreSourcePages(rest.length)}</summary>
+          {rest.map((row, j) => renderRow(row, REPORT_SOURCE_PAGES_PREVIEW + j))}
+        </details>
+      )}
+      {notShown > 0 && <div>{moreSourcePages(notShown)} not listed here</div>}
+    </div>
+  );
+}
+
 // Flat issues list in ONE global severity order (#1536): error →
 // recommendation → warning, then category priority, then rule weight. Groups
 // are no longer contiguous, so the `group-*` anchors the score circles link to
 // are stamped on each group's FIRST rule in this order — the jump lands on the
 // highest-severity issue in that group, which is what a reader wants anyway.
 // No group or category headings — each rule carries its parent group as a label.
-function IssuesByGroup({ categories }: { categories: GroupedCategory[] }) {
+function IssuesByGroup({
+  categories,
+  structure,
+}: {
+  categories: GroupedCategory[];
+  structure: ReportStructure | undefined;
+}) {
   if (categories.length === 0) return null;
   const issues = flattenIssuesBySeverity(categories);
   const anchoredGroups = new Set<string>();
@@ -1121,6 +1205,9 @@ function IssuesByGroup({ categories }: { categories: GroupedCategory[] }) {
                                       coverage.uncoveredPages.includes(page),
                                     )
                                   : ap.sample;
+                            // pub#846: a check that only reads one shared region names it.
+                            // pub#857: and a check on every page of one page type.
+                            const checkScope = checkScopeLine(check, ap.count, structure);
                             // Items already covered by the unified PagesList above
                             // (pure page-URL ids with no sourcePages) are dropped
                             // from the items block so the same URL isn't listed
@@ -1130,6 +1217,7 @@ function IssuesByGroup({ categories }: { categories: GroupedCategory[] }) {
                               (item) => !isRedundantPageItem(item),
                             );
                             const hasVisibleItems = visibleItems && visibleItems.length > 0;
+                            const notListed = itemsNotListed(check);
                             // (#1652) A check on pages no audit has ever rendered
                             // gets its own note FIRST — the carried notes below all
                             // say or imply "previous crawls", which for these pages
@@ -1153,10 +1241,15 @@ function IssuesByGroup({ categories }: { categories: GroupedCategory[] }) {
                                 <div className="issue-content">
                                   <div className="issue-message">
                                     {check.message}
-                                    {ap.count > 1 ? ` (${ap.count} pages)` : ""}
+                                    {affectedPagesSuffix(check, ap.count)}
                                   </div>
                                   {(carriedLabel || partialCarried) && (
                                     <div className="carried-note">{carriedLabel ?? partialCarried}</div>
+                                  )}
+                                  {checkScope && (
+                                    <div className="region-scope">
+                                      {checkScope}
+                                    </div>
                                   )}
                                   {legacyPages.length > 0 && (
                                     <PagesList
@@ -1174,6 +1267,7 @@ function IssuesByGroup({ categories }: { categories: GroupedCategory[] }) {
                                               `Pages not attributed to a shared component (${total})`,
                                           }
                                         : {})}
+                                      collapsed={checkPagesScopedAway(check, ap.count, structure)}
                                     />
                                   )}
                                   {hasVisibleItems && (
@@ -1183,10 +1277,19 @@ function IssuesByGroup({ categories }: { categories: GroupedCategory[] }) {
                                       <summary>
                                         {visibleItems!.length} item
                                         {visibleItems!.length > 1 ? "s" : ""}
+                                        {notListed > 0
+                                          ? `, ${notListed.toLocaleString("en-US")} more not listed`
+                                          : ""}
                                       </summary>
                                       <div className="pages-list">
                                         {visibleItems!.map((item, i) => {
-                                          const label = item.label ?? item.id;
+                                          // pub#846: a scoped item's label drops the section
+                                          // phrase its region line says.
+                                          const ownLabel = itemLabel(
+                                            item,
+                                            itemRegionScope(item, structure),
+                                          );
+                                          const label = ownLabel ?? item.id;
                                           const isUrl = isPageUrl(item.id);
                                           return (
                                             <div key={i} style={{ marginBottom: "0.5rem" }}>
@@ -1197,53 +1300,22 @@ function IssuesByGroup({ categories }: { categories: GroupedCategory[] }) {
                                                   rel="noopener noreferrer"
                                                 >
                                                   {getPathname(item.id) || "/"}
-                                                  {item.label ? ` — ${item.label}` : ""}
+                                                  {ownLabel ? ` — ${ownLabel}` : ""}
                                                 </a>
                                               ) : (
                                                 <span>{label}</span>
                                               )}
-                                              {item.sourcePages && item.sourcePages.length > 0 && (
-                                                <div
-                                                  style={{
-                                                    paddingLeft: "1rem",
-                                                    fontSize: "0.8rem",
-                                                  }}
-                                                >
-                                                  {item.sourcePages
-                                                    .slice(0, REPORT_SOURCE_PAGES_PREVIEW)
-                                                    .map((src, j) => (
-                                                      <div key={j}>
-                                                        from:{" "}
-                                                        <a
-                                                          href={sanitizeUrl(src)}
-                                                          target="_blank"
-                                                          rel="noopener noreferrer"
-                                                        >
-                                                          {getPathname(src) || "/"}
-                                                        </a>
-                                                      </div>
-                                                    ))}
-                                                  {/* #1136 review: this preview is capped for
-                                                      readability, not truncated with a dead end —
-                                                      the full list (expand + copy) is the unified
-                                                      PagesList rendered above, covering this
-                                                      item's sourcePages too via checkAffectedPages. */}
-                                                  {item.sourcePages.length >
-                                                    REPORT_SOURCE_PAGES_PREVIEW && (
-                                                    <div>
-                                                      +
-                                                      {item.sourcePages.length -
-                                                        REPORT_SOURCE_PAGES_PREVIEW}{" "}
-                                                      more (see full list above)
-                                                    </div>
-                                                  )}
-                                                </div>
-                                              )}
+                                              <ItemSources item={item} structure={structure} />
                                             </div>
                                           );
                                         })}
                                       </div>
                                     </details>
+                                  )}
+                                  {!hasVisibleItems && notListed > 0 && (
+                                    <div className="pages-truncated-note">
+                                      {itemsNotListedLine(notListed)}
+                                    </div>
                                   )}
                                 </div>
                               </div>
@@ -1344,6 +1416,98 @@ function TechnologiesSection({ report }: { report: AuditReport }) {
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+/**
+ * Report detail: the last section of the report, after every finding. What this audit did not
+ * check (so a skipped check never reads as clean), the page structure (#2307: link sections as
+ * badges, the Technologies badge styles, so no new CSS for those), then the scope and coverage
+ * notes that qualify the score. They used to sit under the title. Absent when there is none of it.
+ */
+function ReportDetail({ report }: { report: AuditReport }) {
+  const notChecked = notCheckedDetailLines(report);
+  const structure = report.structure;
+  const structureText = structure
+    ? [
+        structurePageTypesLine(structure),
+        structureChromeLine(structure),
+        structureTotalsLine(structure),
+        structureDegradedLine(structure),
+      ].filter((line): line is string => line !== null)
+    : [];
+  const rows = structure ? structureRows(structure) : [];
+
+  // Scan scope disclosure (#1180): the score always reads with its basis. A refused off-site seed
+  // redirect (#1418) sits with them: it is the same class of fact, that the score is not about the
+  // URL you might assume. React escapes the site-controlled finalUrl as a text child, and it is
+  // deliberately NOT a link: the point is that we did not go there.
+  const scope = scanScopeLine(report);
+  const level = auditLevelLine(report);
+  const cov = coverageLine(report);
+  const scopeText = [scope, level, cov].filter(Boolean).join(" ");
+  const privateTarget = privateTargetLine(report);
+  // repo#2661: a capped published report lists samples; say so once.
+  const capped = publishedReportNote(report);
+  const seedRedirect = seedRedirectLine(report);
+  const hint = fullScanHint(report);
+  const scan: Array<{ text: string; className: string }> = [];
+  if (scopeText) scan.push({ text: scopeText, className: "scan-scope" });
+  if (privateTarget) scan.push({ text: privateTarget, className: "scan-scope" });
+  if (capped) scan.push({ text: capped, className: "scan-scope" });
+  if (seedRedirect) scan.push({ text: seedRedirect, className: "scan-hint" });
+  if (hint) scan.push({ text: hint, className: "scan-hint" });
+
+  if (notChecked.length === 0 && !structure && scan.length === 0) return null;
+  return (
+    <div className="report-detail">
+      <h2>Report detail</h2>
+      {notChecked.length > 0 && (
+        <>
+          <h3>Not checked</h3>
+          <ul>
+            {notChecked.map((line) => (
+              <li key={line} className="not-checked">
+                {line}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      {structure && (
+        <>
+          <h3>Page structure</h3>
+          <div className="tech-note">
+            Where the links on your pages sit. Informational, not part of the score.
+          </div>
+          {rows.length > 0 && (
+            <div className="tech-badges">
+              {rows.map((row) => (
+                <span className="tech-badge" key={row.section}>
+                  <span>{row.section}</span>
+                  <span className="tech-ver">{structureRowDetail(row)}</span>
+                </span>
+              ))}
+            </div>
+          )}
+          {structureText.map((line) => (
+            <p key={line}>{line}</p>
+          ))}
+        </>
+      )}
+      {scan.length > 0 && (
+        <>
+          <h3>Scan details</h3>
+          <ul>
+            {scan.map((item) => (
+              <li key={item.text} className={item.className}>
+                {item.text}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
     </div>
   );
 }
@@ -1591,7 +1755,7 @@ function ReportPage({
   reportId?: string;
   branding?: ReportBranding;
 }) {
-  const categoryIssues = groupIssuesByCategory(report.ruleResults);
+  const categoryIssues = groupIssuesByCategory(report.ruleResults, report.checkTallies);
   const hasIssues = categoryIssues.length > 0;
   // #792: a 0-page failed/blocked run has no issues, but "No issues found"
   // would read as a clean pass. The FailureNotice carries the real state, so
@@ -1664,7 +1828,7 @@ function ReportPage({
           <DomainStatsSection report={report} />
           <TechnologiesSection report={report} />
           {hasIssues ? (
-            <IssuesByGroup categories={categoryIssues} />
+            <IssuesByGroup categories={categoryIssues} structure={report.structure} />
           ) : isFailedOrBlocked ? null : (
             <div className="no-issues">✓ No issues found</div>
           )}
@@ -1672,6 +1836,7 @@ function ReportPage({
           <LockedRulesSection report={report} branding={branding} />
           {/* Cache reuse — quiet run metadata, pinned to the very bottom. */}
           <CacheSection report={report} />
+          <ReportDetail report={report} />
           <Footer report={report} branding={branding} />
         </div>
         {hasScreenshot && <script dangerouslySetInnerHTML={{ __html: SCREENSHOT_HIDE_SCRIPT }} />}

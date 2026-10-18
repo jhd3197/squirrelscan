@@ -49,6 +49,12 @@ Penalties are multiplicative. For example, an 80% score with missing robots.txt 
 80 × (1 - 0.15) × (1 - 0.20) = 80 × 0.85 × 0.80 = 54.4
 ```
 
+### Rules that do not apply
+
+A rule that does not apply to the audited site is skipped: its checks have status `skipped`, and they count toward neither the passed, warning and failed totals nor the score. A rule whose checks are all skipped carries no weight, so it cannot lift or lower the grade.
+
+The most visible case is a local or private-network host such as `localhost` or `192.168.1.10`. The transport and delivery rules (HTTPS, HSTS, HTTP to HTTPS redirects, HTTP/2, compression and caching) judge the production edge a dev server is not, so they are skipped there and the report says so once, under Scan details in Report detail at the end. See [Transport and delivery rules do not apply](/guides/local-audits-cli#transport-and-delivery-rules-do-not-apply) for the list and how a host is classified.
+
 ### Grade scale
 
 | Score | Grade |
@@ -66,7 +72,7 @@ Every category rolls up into one of four top-level groups, and each group gets i
 | Group | What it covers |
 |-------|----------------|
 | **SEO** | Crawlability, core SEO, content, links, structured data, images, social, accessibility, mobile, URLs, internationalization, E-E-A-T, local, video, analytics |
-| **Performance** | Page speed and loading performance |
+| **Performance** | Page speed and loading performance, and reliability: broken scripts, stylesheets and fonts, forms that lose submissions, and broken internal and external links and anchors |
 | **Security** | HTTPS and headers, site integrity, legal compliance, blocked content |
 | **Agents** | Agent experience: how ready the site is for AI agents to read, discover, and operate on it |
 
@@ -97,6 +103,107 @@ the work to do first:
 
 Categories are not top-level sections: a category with both an error and a
 warning appears under both severities.
+
+### Findings in a shared page region
+
+A finding that sits in a part of the page every page repeats is one thing to
+fix in one template, so the report names the region instead of listing every
+page:
+
+```text
+-> shop
+    In the site header, on 120 of 120 pages
+```
+
+These are the regions, and how the line names them:
+
+| Region | The line reads |
+| --- | --- |
+| `header` | In the site header |
+| `footer` | In the site footer |
+| `navigation` | In the site navigation |
+| `sidebar` | In the sidebar |
+| `breadcrumbs` | In the breadcrumbs |
+| `pagination` | In the pagination |
+| `newsletter_signup` | In the newsletter signup |
+| `social_share` | In the social share links |
+| `business_info` | In the business details |
+| `account_login` | In the account links |
+
+The page content, comments, related content and the author byline differ from
+page to page and are never regions.
+
+A finding is shown this way when it sits in the region on at least 80% of the
+pages that have that region, and on at least 2 pages. The share is counted
+against the pages that have the region, not every audited page, so a footer
+missing from a few pages does not hide a finding that is on every footer. A
+sidebar on 6 pages is judged against those 6. When the finding is also
+elsewhere, the line says so (`, and on 3 other pages`) and those other pages
+are listed under it. The item's label then leaves out its own section phrase
+(`https://example.com/old (404)`, not `..., linked in the footer`), since the
+region line says where it is; an item that is not shown for a region keeps it.
+
+The Markdown, text, LLM and console reports print the region line and no
+per-page list, and leave out the check's page list when its findings name their
+regions. The HTML report keeps every page, behind a collapsed list. The JSON
+and XML reports keep the bounded page list and add the region as data (see
+[source pages](/configuration/output#source-pages)).
+
+A finding in the page content, a finding in a region on only a few of the pages
+that have it, and any report without page structure data (a crawl stored
+before link sections were recorded, or the page classifier and landmarks found
+nothing) keep their page lists. Which part of the page a link sits in comes
+from the page's landmarks and the page classifier; see
+[link sections](/rules/links/broken-links#what-squirrel-checks). Nothing about
+how a finding is detected, its severity or the score changes.
+
+These rules record where their finding sits: `a11y/link-text`,
+`links/broken-links`, `links/broken-external-links`, `links/broken-anchors`,
+`links/redirect-chains`, `links/anchor-text`, `links/tel-mailto`,
+`links/https-downgrade`, `links/invalid-links`, `links/nofollow-internal` and
+`content/stale-copyright` (always the footer).
+
+### Findings on every page of one page type
+
+A finding that sits on all, or nearly all, of the pages of one kind has the same
+template behind every page, so the report names the page type instead of
+listing the pages. The expected-schema check on a site with a documentation
+section reads:
+
+```text
+[X] expected-type: Reads as a documentation page but declares no Article, TechArticle, HowTo or FAQPage structured data (9 pages)
+    On 9 of 11 documentation pages
+```
+
+and `On all 9 documentation pages` when it is every one. The page types are the
+ones the [page classifier](/configuration/classifier) names, in the plural words
+of the [page structure](/configuration/output#page-structure) block: documentation pages, product
+pages, product listings, articles, blog posts, about pages, contact pages and
+listing pages.
+
+A finding is shown this way when all of its pages are the same page type, it
+is on at least 2 pages, and those pages are at least 80% of the audited pages
+of that type. The share is counted against the audited pages of the type in the
+page structure block, not every audited page, so a documentation section is
+judged against its own pages. Those pages include any the classifier called
+documentation pages but the rule did not judge (it only acts on a page type the
+model is 0.9 sure of by default), which is why a finding on every page it judged
+can still read `9 of 11`. The report never says `all` for a finding on more pages
+than it counted of the type.
+
+The Markdown, text, LLM and console reports print that line and no page list.
+The HTML report keeps every page, behind a collapsed list. The JSON and XML
+reports keep the bounded page list and add `scope` with the page type, the pages
+the finding is on and the audited pages of that type (see
+[source pages](/configuration/output#source-pages)).
+
+A finding on pages of mixed types, on a single page, on fewer than 80% of the
+pages of its type, a finding carried over from an earlier audit (its pages are
+not in this audit's counts), and any report without page structure data (a crawl stored
+before page types were recorded, or the page classifier off) keep their page
+lists. Nothing about how a finding is detected, its severity or the score
+changes. Only `schema/expected-type` is scoped this way today: it is the one
+rule that records a page type from the classifier on its findings.
 
 ### console (default)
 
@@ -347,7 +454,8 @@ squirrel report -f llm | claude "analyze this audit and prioritize fixes"
 - **Text prefixes** - `Desc:`, `Fix:`, `Pages (n):`, `Items (n):`
 - **Comma-separated lists** - pages and URLs formatted inline
 - **Hybrid structure** - XML tags for parsing, text for readability
-- **`<locked-rules>`** - cloud-gated checks that didn't run this audit (logged out, quick coverage, out of credits), with an audience-aware action and, for anonymous/free runs, a signup or credits link. Absent when every eligible check ran.
+- **`<locked-rules>`** - cloud-gated checks that didn't run this audit (logged out, the quick level, out of credits), with an audience-aware action and, for anonymous/free runs, a signup or credits link. Absent when every eligible check ran.
+- **`<audit-level>`** - the [audit level](/guides/audit-levels) the audit ran at: `level` (`quick`, `surface`, `full` or `custom`), `based-on`, the `changes` made to it (setting names, comma-separated) and the page budget. Absent on reports from before audit levels.
 
 **Token Efficiency:**
 The LLM format achieves significant size reduction through:
@@ -363,7 +471,7 @@ The LLM format achieves significant size reduction through:
 - Cost optimization for LLM processing
 - Agent-based workflows requiring structured output
 
-See [OUTPUT-FORMAT.md](https://github.com/squirrelscan/squirrelscan/blob/main/skills/audit-website/references/OUTPUT-FORMAT.md) for complete format specification.
+See [OUTPUT-FORMAT.md](https://github.com/squirrelscan/skills/blob/main/skills/audit-website/references/OUTPUT-FORMAT.md) for complete format specification.
 
 ### xml
 
@@ -376,22 +484,17 @@ squirrel report -f xml -o report.xml
 **Format Structure:**
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
-<audit version="0.0.13">
+<squirrelscan-audit version="0.0.117">
   <site>
     <url>https://example.com</url>
-    <crawled>42</crawled>
-    <date>2025-01-18T10:30:00Z</date>
+    <pages-crawled>42</pages-crawled>
+    <audit-date>2025-01-18T10:30:00.000Z</audit-date>
+    <scan-scope origin="cli" crawled="42" max-pages="100" capped="false"/>
   </site>
-  <score>
-    <overall>87</overall>
-    <grade>B</grade>
-    <categories>
-      <category>
-        <name>Core SEO</name>
-        <score>100</score>
-      </category>
-    </categories>
-  </score>
+  <health-score overall="87" grade="B">
+    <category name="Core SEO" score="100"/>
+  </health-score>
+  <summary passed="180" warnings="6" failed="2"/>
   <issues>
     <rule id="content/word-count" severity="warning" category="Content" group="seo">
       <name>Word Count</name>
@@ -406,8 +509,10 @@ squirrel report -f xml -o report.xml
       </check>
     </rule>
   </issues>
-</audit>
+</squirrelscan-audit>
 ```
+
+`<scan-scope>` says where the audit ran (`origin`: `cli`, `ci` or `cloud`), how many pages it crawled, the page limit in force (`max-pages`), and whether that limit stopped the crawl (`capped`). `requested-max-pages` appears only when the limit you asked for was lowered, and `stop-reason="time"` only when the crawl time budget ended the crawl. A report from before scan scope existed has no `<scan-scope>`. A white-label report's root element is `<audit>`.
 
 **Key Features:**
 - **2-space indentation** for readability
@@ -470,6 +575,7 @@ squirrel report --category core,links,images
 - `a11y` - Accessibility (ARIA, contrast, focus)
 - `i18n` - Internationalization (lang, hreflang)
 - `perf` - Performance (LCP, CLS, lazy loading)
+- `reliability` - Reliability (scripts, stylesheets and fonts that fail to load)
 - `social` - Social media (Open Graph, Twitter Cards)
 - `crawl` - Crawlability (robots, sitemaps, indexability)
 - `url` - URL structure (length, keywords, parameters)
@@ -685,6 +791,8 @@ Published reports support multiple output formats. Append a file extension to th
 | XML | [/SJEItpldwW.xml](https://reports.squirrelscan.com/SJEItpldwW.xml) | Enterprise integration |
 | LLM | [/SJEItpldwW.llm](https://reports.squirrelscan.com/SJEItpldwW.llm) | Coding agents, token-efficient |
 
+Every format is the same capped summary, the JSON included: each issue keeps up to 10 example pages and 5 items beside its true counts, which the JSON carries in a sampled check's `details` (`pagesTruncated` for pages, `occurrences` for per-page checks, `additional` for items left out). The HTML, markdown and text formats print that count beside the items they list, for example `1 item, 37 more not listed`, or on its own (`1,500 items not listed`) for an issue that lists none. The console adds it to its `... +N more` line after the first 5 items, or prints it on its own the same way. The llm format counts it in each rule's item total (`Items (5/1152):`, or `Items (0/1500): none listed` when nothing is listed), and the XML gives it as a `not-listed` attribute on the check's `<items>` element (`<items count="0" not-listed="1500"/>` when nothing is listed). When a rule's issues reach different pages, the JSON's top-level `rulePageCounts` gives that rule's exact page count, which adding up its sampled issues cannot. A capped report says so in its top-level `detail` field, and every format of a capped report prints one line saying where the full list is. See [size cap on large sites](#size-cap-on-large-sites).
+
 Without an extension, the format is determined by the `Accept` header. Browsers receive HTML, while tools like `curl` can request specific formats:
 
 ```bash
@@ -697,6 +805,20 @@ curl https://reports.squirrelscan.com/SJEItpldwW.json
 # Pipe LLM format to Claude
 curl -s https://reports.squirrelscan.com/SJEItpldwW.llm | claude "prioritize fixes"
 ```
+
+### Size cap on large sites
+
+A published report is a summary. Each issue lists a sample of affected pages with the true count, and your dashboard tracks which issues are fixed from one audit to the next.
+
+To tell a fixed page from one that just fell outside the sample, a publish also sends a compact list of every page it crawled and which of those still fail each check. That list has a fixed size budget of 192 KB, shared with the list of pages that returned an error status. Most sites fit every page, up to the 10,000-page crawl limit. Sites with long, unique URLs fit fewer, about 4,000 to 5,000 pages.
+
+When a crawl is bigger than that:
+
+- The pages that don't fit are still counted as audited.
+- An issue on one of those pages is never closed early: it stays open until an audit can confirm the fix.
+- The checks that cost the most to list, such as one failing on about half the pages with no pattern, can be dropped first. Their issues stay open the same way.
+
+The full per-page results are never cut. They stay in your local project: run `squirrel report --format json` or `squirrel report --format llm` to read every page and every finding.
 
 ### Managing published reports
 

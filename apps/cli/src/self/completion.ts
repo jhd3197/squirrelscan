@@ -2,6 +2,7 @@ import { FEEDBACK_CATEGORIES } from "@squirrelscan/utils/constants";
 
 import type { Result } from "@/controllers/types";
 
+import { AUDIT_LEVELS } from "@/cli/audit-level";
 import { ENTITY_FORMATS } from "@/cli/commands/entities";
 import { OUTPUT_FORMATS } from "@/constants";
 import { ok, err, commandError } from "@/controllers/types";
@@ -13,6 +14,7 @@ const entityFormatValues = ENTITY_FORMATS.join(" ");
 const entityProblemValues = ENTITY_PROBLEMS.join(" ");
 const formatValues = OUTPUT_FORMATS.join(" ");
 const feedbackCategoryValues = FEEDBACK_CATEGORIES.join(" ");
+const levelValues = AUDIT_LEVELS.join(" ");
 
 export type Shell = "bash" | "zsh" | "fish";
 
@@ -46,7 +48,7 @@ _squirrel_completions() {
   local global_opts="--config-file -c"
 
   # Top-level commands
-  local commands="audit auth crawl credits analyze entities init config report feedback keys mcp self skills"
+  local commands="setup audit auth crawl credits analyze entities init config report feedback keys mcp channel self skills"
 
   # Auth subcommands
   local auth_commands="login logout status whoami"
@@ -64,7 +66,7 @@ _squirrel_completions() {
   local settings_commands="show set"
 
   # Settings keys
-  local settings_keys="channel auto_update update_check_interval_hours notifications telemetry tips"
+  local settings_keys="channel auto_update skills_auto_update update_check_interval_hours notifications telemetry tips"
 
   case "\${COMP_WORDS[1]}" in
     self)
@@ -90,7 +92,7 @@ _squirrel_completions() {
           return 0
           ;;
         uninstall)
-          COMPREPLY=( $(compgen -W "--purge --force" -- "\${cur}") )
+          COMPREPLY=( $(compgen -W "--purge --yes --force" -- "\${cur}") )
           return 0
           ;;
         install)
@@ -131,10 +133,29 @@ _squirrel_completions() {
     skills)
       case "\${prev}" in
         skills)
-          COMPREPLY=( $(compgen -W "install update" -- "\${cur}") )
+          COMPREPLY=( $(compgen -W "install update status uninstall" -- "\${cur}") )
+          return 0
+          ;;
+        --agent)
+          COMPREPLY=( $(compgen -W "claude agents all" -- "\${cur}") )
           return 0
           ;;
       esac
+      case "\${COMP_WORDS[2]}" in
+        install)
+          COMPREPLY=( $(compgen -W "squirrelscan audit-website --agent --project --dry-run" -- "\${cur}") )
+          ;;
+        update)
+          COMPREPLY=( $(compgen -W "squirrelscan audit-website --check --force --dry-run --json" -- "\${cur}") )
+          ;;
+        status)
+          COMPREPLY=( $(compgen -W "--json" -- "\${cur}") )
+          ;;
+        uninstall)
+          COMPREPLY=( $(compgen -W "squirrelscan audit-website --agent --project" -- "\${cur}") )
+          ;;
+      esac
+      return 0
       ;;
     auth)
       case "\${prev}" in
@@ -172,10 +193,14 @@ _squirrel_completions() {
           ;;
       esac
       ;;
+    channel)
+      COMPREPLY=( $(compgen -W "--interval --categories" -- "\${cur}") )
+      return 0
+      ;;
     audit)
       case "\${prev}" in
-        --coverage|-C)
-          COMPREPLY=( $(compgen -W "quick surface full" -- "\${cur}") )
+        --level|--coverage|-C)
+          COMPREPLY=( $(compgen -W "${levelValues}" -- "\${cur}") )
           return 0
           ;;
         --visibility)
@@ -186,12 +211,16 @@ _squirrel_completions() {
           COMPREPLY=( $(compgen -W "off auto all" -- "\${cur}") )
           return 0
           ;;
+        --probe|-P)
+          COMPREPLY=( $(compgen -W "passive active aggressive" -- "\${cur}") )
+          return 0
+          ;;
         --format|-f)
           COMPREPLY=( $(compgen -W "${formatValues}" -- "\${cur}") )
           return 0
           ;;
       esac
-      COMPREPLY=( $(compgen -W "--max-pages -m --max-depth --concurrency --per-host --coverage -C --format -f --output -o --refresh -r --fresh-ua --incremental --no-incremental --resume --verbose -v --debug --trace --project-name -n --publish -p --no-publish --visibility --yes -y --render --render-mode --http --offline --fail-on --header -H --rule-include --rule-exclude --summary --help" -- "\${cur}") )
+      COMPREPLY=( $(compgen -W "--max-pages -m --max-depth --concurrency --per-host --level --coverage -C --format -f --output -o --refresh -r --fresh-ua --incremental --no-incremental --resume --verbose -v --debug --trace --project-name -n --publish -p --no-publish --visibility --yes -y --render --render-mode --http --offline --external-links --no-external-links --no-internal-links --no-classifier --fail-on --header -H --rule-include --rule-exclude --disable-discovery-probes --probe -P --passive --aggressive --probe-budget --pentest --summary --help" -- "\${cur}") )
       return 0
       ;;
     entities)
@@ -200,12 +229,12 @@ _squirrel_completions() {
       ;;
     crawl)
       case "\${prev}" in
-        --coverage|-C)
-          COMPREPLY=( $(compgen -W "quick surface full" -- "\${cur}") )
+        --level|--coverage|-C)
+          COMPREPLY=( $(compgen -W "${levelValues}" -- "\${cur}") )
           return 0
           ;;
       esac
-      COMPREPLY=( $(compgen -W "--max-pages -m --concurrency --per-host --coverage -C --refresh -r --fresh-ua --resume --help" -- "\${cur}") )
+      COMPREPLY=( $(compgen -W "--max-pages -m --concurrency --per-host --level --coverage -C --refresh -r --fresh-ua --resume --help" -- "\${cur}") )
       return 0
       ;;
     credits)
@@ -214,6 +243,10 @@ _squirrel_completions() {
       ;;
     analyze)
       COMPREPLY=( $(compgen -W "--id --help" -- "\${cur}") )
+      return 0
+      ;;
+    setup)
+      COMPREPLY=( $(compgen -W "--yes -y --dry-run --help" -- "\${cur}") )
       return 0
       ;;
     init)
@@ -248,8 +281,11 @@ _squirrel_completions() {
           COMPREPLY=( $(compgen -W "${feedbackCategoryValues}" -- "\${cur}") )
           return 0
           ;;
+        --message|-m|--email|--run-id|--website-id)
+          return 0
+          ;;
       esac
-      COMPREPLY=( $(compgen -W "--category --help" -- "\${cur}") )
+      COMPREPLY=( $(compgen -W "--message -m --category --email --run-id --website-id --json --help" -- "\${cur}") )
       return 0
       ;;
     *)
@@ -280,6 +316,7 @@ _squirrel() {
   )
 
   commands=(
+    'setup:Sign in, install the agent skills and pick your defaults'
     'audit:Run audit on a URL'
     'auth:Authentication commands'
     'crawl:Crawl a website (no analysis)'
@@ -291,6 +328,7 @@ _squirrel() {
     'feedback:Send feedback to the team'
     'keys:Manage org API keys'
     'mcp:Run the local MCP server (stdio)'
+    'channel:Run the Claude Code channel (stdio)'
     'self:Self-management commands'
     'skills:Manage agent skills'
   )
@@ -333,7 +371,9 @@ _squirrel() {
 
   skills_commands=(
     'install:Install squirrelscan skills for coding agents'
-    'update:Update squirrelscan skills for coding agents'
+    'update:Update the installed squirrelscan skills'
+    'status:Show installed skill versions and locations'
+    'uninstall:Remove the skills squirrelscan installed'
   )
 
   _arguments -C \\
@@ -370,7 +410,7 @@ _squirrel() {
                   ;;
                 set)
                   _arguments \\
-                    '1:key:(channel auto_update update_check_interval_hours notifications telemetry tips)' \\
+                    '1:key:(channel auto_update skills_auto_update update_check_interval_hours notifications telemetry tips)' \\
                     '2:value:' \\
                     '--local[Set in local project settings]' \\
                     '--user[Set in user settings]'
@@ -382,8 +422,9 @@ _squirrel() {
               ;;
             uninstall)
               _arguments \\
-                '--purge[Also remove user settings]' \\
-                '--force[Skip confirmation prompt]'
+                '--purge[Also remove settings, credentials, audit data and the cache]' \\
+                '--yes[Skip the confirmation prompt]' \\
+                '--force[Same as --yes]'
               ;;
             install)
               _arguments \\
@@ -398,7 +439,35 @@ _squirrel() {
           _describe 'config command' config_commands
           ;;
         skills)
-          _describe 'skills command' skills_commands
+          case $words[2] in
+            install)
+              _arguments \\
+                '*--agent[Agent to install for]:agent:(claude agents all)' \\
+                '--project[Install into this repo]' \\
+                '--dry-run[Show what would change]' \\
+                '*:skill:(squirrelscan audit-website)'
+              ;;
+            update)
+              _arguments \\
+                '--check[Only report; exit 1 when an update is available]' \\
+                '--force[Also replace locally edited files]' \\
+                '--dry-run[Show what would change]' \\
+                '--json[Output JSON]' \\
+                '*:skill:(squirrelscan audit-website)'
+              ;;
+            status)
+              _arguments '--json[Output JSON]'
+              ;;
+            uninstall)
+              _arguments \\
+                '*--agent[Agent to remove from]:agent:(claude agents all)' \\
+                '--project[Remove from this repo]' \\
+                '*:skill:(squirrelscan audit-website)'
+              ;;
+            *)
+              _describe 'skills command' skills_commands
+              ;;
+          esac
           ;;
         auth)
           case $words[2] in
@@ -413,6 +482,11 @@ _squirrel() {
               _describe 'auth command' auth_commands
               ;;
           esac
+          ;;
+        channel)
+          _arguments \\
+            '--interval[Seconds between polls of the cloud feed]:seconds' \\
+            '--categories[Comma-separated categories to deliver]:categories'
           ;;
         keys)
           case $words[2] in
@@ -449,7 +523,8 @@ _squirrel() {
             '--max-depth[Maximum crawl depth from the seed]:number' \\
             '--concurrency[Global crawl worker pool size]:number' \\
             '--per-host[Max concurrent requests per host]:number' \\
-            '(-C --coverage)'{-C,--coverage}'[Coverage mode]:mode:(quick surface full)' \\
+            '(-C --coverage --level)--level[Audit level]:level:(${levelValues})' \\
+            '(-C --coverage --level)'{-C,--coverage}'[Audit level (old name for --level)]:level:(${levelValues})' \\
             '(-f --format)'{-f,--format}'[Output format]:format:(${formatValues})' \\
             '(-o --output)'{-o,--output}'[Output file path]:file:_files' \\
             '(-r --refresh)'{-r,--refresh}'[Ignore cache, fetch all pages fresh]' \\
@@ -468,11 +543,21 @@ _squirrel() {
             '--render[Force cloud browser rendering for this run]' \\
             '--render-mode[Render strategy]:mode:(off auto all)' \\
             '--http[Force plain HTTP fetch for this run]' \\
-            '--offline[Run fully offline: no cloud, publishing, or telemetry]' \\
+            '--offline[Run fully offline: no cloud, publishing, telemetry, or checks of other sites]' \\
+            '--external-links[Check links to other sites this run, at any level]' \\
+            '--no-external-links[Do not check links to other sites this run]' \\
+            '--no-internal-links[Do not status-check unfetched internal link targets]' \\
+            '--no-classifier[Do not run the page classifier (markup-only link sections)]' \\
             '*--fail-on[Exit 2 when a threshold trips (e.g. score<90, severity>=error)]:expr' \\
             '*'{-H,--header}'[Custom HTTP header on every crawl request, format "Name: Value" (repeatable)]:header' \\
             '*--rule-include[Only run these rule categories or rules]:pattern' \\
             '*--rule-exclude[Skip these rule categories or rules]:pattern' \\
+            '--disable-discovery-probes[Skip the pre-crawl discovery probes (llms.txt, well-known files, swagger.json)]' \\
+            '(-P --probe)'{-P,--probe}'[Probing intensity]:level:(passive active aggressive)' \\
+            '--passive[Probing intensity passive: no requests beyond the crawl]' \\
+            '--aggressive[Probing intensity aggressive: loud probes, can trip a WAF]' \\
+            '--probe-budget[Wall-clock cap for all probing (e.g. 30s)]:duration' \\
+            '--pentest[Shorthand for --level full --probe aggressive]' \\
             '--summary[Print score, category breakdown, and issue counts only]'
           ;;
         entities)
@@ -494,7 +579,8 @@ _squirrel() {
             '(-m --max-pages)'{-m,--max-pages}'[Maximum pages to crawl]:number' \\
             '--concurrency[Global crawl worker pool size]:number' \\
             '--per-host[Max concurrent requests per host]:number' \\
-            '(-C --coverage)'{-C,--coverage}'[Coverage mode]:mode:(quick surface full)' \\
+            '(-C --coverage --level)--level[Audit level]:level:(${levelValues})' \\
+            '(-C --coverage --level)'{-C,--coverage}'[Audit level (old name for --level)]:level:(${levelValues})' \\
             '(-r --refresh)'{-r,--refresh}'[Ignore cache, fetch all pages fresh]' \\
             '--fresh-ua[Re-roll the pinned random user-agent]' \\
             '--resume[Resume interrupted crawl]'
@@ -510,7 +596,17 @@ _squirrel() {
           ;;
         feedback)
           _arguments \\
-            '--category[Feedback category]:category:(${feedbackCategoryValues})'
+            '(-m --message)'{-m,--message}'[Feedback text; sends without prompting]:text:' \\
+            '--category[Feedback category]:category:(${feedbackCategoryValues})' \\
+            '--email[Email the team can reply to]:email:' \\
+            '--run-id[Audit run the feedback is about]:run-id:' \\
+            '--website-id[Website the feedback is about]:website-id:' \\
+            '--json[Print the result as JSON]'
+          ;;
+        setup)
+          _arguments \\
+            '(-y --yes)'{-y,--yes}'[Accept every default without asking]' \\
+            '--dry-run[Show what setup would do without changing anything]'
           ;;
         init)
           _arguments \\
@@ -553,6 +649,7 @@ complete -c squirrel -f
 complete -c squirrel -s c -l config-file -d "Path to config file" -r
 
 # Top-level commands
+complete -c squirrel -n "__fish_use_subcommand" -a setup -d "Sign in, install the agent skills and pick your defaults"
 complete -c squirrel -n "__fish_use_subcommand" -a audit -d "Run audit on a URL"
 complete -c squirrel -n "__fish_use_subcommand" -a auth -d "Authentication commands"
 complete -c squirrel -n "__fish_use_subcommand" -a crawl -d "Crawl a website (no analysis)"
@@ -564,6 +661,7 @@ complete -c squirrel -n "__fish_use_subcommand" -a report -d "Generate report fr
 complete -c squirrel -n "__fish_use_subcommand" -a feedback -d "Send feedback to the team"
 complete -c squirrel -n "__fish_use_subcommand" -a keys -d "Manage org API keys"
 complete -c squirrel -n "__fish_use_subcommand" -a mcp -d "Run the local MCP server (stdio)"
+complete -c squirrel -n "__fish_use_subcommand" -a channel -d "Run the Claude Code channel (stdio)"
 complete -c squirrel -n "__fish_use_subcommand" -a self -d "Self-management commands"
 complete -c squirrel -n "__fish_use_subcommand" -a skills -d "Manage agent skills"
 
@@ -593,6 +691,10 @@ complete -c squirrel -n "__fish_seen_subcommand_from keys; and __fish_seen_subco
 complete -c squirrel -n "__fish_seen_subcommand_from keys; and __fish_seen_subcommand_from create" -l shell -d "Append the export line to your shell rc file"
 complete -c squirrel -n "__fish_seen_subcommand_from keys; and __fish_seen_subcommand_from create list revoke" -l json -d "Output as JSON"
 
+# Channel options
+complete -c squirrel -n "__fish_seen_subcommand_from channel" -l interval -d "Seconds between polls of the cloud feed"
+complete -c squirrel -n "__fish_seen_subcommand_from channel" -l categories -d "Comma-separated categories to deliver"
+
 # Keys revoke options
 complete -c squirrel -n "__fish_seen_subcommand_from keys; and __fish_seen_subcommand_from revoke" -l force -d "Skip confirmation prompt"
 
@@ -610,11 +712,28 @@ complete -c squirrel -n "__fish_seen_subcommand_from self; and not __fish_seen_s
 complete -c squirrel -n "__fish_seen_subcommand_from completion" -a "bash zsh fish" -d "Shell type"
 
 # Skills subcommands
-complete -c squirrel -n "__fish_seen_subcommand_from skills; and not __fish_seen_subcommand_from install update" -a install -d "Install squirrelscan skills for coding agents"
-complete -c squirrel -n "__fish_seen_subcommand_from skills; and not __fish_seen_subcommand_from install update" -a update -d "Update squirrelscan skills for coding agents"
+complete -c squirrel -n "__fish_seen_subcommand_from skills; and not __fish_seen_subcommand_from install update status uninstall" -a install -d "Install squirrelscan skills for coding agents"
+complete -c squirrel -n "__fish_seen_subcommand_from skills; and not __fish_seen_subcommand_from install update status uninstall" -a update -d "Update the installed squirrelscan skills"
+complete -c squirrel -n "__fish_seen_subcommand_from skills; and not __fish_seen_subcommand_from install update status uninstall" -a status -d "Show installed skill versions and locations"
+complete -c squirrel -n "__fish_seen_subcommand_from skills; and not __fish_seen_subcommand_from install update status uninstall" -a uninstall -d "Remove the skills squirrelscan installed"
+complete -c squirrel -n "__fish_seen_subcommand_from skills; and __fish_seen_subcommand_from install uninstall" -l agent -d "Agent: claude, agents or all" -xa "claude agents all"
+complete -c squirrel -n "__fish_seen_subcommand_from skills; and __fish_seen_subcommand_from install uninstall" -l project -d "This repo's .claude/skills and .agents/skills"
+complete -c squirrel -n "__fish_seen_subcommand_from skills; and __fish_seen_subcommand_from install update" -l dry-run -d "Show what would change, write nothing"
+complete -c squirrel -n "__fish_seen_subcommand_from skills; and __fish_seen_subcommand_from update" -l check -d "Only report; exit 1 when an update is available"
+complete -c squirrel -n "__fish_seen_subcommand_from skills; and __fish_seen_subcommand_from update" -l force -d "Also replace locally edited files (backed up first)"
+complete -c squirrel -n "__fish_seen_subcommand_from skills; and __fish_seen_subcommand_from update status" -l json -d "Output JSON"
+
+# Setup options
+complete -c squirrel -n "__fish_seen_subcommand_from setup" -s y -l yes -d "Accept every default without asking"
+complete -c squirrel -n "__fish_seen_subcommand_from setup" -l dry-run -d "Show what setup would do without changing anything"
 
 # Feedback options
+complete -c squirrel -n "__fish_seen_subcommand_from feedback" -s m -l message -d "Feedback text; sends without prompting" -x
 complete -c squirrel -n "__fish_seen_subcommand_from feedback" -l category -d "Feedback category" -xa "${feedbackCategoryValues}"
+complete -c squirrel -n "__fish_seen_subcommand_from feedback" -l email -d "Email the team can reply to" -x
+complete -c squirrel -n "__fish_seen_subcommand_from feedback" -l run-id -d "Audit run the feedback is about" -x
+complete -c squirrel -n "__fish_seen_subcommand_from feedback" -l website-id -d "Website the feedback is about" -x
+complete -c squirrel -n "__fish_seen_subcommand_from feedback" -l json -d "Print the result as JSON"
 
 # Update options
 complete -c squirrel -n "__fish_seen_subcommand_from update" -l check -d "Only check for updates"
@@ -633,13 +752,14 @@ complete -c squirrel -n "__fish_seen_subcommand_from settings; and __fish_seen_s
 complete -c squirrel -n "__fish_seen_subcommand_from settings; and __fish_seen_subcommand_from show" -l user -d "Show only user settings"
 
 # Settings set options
-complete -c squirrel -n "__fish_seen_subcommand_from settings; and __fish_seen_subcommand_from set" -a "channel auto_update update_check_interval_hours notifications telemetry tips" -d "Setting key"
+complete -c squirrel -n "__fish_seen_subcommand_from settings; and __fish_seen_subcommand_from set" -a "channel auto_update skills_auto_update update_check_interval_hours notifications telemetry tips" -d "Setting key"
 complete -c squirrel -n "__fish_seen_subcommand_from settings; and __fish_seen_subcommand_from set" -l local -d "Set in local project settings"
 complete -c squirrel -n "__fish_seen_subcommand_from settings; and __fish_seen_subcommand_from set" -l user -d "Set in user settings"
 
 # Uninstall options
-complete -c squirrel -n "__fish_seen_subcommand_from uninstall" -l purge -d "Also remove user settings"
-complete -c squirrel -n "__fish_seen_subcommand_from uninstall" -l force -d "Skip confirmation prompt"
+complete -c squirrel -n "__fish_seen_subcommand_from self; and __fish_seen_subcommand_from uninstall" -l purge -d "Also remove settings, credentials, audit data and the cache"
+complete -c squirrel -n "__fish_seen_subcommand_from self; and __fish_seen_subcommand_from uninstall" -l yes -d "Skip the confirmation prompt"
+complete -c squirrel -n "__fish_seen_subcommand_from self; and __fish_seen_subcommand_from uninstall" -l force -d "Same as --yes"
 
 # Install options
 complete -c squirrel -n "__fish_seen_subcommand_from install" -l bin-dir -d "Custom bin directory for symlink"
@@ -658,7 +778,8 @@ complete -c squirrel -n "__fish_seen_subcommand_from audit" -s m -l max-pages -d
 complete -c squirrel -n "__fish_seen_subcommand_from audit" -l max-depth -d "Maximum crawl depth from the seed"
 complete -c squirrel -n "__fish_seen_subcommand_from audit" -l concurrency -d "Global crawl worker pool size"
 complete -c squirrel -n "__fish_seen_subcommand_from audit" -l per-host -d "Max concurrent requests per host"
-complete -c squirrel -n "__fish_seen_subcommand_from audit" -s C -l coverage -a "quick surface full" -d "Coverage mode"
+complete -c squirrel -n "__fish_seen_subcommand_from audit" -l level -a "${levelValues}" -d "Audit level"
+complete -c squirrel -n "__fish_seen_subcommand_from audit" -s C -l coverage -a "${levelValues}" -d "Audit level (old name for --level)"
 complete -c squirrel -n "__fish_seen_subcommand_from audit" -s f -l format -a "${formatValues}" -d "Output format"
 complete -c squirrel -n "__fish_seen_subcommand_from audit" -s o -l output -d "Output file path"
 complete -c squirrel -n "__fish_seen_subcommand_from audit" -s r -l refresh -d "Ignore cache, fetch all pages fresh"
@@ -677,11 +798,21 @@ complete -c squirrel -n "__fish_seen_subcommand_from audit" -s y -l yes -d "Skip
 complete -c squirrel -n "__fish_seen_subcommand_from audit" -l render -d "Force cloud browser rendering for this run"
 complete -c squirrel -n "__fish_seen_subcommand_from audit" -l render-mode -a "off auto all" -d "Render strategy"
 complete -c squirrel -n "__fish_seen_subcommand_from audit" -l http -d "Force plain HTTP fetch for this run"
-complete -c squirrel -n "__fish_seen_subcommand_from audit" -l offline -d "Run fully offline: no cloud, publishing, or telemetry"
+complete -c squirrel -n "__fish_seen_subcommand_from audit" -l offline -d "Run fully offline: no cloud, publishing, telemetry, or checks of other sites"
+complete -c squirrel -n "__fish_seen_subcommand_from audit" -l external-links -d "Check links to other sites this run, at any level"
+complete -c squirrel -n "__fish_seen_subcommand_from audit" -l no-external-links -d "Do not check links to other sites this run"
+complete -c squirrel -n "__fish_seen_subcommand_from audit" -l no-internal-links -d "Do not status-check unfetched internal link targets"
+complete -c squirrel -n "__fish_seen_subcommand_from audit" -l no-classifier -d "Do not run the page classifier (markup-only link sections)"
 complete -c squirrel -n "__fish_seen_subcommand_from audit" -l fail-on -d "Exit 2 when a threshold trips (e.g. score<90, severity>=error)"
 complete -c squirrel -n "__fish_seen_subcommand_from audit" -s H -l header -d "Custom HTTP header on every crawl request, format \\"Name: Value\\" (repeatable)"
 complete -c squirrel -n "__fish_seen_subcommand_from audit" -l rule-include -d "Only run these rule categories or rules"
 complete -c squirrel -n "__fish_seen_subcommand_from audit" -l rule-exclude -d "Skip these rule categories or rules"
+complete -c squirrel -n "__fish_seen_subcommand_from audit" -l disable-discovery-probes -d "Skip the pre-crawl discovery probes (llms.txt, well-known files, swagger.json)"
+complete -c squirrel -n "__fish_seen_subcommand_from audit" -s P -l probe -a "passive active aggressive" -d "Probing intensity"
+complete -c squirrel -n "__fish_seen_subcommand_from audit" -l passive -d "Probing intensity passive: no requests beyond the crawl"
+complete -c squirrel -n "__fish_seen_subcommand_from audit" -l aggressive -d "Probing intensity aggressive: loud probes, can trip a WAF"
+complete -c squirrel -n "__fish_seen_subcommand_from audit" -l probe-budget -d "Wall-clock cap for all probing (e.g. 30s)"
+complete -c squirrel -n "__fish_seen_subcommand_from audit" -l pentest -d "Shorthand for --level full --probe aggressive"
 complete -c squirrel -n "__fish_seen_subcommand_from audit" -l summary -d "Print score, category breakdown, and issue counts only"
 
 # Entities options
@@ -703,7 +834,8 @@ complete -c squirrel -n "__fish_seen_subcommand_from credits" -l upgrade -d "Ope
 complete -c squirrel -n "__fish_seen_subcommand_from crawl" -s m -l max-pages -d "Maximum pages to crawl"
 complete -c squirrel -n "__fish_seen_subcommand_from crawl" -l concurrency -d "Global crawl worker pool size"
 complete -c squirrel -n "__fish_seen_subcommand_from crawl" -l per-host -d "Max concurrent requests per host"
-complete -c squirrel -n "__fish_seen_subcommand_from crawl" -s C -l coverage -a "quick surface full" -d "Coverage mode"
+complete -c squirrel -n "__fish_seen_subcommand_from crawl" -l level -a "${levelValues}" -d "Audit level"
+complete -c squirrel -n "__fish_seen_subcommand_from crawl" -s C -l coverage -a "${levelValues}" -d "Audit level (old name for --level)"
 complete -c squirrel -n "__fish_seen_subcommand_from crawl" -s r -l refresh -d "Ignore cache, fetch all pages fresh"
 complete -c squirrel -n "__fish_seen_subcommand_from crawl" -l fresh-ua -d "Re-roll the pinned random user-agent"
 complete -c squirrel -n "__fish_seen_subcommand_from crawl" -l resume -d "Resume interrupted crawl"

@@ -11,7 +11,7 @@ Two other shapes appear alongside it. The replacement character, U+FFFD, is what
 
 ## What squirrel checks
 
-The rule runs on every crawled page over the prose in `<body>`, excluding `<script>`, `<style>`, `<noscript>` and the code-like elements `<code>`, `<pre>`, `<samp>` and `<kbd>`. Attributes and raw HTML are not read, since a reader never sees them. It emits a single check named `encoding-corruption`:
+The rule runs on every crawled page over the rendered prose in `<body>`, the same text [content/placeholder-text](/rules/content/placeholder-text) reads. It leaves out `<script>`, `<style>`, `<noscript>`, the code-like elements `<code>`, `<pre>`, `<samp>` and `<kbd>`, `<template>` content the browser never renders, and the containers of in-page code editors and syntax highlighters (classes `hljs`, `shiki`, `prism`, `torchlight`, `codeblock`, `code-block`, `cm-editor`, `monaco-editor`, and any class starting `language-`, `cm-` or `monaco-`). Every block boundary, such as one table cell to the next, counts as a line break, so adjacent blocks do not fuse into one sequence. Attributes and raw HTML are not read, since a reader never sees them. It emits a single check named `encoding-corruption`:
 
 - Skipped when there is no parsed document. Message: `No document available`.
 - Skipped when there is no `<body>`. Message: `No body element to read visible text from`.
@@ -61,8 +61,9 @@ disable = ["content/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["content/mojibake"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
@@ -80,7 +81,7 @@ Content findings ship in every audit next to the SEO, performance and agent expe
 
 ## Check your site
 
-Run `squirrel audit https://example.com` and open the Content section of the report. Each page is listed with the corruption families found, a sample and a count. Local audits are free.
+Run `squirrel audit https://example.com` and open the Content section of the report. Each page is listed with the corruption families found, a sample and a count. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">

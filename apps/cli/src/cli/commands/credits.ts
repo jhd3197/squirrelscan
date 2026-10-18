@@ -1,11 +1,18 @@
 // squirrelscan credits - cloud credit balance + pricing
 
+import { ENRICHMENT } from "@squirrelscan/core-contracts/limits";
 import { defineCommand } from "citty";
 
 import { fmt } from "@/cli/format";
 import { isUnlimitedBalance } from "@/lib/balance";
 import { openBrowser } from "@/lib/browser";
-import { AUDIT_BASE_CREDITS, offerPitchLines, upgradeUrl } from "@/lib/upgrade";
+import {
+  AUDIT_BASE_CREDITS,
+  AUDIT_PAGE_CREDITS,
+  MIN_AUDIT_CREDITS,
+  offerPitchLines,
+  upgradeUrl,
+} from "@/lib/upgrade";
 import { warnIfSessionUnreadable } from "@/self/credentials";
 import { safeExit } from "@/self/updater";
 
@@ -94,38 +101,60 @@ export const credits = defineCommand({
             `         monthly credits reset ${balance.periodEnd.slice(0, 10)}`
           );
         }
-        // A balance under the flat base can buy NOTHING, however positive it
-        // reads. Say so here rather than letting the next `squirrel audit`
-        // silently drop to local-only.
-        if (balance.total < AUDIT_BASE_CREDITS) {
+        // A balance under the smallest audit (base + one page) can buy
+        // NOTHING, however positive it reads. Say so here rather than letting
+        // the next `squirrel audit` silently drop to local-only.
+        if (balance.total < MIN_AUDIT_CREDITS) {
           console.log(
-            `         ${fmt.yellow(`below the ${AUDIT_BASE_CREDITS}-credit audit base — cloud audits can't start`)}`
+            `         ${fmt.yellow(`below the ${MIN_AUDIT_CREDITS} credits a one-page audit needs (${AUDIT_BASE_CREDITS} base + ${AUDIT_PAGE_CREDITS} per page) — cloud audits can't start`)}`
           );
         }
       }
       console.log("");
       console.log("Pricing:");
-      // Pricing v10: flat headline (base + per rendered page); cost-0 features
-      // are included in the base, so only itemize what still charges.
+      // Pricing v12 (#2290, #2291, #801): flat headline (base + per audited
+      // page, plus external links the cloud checks for an audit); cost-0 features are
+      // included in the base, so only itemize what still charges. Read off
+      // the SERVER's price list, so an older server (v10: per rendered page)
+      // still prints its own terms.
       const priced = pricing as Record<
         string,
         { cost: number; per: number; unit: string } | undefined
       >;
       const auditBase = priced.audit_base?.cost;
       if (auditBase != null) {
+        const perPage = priced.audit_page?.cost;
         console.log(
-          `  audit                ${String(auditBase).padStart(3)} base + ${priced.render?.cost ?? 2} per rendered page`
+          perPage != null
+            ? `  audit                ${String(auditBase).padStart(3)} base + ${perPage} per audited page`
+            : `  audit                ${String(auditBase).padStart(3)} base + ${priced.render?.cost ?? 2} per rendered page`
         );
         console.log(
           "                           (analysis, tech detection, publishing included)"
         );
+        const perLink = priced.external_link?.cost;
+        if (perLink != null) {
+          console.log(
+            `  external links       ${String(perLink).padStart(3)} per link the cloud verifies for an audit, at most 1 per page`
+          );
+          // #801: a signed-in CLI audit's cloud link checks pay too; what the
+          // CLI checks from the user's machine, and internal links, do not.
+          console.log(
+            "                           (internal links, and links checked from your machine, are free)"
+          );
+        }
       }
       const entries = Object.entries(pricing)
         .filter(
           ([feature, price]) =>
             price.cost > 0 &&
+            // #861: AI issue enrichment keeps its price in the shared table,
+            // but while the cloud has it switched off it is not for sale.
+            (feature !== "issue_enrich" || ENRICHMENT.enabled) &&
             (auditBase == null ||
               (feature !== "audit_base" &&
+                feature !== "audit_page" &&
+                feature !== "external_link" &&
                 feature !== "render" &&
                 feature !== "render_cached"))
         )

@@ -10,15 +10,35 @@ export {
   extractTwitter,
   extractLinks as extractLinksBasic,
   extractContactLinks,
+  MAX_CONTACT_LINKS,
   extractImages,
   extractSchema,
   extractHeadings,
   extractContent,
+  extractHreflangAlternates,
+  HREFLANG_ALTERNATES_MAX,
   type ParsedPage,
   type ParsedPageCache,
 } from "./html";
 
 export { detectPageType, type PageType } from "./page-type";
+
+export { isHiddenFromMarkup } from "./hidden-markup";
+
+export {
+  runClassifier,
+  type PageClassifierHook,
+  type PageClassifierOutput,
+  type ParsePageOptions,
+} from "./classifier-hook";
+export {
+  makeLinkSectionResolver,
+  mergeLinkSection,
+  type LinkPlacement,
+  type LinkPlacer,
+  type PlacedLabel,
+  type ResolvedLinkSection,
+} from "./extractors/link-section";
 
 export {
   detectSoft404,
@@ -39,6 +59,7 @@ export {
 
 export {
   parseSchemas,
+  validateSchemas,
   extractAuthorFromSchema,
   EMPTY_SCHEMA_COLLECTION,
   schemaCollectionFromJSON,

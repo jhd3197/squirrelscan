@@ -4,6 +4,9 @@
 import type { Effect } from "effect";
 
 import type { AuditFailureDetail } from "./failure-reason";
+import type { ClassifiedPageType, LinkSection, LinkSectionCounts } from "./index";
+import type { RefusedFetch } from "./refused-fetch";
+import type { UnverifiedReason } from "./services";
 
 // ============================================
 // SHARED DOMAIN TYPES (used by storage + report)
@@ -111,6 +114,28 @@ export class StorageError extends Error {
   }
 }
 
+// SQLite failures that no retry fixes: the file is read-only for this process,
+// cannot be opened, is not a database, or the disk is full. A crawl that hits
+// one on a page hits it on every page, so it must end the run rather than be
+// counted as one failed page (#403). "database is locked" is deliberately not
+// here: another process can release it.
+const PERMANENT_STORAGE_FAILURE =
+  /readonly database|unable to open database|file is not a database|database disk image is malformed|database or disk is full|disk I\/O error/i;
+
+/**
+ * True when `error` is a {@link StorageError} caused by one of the failures
+ * above. Read off the message, which every StorageError starts the same way,
+ * so it also recognizes one that `Effect.runPromise` rethrew wrapped in a
+ * FiberFailure (same message, no `_tag`).
+ */
+export function isPermanentStorageError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.message.startsWith("Storage error during ") &&
+    PERMANENT_STORAGE_FAILURE.test(error.message)
+  );
+}
+
 // ============================================
 // CRAWL METADATA
 // ============================================
@@ -177,6 +202,15 @@ export interface CrawlStats {
    */
   pagesRateLimited?: number;
   /**
+   * Fetches whose response arrived but whose body could not be decoded: the
+   * server declared a `content-encoding` its bytes do not honour. A subset of
+   * `pagesFailed`, disjoint from `pagesBlocked` and `pagesRateLimited`. The page
+   * is missing from the analysis, so a report that scored what it did fetch is
+   * `partial`, not `completed`, and says how many pages it lost. Optional for
+   * backward compatibility with older persisted stats blobs.
+   */
+  pagesUndecodable?: number;
+  /**
    * Why the crawl's ENTRY url could not be audited, when it could not (#1822).
    * The crawler records the first failure it sees, preferring the seed over a
    * sitemap/discovered URL, across all three shapes a root failure takes: a
@@ -206,6 +240,56 @@ export interface CrawlStats {
    * persisted stats blobs; absent reads as "the walk completed".
    */
   sitemapDiscoveryTruncated?: boolean;
+  /**
+   * The crawl did not follow links: it fetched the seed and the sitemap URLs
+   * only (Quick level, sitemap scope), so internal link targets outside them
+   * were never fetched and their status is unknown (repo#2729). Not set when
+   * link discovery was on, or was re-enabled because the sitemaps yielded
+   * nothing to crawl. Optional for backward compatibility; absent reads as
+   * "links were followed".
+   */
+  linkDiscoveryOff?: boolean;
+  /**
+   * External link checking this run (repo#2729): distinct external links the
+   * pages carry, how many were checked, and the per-audit limit that capped it.
+   * Set by the external-link phase when it ran; absent when it did not.
+   * `notRequested` counts the links never requested because they look like an
+   * action or carry a token (repo#2759), included in `found` but not
+   * `checked`; `notRequestedLinks` is a sample of them, most-linked first,
+   * each URL with its token-like values masked, `pageCount` the pages linking it.
+   */
+  externalLinkCheck?: {
+    found: number;
+    /**
+     * The links selected to check under the limit. Includes any the time budget
+     * then ran out on (`outOfTime`), so `found - checked` stays the over-limit
+     * count the rules report.
+     */
+    checked: number;
+    cap: number;
+    notRequested?: number;
+    notRequestedLinks?: Array<{ href: string; sourcePages: string[]; pageCount?: number }>;
+    /** pub#770: links never requested because the egress policy refuses their address. */
+    refused?: number;
+    /** Of those, the ones refused on the URL alone, before any were selected under the limit. */
+    refusedByUrl?: number;
+    refusedLinks?: Array<{ href: string; sourcePages: string[]; pageCount?: number }>;
+    /**
+     * repo#2613: of the `checked` links, the ones the check's time budget ran
+     * out on before they were answered. Never requested or never waited on,
+     * so not checked; absent when the check finished.
+     */
+    outOfTime?: number;
+  };
+  /**
+   * Root fetches (robots.txt, sitemaps, llms.txt, the Markdown probe) the site
+   * REFUSED with a 401/403/429 or a bot-challenge 503, capped at
+   * `MAX_REFUSED_FETCHES`. A refusal is a coverage failure, not an observation
+   * that the file is absent, so the rules read this to say "refused" instead of
+   * "not found". Optional for backward compatibility with older persisted
+   * stats blobs; absent reads as "nothing was refused".
+   */
+  refusedFetches?: RefusedFetch[];
   /**
    * Per-reason cache-hit counts across pages AND sub-resources (#107/#108).
    * Drives the hits-by-reason breakdown. Optional for backward compatibility.
@@ -294,7 +378,14 @@ export interface CrawlerConfigSnapshot {
 // ============================================
 
 export interface ResponseHeaders {
+  /** The media type of the Content-Type header only, lowercased (`text/html`). */
   contentType: string | null;
+  /**
+   * The `charset` parameter of the Content-Type header, as sent with quotes
+   * dropped (pub#674), so core/charset can read a header-only declaration.
+   * Optional for records that predate it; absent reads as "no charset".
+   */
+  contentTypeCharset?: string | null;
   contentEncoding: string | null;
   cacheControl: string | null;
   /**
@@ -316,6 +407,14 @@ export interface ResponseHeaders {
   altSvc: string | null;
   acceptRanges: string | null;
   /**
+   * Version-revealing headers (security/version-disclosure, #713). Optional for
+   * records that predate the rule; absent reads as "not sent".
+   */
+  xPoweredBy?: string | null;
+  xAspNetVersion?: string | null;
+  xAspNetMvcVersion?: string | null;
+  xGenerator?: string | null;
+  /**
    * Raw Set-Cookie header value(s), "\n"-joined when a page sets more than
    * one (via `Headers.getSetCookie()` — comma-joining is ambiguous with
    * commas embedded in a cookie's own Expires attribute).
@@ -324,6 +423,15 @@ export interface ResponseHeaders {
    * rule (#748).
    */
   setCookie?: string | null;
+  /**
+   * The response headers technology detection reads (`TECH_DETECT_HEADER_NAMES`
+   * in @squirrelscan/utils), by lower-cased name, each value cut to
+   * `TECH_DETECT_HEADER_MAX_CHARS` (pub#871). A header detection only tests for
+   * presence (`TECH_DETECT_PRESENCE_HEADERS`) holds "1", and `set-cookie` holds
+   * the cookie names (`name=`, one per line), never their values. Optional for
+   * records that predate it; absent reads as "none sent".
+   */
+  techHeaders?: Record<string, string> | null;
 }
 
 export interface PageRecord {
@@ -427,6 +535,8 @@ export interface LinkRecord {
   checkedAt?: number;
   wafBlocked?: boolean;
   wafProvider?: string;
+  /** Why a `wafBlocked` link is unverifiable (pub#821), when the checker said. */
+  unverifiedReason?: UnverifiedReason;
   /**
    * The target answered with rate limiting (429/430, or 503 + `Retry-After`),
    * so its real status is unknown (#1829). Persisted rather than re-derived
@@ -502,6 +612,14 @@ export interface ResourceSizeRecord {
    * full transfer this run; null/absent on a real (miss) fetch. (#107)
    */
   cacheReason?: CacheHitReason | null;
+  /**
+   * Natural pixel size and animation from the image's header (#470), carried
+   * on a cache hit like the rest of the record. Null when unknown, and on
+   * every CSS row and every row written before migration 32.
+   */
+  naturalWidth?: number | null;
+  naturalHeight?: number | null;
+  animated?: boolean | null;
 }
 
 export interface SitemapUrlStatusRecord {
@@ -634,6 +752,74 @@ export interface SitePageRecord {
 // written, v1 behaviour is byte-identical.
 
 /**
+ * What one page contributes to the report's page structure block (#2307): its links counted per
+ * section and the page classifier's answer. Absent from a page's scalars when the page has
+ * neither a link section nor a classification (a parse stored before the classifier existed).
+ */
+export interface PageStructureScalars {
+  /**
+   * Links per section, every anchor counted. Links with no section at all (an old parse) are
+   * left out, so `unknown` means "the page says nothing about where this sits".
+   */
+  sections: Partial<Record<LinkSection, number>>;
+  /** Internal links in the header, footer, navigation or sidebar. */
+  chromeInternal: number;
+  /** Internal links in the page content. */
+  contentInternal: number;
+  /** The classifier's page type answer; null when the page was not classified. */
+  pageType: ClassifiedPageType | null;
+  /** The classifier fell back to the markup rules for part of this page. */
+  degraded: boolean;
+}
+
+/**
+ * The per-page scalars the REPORT needs and no rule reads (#2343).
+ *
+ * `reconstructReport` used to recover these by re-parsing every stored page —
+ * a second full DOM build per page, for ~200 bytes of output each. They are
+ * captured instead by the one pass that already has the DOM live (the streamed
+ * page-rule loop) and stored alongside the rest of the page's features.
+ *
+ * Everything the report needs that is ALREADY a feature column (title,
+ * description, canonical, schemaTypes) stays there; this carries only what had
+ * no other home. `ogImage` is the one exception: the column of that name is the
+ * site-chrome signal, resolved to an absolute URL and cut at 200 characters,
+ * and the report shows the page's own value. Bounded by construction: short
+ * strings, a count and a flag, never a slice of the page body.
+ */
+export interface PageReportScalars {
+  /** Raw `<meta name="robots">` content. */
+  metaRobots: string | null;
+  ogTitle: string | null;
+  ogDescription: string | null;
+  ogUrl: string | null;
+  ogType: string | null;
+  ogSiteName: string | null;
+  /** Raw `og:image`, as the report shows it (not the normalized feature column). */
+  ogImage: string | null;
+  /** Raw `<meta name="twitter:card">` content. */
+  twitterCard: string | null;
+  /** `parsed.h1.count` — drives the report's multiple-H1 summary. */
+  h1Count: number;
+  /** `parsed.content.isThinContent` — stored, not re-derived from wordCount,
+   *  because the parser has two code paths that set it. */
+  thinContent: boolean;
+  /**
+   * Link sections and page type for the report's page structure block (#2307). Optional: absent
+   * on a row stored before it existed, and on a page with no section or classification data.
+   */
+  structure?: PageStructureScalars;
+}
+
+/** One `<link rel="alternate" hreflang>` annotation, as the parser extracts it. */
+export interface HreflangAlternate {
+  /** The hreflang value, lowercased (`en-gb`, `de`, `x-default`). */
+  hreflang: string;
+  /** Absolute URL, resolved against the page URL. */
+  href: string;
+}
+
+/**
  * One accumulated page-features row (keyed by crawlId + normalizedUrl in the
  * table; `crawlId` is a method parameter, mirroring {@link PageRecord}). Hashes
  * are the same content hashes the crawler already computes, so duplicate scans
@@ -728,6 +914,20 @@ export interface PageFeatureRow {
   themeColor: string | null;
   /** Absolute URL of the page's `og:image` (the default/fallback one), or null. */
   ogImage: string | null;
+  /**
+   * The page's hreflang alternates (#489), as `parsePage` extracted them
+   * (bounded there). The duplicate title and description rules read these to
+   * leave reciprocal same-language region variants out of their groups. Null
+   * when the page declares none, and on a row or replayed payload written before
+   * the field existed, which exempts nothing: the rules then behave as before.
+   */
+  hreflangAlternates: HreflangAlternate[] | null;
+  /**
+   * Report-only per-page scalars (#2343). Null on a row written before schema
+   * v30, which is what makes the report's fallback parse reachable rather than
+   * dead code.
+   */
+  reportScalars: PageReportScalars | null;
 }
 
 /** Which hashed field a {@link SiteQuery.duplicateGroups} scan is keyed on. */
@@ -788,6 +988,13 @@ export interface SiteQuery {
    * the case `links/orphan-pages` and `links/weak-internal-links` cannot see.
    */
   contextualIncomingLinkCounts(): Map<string, number>;
+  /**
+   * Where the counted inbound links to each page sit, by link section (#2307). Same keys and the
+   * same links as {@link incomingLinkCounts}; links with no section (a crawl stored before link
+   * sections existed) are not counted, so a page can have fewer here than there. Optional: an
+   * implementation without section data omits it, and the rules then say nothing about placement.
+   */
+  inboundSectionCounts?(): Map<string, LinkSectionCounts>;
   /** Normalized URLs of pages classified as `type`. */
   pagesByType(type: string): string[];
   /** URL sets sharing one template fingerprint (count > 1). */
@@ -872,6 +1079,60 @@ export interface MarkdownProbeRecord {
 // ============================================
 // AGENT EXPERIENCE (AX) PREFETCHES
 // ============================================
+
+// Fixed well-known/agent-file probe list, one request per path before the first
+// page. Rules decide what each hit/miss means and declare the paths they read.
+export const WELL_KNOWN_PATHS = [
+  "/.well-known/mcp/server-card.json",
+  "/.well-known/mcp.json",
+  "/.well-known/mcp",
+  "/.well-known/mcp-server",
+  "/.well-known/agent-card.json",
+  "/.well-known/agent-skills/index.json",
+  "/.well-known/api-catalog",
+  "/openapi.json",
+  "/swagger.json",
+  "/api/openapi.json",
+  "/.well-known/oauth-authorization-server",
+  "/.well-known/oauth-protected-resource",
+  "/AGENTS.md",
+  "/agents.md",
+  "/.well-known/agents.md",
+  "/docs/AGENTS.md",
+  "/ai-plugin.json",
+  "/.well-known/ai-plugin.json",
+  "/.well-known/llms.txt",
+  "/docs/llms.txt",
+  "/.well-known/security.txt",
+  "/security.txt",
+] as const;
+
+export type WellKnownPath = (typeof WELL_KNOWN_PATHS)[number];
+
+/**
+ * One pre-crawl discovery probe (#409): the requests the crawler sends to the
+ * site root before the first page, beyond robots.txt, sitemaps and the seed.
+ *
+ * - `llms-txt`: /llms.txt and /llms-full.txt
+ * - `markdown`: / with `Accept: text/markdown`, and /index.md
+ * - `agent-access`: / as a browser, GPTBot and Claude-User
+ * - a {@link WellKnownPath}: that one path of the well-known sweep
+ * - `rsl`: robots.txt re-read for `License:`, plus the documents it names
+ *
+ * Rules declare the probes they read (`RuleMeta.discoveryProbes`), and a probe
+ * no enabled rule reads is never sent. A probe that was not sent, or got no
+ * answer, is reported "not checked" by its readers, never as a missing file.
+ */
+export type DiscoveryProbe = "llms-txt" | "markdown" | "agent-access" | "rsl" | WellKnownPath;
+
+/** Every discovery probe, in the order the crawl preamble sends them. */
+export const DISCOVERY_PROBES: readonly DiscoveryProbe[] = [
+  "llms-txt",
+  "markdown",
+  "agent-access",
+  ...WELL_KNOWN_PATHS,
+  "rsl",
+];
 
 // One probed well-known/agent-file path. Rules decide meaning; the crawler only
 // records validation hints so SPA-fallback 200s (HTML for every path) are rejectable.

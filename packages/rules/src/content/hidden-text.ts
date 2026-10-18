@@ -11,6 +11,9 @@ import { z } from "zod";
 
 import type { Document, Element } from "linkedom";
 
+import { SCAN_TRUNCATED_SKIP_REASON } from "@squirrelscan/core-contracts/resolution";
+
+import { skipComment, skipString, stepBlocks, stripComments } from "../shared/css-tokens";
 import type { CheckResult, Rule, RuleContext, RuleResult } from "../types";
 import { getTextExcludingScripts } from "./text-content";
 
@@ -238,6 +241,11 @@ interface StyleIndex {
   ambiguousClasses: Set<string>;
   ambiguousIds: Set<string>;
   /**
+   * The stylesheet text or rule budget ran out, so rules past it were never
+   * read and an element they hide is not in the findings (pub#474).
+   */
+  truncated: boolean;
+  /**
    * Class tokens and ids named anywhere in a block that declares a transition or
    * animation. The fade-in idiom puts the resting `opacity:0` on the element's
    * own class and the transition on a compound selector (`.card.is-visible`), so
@@ -375,48 +383,28 @@ function isZeroLength(raw: string): boolean {
 }
 
 /**
- * Index just past a quoted string that starts at `start`. Used by every scanner
- * below so that punctuation inside a quoted value or a `data:` URL cannot be
- * mistaken for structure.
- */
-function skipString(css: string, start: number): number {
-  const quote = css[start];
-  let i = start + 1;
-  while (i < css.length) {
-    if (css[i] === "\\") {
-      i += 2;
-      continue;
-    }
-    if (css[i] === quote) return i + 1;
-    i++;
-  }
-  return css.length;
-}
-
-/** Index just past a CSS comment starting at `start`, or end of input. */
-function skipComment(css: string, start: number): number {
-  const end = css.indexOf("*/", start + 2);
-  return end === -1 ? css.length : end + 2;
-}
-
-/**
  * Parses a declaration block (`color:red;display:none`) into a property map.
  * Splits on the structural `;` and `:` only: `background:url("data:…;base64,…")`
  * carries both inside a quoted string and a `url()`, and naive splitting there
- * manufactures declarations that were never written.
+ * manufactures declarations that were never written. A `;` inside a `(`, `[` or
+ * `{` block or an unquoted `url(…)`, or written as `\;`, is part of a value, as
+ * in a browser (pub#679). Comments become spaces, so they cannot become part of
+ * a property name or join otherwise separate value tokens (pub#896).
  */
 export function parseDeclarations(css: string): Declarations {
   const decls: Declarations = new Map();
   let i = 0;
-  let chunkStart = 0;
-  let depth = 0;
+  let start = 0;
+  let chunk: string[] = [];
+  const closers: string[] = [];
 
-  const flush = (end: number): void => {
-    const chunk = css.slice(chunkStart, end);
+  const flush = (): void => {
+    const declaration = chunk.join("");
+    chunk = [];
     let colon = -1;
     let d = 0;
-    for (let k = 0; k < chunk.length; k++) {
-      const c = chunk[k];
+    for (let k = 0; k < declaration.length; k++) {
+      const c = declaration[k];
       if (c === "(") d++;
       else if (c === ")") d--;
       else if (c === ":" && d === 0) {
@@ -425,9 +413,9 @@ export function parseDeclarations(css: string): Declarations {
       }
     }
     if (colon === -1) return;
-    const prop = chunk.slice(0, colon).trim().toLowerCase();
+    const prop = declaration.slice(0, colon).trim().toLowerCase();
     if (!prop) return;
-    const value = chunk
+    const value = declaration
       .slice(colon + 1)
       .replace(/!\s*important/gi, "")
       .trim()
@@ -438,28 +426,37 @@ export function parseDeclarations(css: string): Declarations {
 
   while (i < css.length) {
     const ch = css[i];
+    // An escaped character (`\;`, `\(`, `\"`) is part of a name, never structure.
+    if (ch === "\\") {
+      i += 2;
+      continue;
+    }
     if (ch === '"' || ch === "'") {
       i = skipString(css, i);
       continue;
     }
     if (ch === "/" && css[i + 1] === "*") {
+      chunk.push(css.slice(start, i), " ");
       i = skipComment(css, i);
+      start = i;
       continue;
     }
-    if (ch === "(") depth++;
-    else if (ch === ")") depth--;
-    else if (ch === ";" && depth === 0) {
-      flush(i);
-      chunkStart = i + 1;
+    if (ch === ";" && closers.length === 0) {
+      chunk.push(css.slice(start, i));
+      flush();
+      i++;
+      start = i;
+      continue;
     }
-    i++;
+    i = stepBlocks(css, i, closers);
   }
-  flush(css.length);
+  chunk.push(css.slice(start));
+  flush();
   return decls;
 }
 
 /** One style rule lifted out of a sheet, with whether an at-rule encloses it. */
-interface RawRule {
+export interface RawRule {
   selector: string;
   body: string;
   /**
@@ -478,22 +475,36 @@ interface RawRule {
  * quadratically, and a page carrying 200KB of brace-less or unterminated-comment
  * CSS took 26 seconds to index — a crawler-wide stall on attacker-supplied
  * input. This scanner is O(n) and allocates only the rules it yields.
+ *
+ * Escapes, unquoted `url(…)` tokens and `(`/`[` blocks are read the way a
+ * browser tokenizes them, so a `{`, `}` or `;` inside one is not structure:
+ * `.a{background:url(}.b{display:none}.c{)}` declares no `.b` rule (pub#679).
  */
-function parseRules(css: string, maxRules: number): RawRule[] {
+export function parseRules(css: string, maxRules: number): RawRule[] {
   const rules: RawRule[] = [];
   let i = 0;
   let preludeStart = 0;
   let atDepth = 0;
+  // Blocks open in the current prelude (`:not(…`, `[…`).
+  const closers: string[] = [];
 
   while (i < css.length && rules.length < maxRules) {
     const ch = css[i];
 
+    if (ch === "\\") {
+      i += 2;
+      continue;
+    }
     if (ch === "/" && css[i + 1] === "*") {
       i = skipComment(css, i);
       continue;
     }
     if (ch === '"' || ch === "'") {
       i = skipString(css, i);
+      continue;
+    }
+    if (closers.length > 0 || ch === "(" || ch === "[" || ch === "u" || ch === "U") {
+      i = stepBlocks(css, i, closers);
       continue;
     }
     // A statement at-rule (`@import url(…);`) or a stray semicolon: whatever
@@ -514,7 +525,9 @@ function parseRules(css: string, maxRules: number): RawRule[] {
       continue;
     }
 
-    const prelude = css.slice(preludeStart, i).trim();
+    // pub#684: comments are dropped, as a browser does, so a section comment
+    // before a rule (or inside its selector) does not make it look complex.
+    const prelude = stripComments(css.slice(preludeStart, i)).trim();
     // `@media`, `@supports`, `@layer`, `@keyframes`: descend, marking everything
     // inside as conditional rather than skipping past it.
     if (prelude.startsWith("@")) {
@@ -524,13 +537,18 @@ function parseRules(css: string, maxRules: number): RawRule[] {
       continue;
     }
 
-    // A style rule. Consume its whole block, including any nested braces, so a
-    // malformed sheet cannot desynchronise the scan.
+    // A style rule. Consume its whole block, including any nested blocks, so a
+    // malformed sheet cannot desynchronise the scan. The body ends only at the
+    // `}` that matches its `{`, read through blocks and url() tokens.
     const bodyStart = i + 1;
-    let depth = 1;
+    const bodyClosers = ["}"];
     let j = bodyStart;
-    while (j < css.length && depth > 0) {
+    while (j < css.length && bodyClosers.length > 0) {
       const c = css[j];
+      if (c === "\\") {
+        j += 2;
+        continue;
+      }
       if (c === "/" && css[j + 1] === "*") {
         j = skipComment(css, j);
         continue;
@@ -539,13 +557,11 @@ function parseRules(css: string, maxRules: number): RawRule[] {
         j = skipString(css, j);
         continue;
       }
-      if (c === "{") depth++;
-      else if (c === "}") depth--;
-      j++;
+      j = stepBlocks(css, j, bodyClosers);
     }
     rules.push({
       selector: prelude,
-      body: css.slice(bodyStart, depth === 0 ? j - 1 : css.length),
+      body: css.slice(bodyStart, bodyClosers.length === 0 ? j - 1 : css.length),
       conditional: atDepth > 0,
     });
     i = j;
@@ -594,6 +610,7 @@ export function buildStyleIndex(styleTexts: string[]): StyleIndex {
     ambiguousIds: new Set(),
     animatedClasses: new Set(),
     animatedIds: new Set(),
+    truncated: false,
   };
 
   let budget = MAX_STYLE_CHARS;
@@ -639,6 +656,8 @@ export function buildStyleIndex(styleTexts: string[]): StyleIndex {
     }
   }
 
+  // Conservative at the boundary: a budget spent exactly to zero reads as cut.
+  index.truncated = budget <= 0 || ruleBudget <= 0;
   return index;
 }
 
@@ -1141,6 +1160,10 @@ export const hiddenTextRule: Rule = {
 
     const findings: HiddenFinding[] = [];
     let visited = 0;
+    // Set when the walk stops at MAX_ELEMENTS, or the style index stopped at its
+    // budget: what lies past either was never inspected, so the findings are a
+    // prefix of the page's, not the whole list (pub#474).
+    let scanTruncated = index.truncated;
     // Depth-first over elements, outermost first: once a subtree is hidden (or
     // allowlisted) nothing inside it is inspected, so one hidden block yields
     // one finding instead of one per descendant.
@@ -1150,7 +1173,10 @@ export const hiddenTextRule: Rule = {
 
     while (stack.length > 0) {
       const el = stack.pop() as Element;
-      if (visited++ > MAX_ELEMENTS) break;
+      if (visited++ > MAX_ELEMENTS) {
+        scanTruncated = true;
+        break;
+      }
       const tag = tagOf(el);
       if (SKIPPED_TAGS.has(tag)) continue;
 
@@ -1254,11 +1280,24 @@ export const hiddenTextRule: Rule = {
     }
 
     if (findings.length === 0) {
-      checks.push({
-        name: "hidden-text",
-        status: "pass",
-        message: "No hidden text or links detected",
-      });
+      // Nothing in the part scanned is not "nothing on the page" once a budget cut
+      // the scan short: a pass would resolve a prior finding that sits past the
+      // cap and is still there (pub#501).
+      checks.push(
+        scanTruncated
+          ? {
+              name: "hidden-text",
+              status: "skipped",
+              message: "Page too large to scan in full; no hidden text in the part scanned",
+              skipReason: SCAN_TRUNCATED_SKIP_REASON,
+              details: { scanTruncated: true, foldKey: SCAN_TRUNCATED_SKIP_REASON },
+            }
+          : {
+              name: "hidden-text",
+              status: "pass",
+              message: "No hidden text or links detected",
+            },
+      );
       return { checks };
     }
 
@@ -1291,6 +1330,9 @@ export const hiddenTextRule: Rule = {
         hiddenLinks: totalLinks,
         hiddenChars: totalChars,
         ...(findings.length > MAX_ITEMS ? { additional: findings.length - MAX_ITEMS } : {}),
+        // Always present, so a reader can tell "walked the whole page" from a
+        // publisher too old to say.
+        scanTruncated,
       },
     });
 

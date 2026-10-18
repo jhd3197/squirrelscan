@@ -6,7 +6,7 @@
 // concurrently, raced against them. This reads the same text without touching
 // the DOM, reusing the parser's iterative walk (stack-safe on deep DOMs).
 
-import type { Element } from "linkedom";
+import type { Document, Element } from "linkedom";
 
 import { collectTextExcluding, tagExcluder } from "@squirrelscan/parser/extractors";
 
@@ -125,8 +125,8 @@ const isBlockElement = tagExcluder(BLOCK_TAGS);
  * subtrees and code containers, with a newline where each skipped subtree was
  * AND at every block boundary.
  *
- * For rules that judge only what a visitor's eyes land on. Kept separate from
- * `getProseTextExcludingCode` so existing callers keep their exact behaviour.
+ * For rules that judge only what a visitor's eyes land on: content/placeholder-text
+ * and, since pub#216, content/mojibake.
  */
 export function getRenderedProseText(element: Element): string {
   return collectTextExcluding(
@@ -135,4 +135,93 @@ export function getRenderedProseText(element: Element): string {
     SKIPPED_SUBTREE_BOUNDARY,
     isBlockElement,
   );
+}
+
+/**
+ * `getRenderedProseText` with one more reason to skip a subtree: `isExtraExcluded`
+ * is consulted for every element, and a true answer drops that element and
+ * everything under it. For rules that judge some marked-up regions differently
+ * (`translate="no"`, `spellcheck="false"`, another language's `lang`).
+ */
+export function getRenderedProseTextWhere(
+  element: Element,
+  isExtraExcluded: (el: Element) => boolean,
+): string {
+  return collectTextExcluding(
+    element,
+    (el) => isScriptCodeOrUnrendered(el) || isExtraExcluded(el),
+    SKIPPED_SUBTREE_BOUNDARY,
+    isBlockElement,
+  );
+}
+
+/** Tags `getSeparatedText` never reads: markup the browser does not render as text. */
+const isSeparatedTextSkipped = tagExcluder(
+  new Set<string>([...SCRIPT_LIKE_TAGS, ...NON_RENDERED_TAGS]),
+);
+
+/**
+ * `element`'s text with a space between EVERY pair of adjacent nodes, inline or
+ * block, plus a space where each skipped subtree was.
+ *
+ * `.textContent` joins siblings with nothing: `<span>Published</span><span>March
+ * 12, 2024</span>Read more` reads back as `PublishedMarch 12, 2024Read more`, so
+ * a pattern anchored on a word boundary (or one that wants a word on either side
+ * of a date) sees neither fragment. For rules that look for a short pattern in
+ * text that was laid out in separate elements. Collapse the whitespace yourself
+ * when the exact spacing matters.
+ *
+ * `skipTags` adds lowercase tag names to drop whole, on top of
+ * `<script>`/`<style>`/`<noscript>`/`<template>`; pass `new Set(["a"])` to read
+ * what a block says in its own voice, without the text of its links.
+ */
+export function getSeparatedText(element: Element, skipTags?: ReadonlySet<string>): string {
+  const isSkippedTag = skipTags && skipTags.size > 0 ? tagExcluder(skipTags) : null;
+  return collectTextExcluding(
+    element,
+    (el) => isSeparatedTextSkipped(el) || (isSkippedTag?.(el) ?? false),
+    " ",
+    () => true,
+  );
+}
+
+/** One `getPageSeparatedText` result per parsed document; GC'd with the document. */
+const pageSeparatedTextCache = new WeakMap<object, string>();
+
+/**
+ * The page body's `getSeparatedText`, whitespace collapsed to single spaces,
+ * computed once per parsed document however many rules ask for it.
+ *
+ * `ctx.parsed.content.textContent` is the parser's `.textContent` of the body,
+ * so it glues adjacent elements: `<h3>Customer rating</h3><p>5/5</p>` reads
+ * `Customer rating5/5`, where no `\b` falls between `rating` and `5`. A rule
+ * that looks for a short, word-bounded pattern in page copy reads this text as
+ * well, so the same markup with and without whitespace between its elements is
+ * judged the same (pub#739, pub#696). Read it NEXT TO the glued text rather
+ * than instead of it: it also splits a word an author wrapped across inline
+ * elements (`Goo<b>gle</b>` reads `Goo gle`).
+ *
+ * Cached on the document, so it assumes rules treat the DOM as read-only, as
+ * they must: a change made after the first call is not reflected.
+ */
+export function getPageSeparatedText(doc: Document): string {
+  const cached = pageSeparatedTextCache.get(doc);
+  if (cached !== undefined) return cached;
+  const body = doc.querySelector("body");
+  const text = body ? getSeparatedText(body).replace(/\s+/g, " ").trim() : "";
+  pageSeparatedTextCache.set(doc, text);
+  return text;
+}
+
+/**
+ * Whether `element` sits inside a subtree `getRenderedProseText` would skip: a
+ * script, a code-like element, a `<template>` or a code-editor container. For
+ * rules that read an ATTRIBUTE (an `href`) next to the prose, so the attribute
+ * is judged by the same "is this a literal sample" test as the text around it.
+ */
+export function isInsideCodeOrUnrendered(element: Element): boolean {
+  for (let el: Element | null = element; el; el = el.parentElement as Element | null) {
+    if (isScriptCodeOrUnrendered(el)) return true;
+  }
+  return false;
 }

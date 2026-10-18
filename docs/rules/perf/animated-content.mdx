@@ -13,12 +13,14 @@ A muted, looping, autoplaying `<video>` behaves like an animated GIF for a reade
 
 The rule runs on every crawled page and emits one or two checks:
 
-- `animated-gifs`: warns with the message `N GIF image(s) found - consider video format`, listing up to ten filenames. It is replaced by `animated-content`, passing with `No GIF animations found`, when there are none.
+- `animated-gifs`: warns with the message `N GIF image(s) found - consider video format`, listing up to ten filenames with a count of the rest. It is replaced by `animated-content`, passing with `No GIF animations found`, when there are none.
 - `video-codecs`: emitted only when at least one `<video>` qualifies, at info status with the message `N video(s) could use modern codecs`, listing up to five filenames.
 
 A GIF is found by URL rather than by content: an `<img src>` whose lowercased value ends in `.gif` or contains `.gif?`, or a `<picture> <source>` whose `srcset` contains `.gif` or whose `type` is exactly `image/gif`. The rule does not fetch the file, so it cannot tell an animated GIF from a static one and both are reported.
 
 A `<video>` is reported only when it has at least one `<source>` child and none of them declares a `type` containing `webm`, `av1` or `hevc`, and the element's own `src` contains neither `.webm` nor `.av1`. A video with a `src` and no `<source>` children is never reported.
+
+Elements inside `<noscript>` are skipped: a browser with scripting enabled reads `<noscript>` content as plain text, so nothing in it loads or renders. See [content inside noscript](/rules#content-inside-noscript).
 
 ## How to fix it
 
@@ -75,8 +77,9 @@ disable = ["perf/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["perf/animated-content"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
@@ -94,7 +97,7 @@ Performance findings ship in every audit next to the SEO, security and agent exp
 
 ## Check your site
 
-Run `squirrel audit https://example.com` and open the Performance section of the report. Every GIF is listed by filename, with the pages that use it. Local audits are free.
+Run `squirrel audit https://example.com` and open the Performance section of the report. Every GIF is listed by filename, with the pages that use it. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">

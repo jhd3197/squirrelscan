@@ -47,20 +47,27 @@
 
 import { describe, expect, test } from "bun:test";
 import { Effect } from "effect";
+import { parseDocument } from "@squirrelscan/parser";
 
 import { SQLiteStorage } from "@squirrelscan/crawler";
-import { RuleRunner, createRunner } from "@squirrelscan/rules";
+import { RuleRunner, createRunner, fingerprintPage } from "@squirrelscan/rules";
 import type { Rule, RuleRunResult, SiteData } from "@squirrelscan/rules";
 import { foldOverflowChecks } from "@squirrelscan/rules/fold";
 import type { CheckResult, PageRecord } from "@squirrelscan/core-contracts";
 import type { Config } from "@squirrelscan/config";
 
-import { buildHeadersMap, buildSiteContext, isRenderedFetch } from "../src/adapter";
+import { buildHeadersMap, buildSiteContext, isRenderedFetch, parseHtmlForRules } from "../src/adapter";
 import { isAuditablePage } from "../src/page-features";
 import { foldRuleResultIntoTallies, type RuleTally } from "../src/scoring";
 import { streamPageRules } from "../src/streaming";
 import { buildStreamFindings } from "../src/stream-findings";
-import { fanoutClusterKey, templateFanoutEnabled } from "../src/template-fanout";
+import {
+  CONTENT_READ_METAS,
+  fanoutClusterKey,
+  fanoutInputSignature,
+  templateFanoutEnabled,
+} from "../src/template-fanout";
+import { templateFingerprintKey } from "../src/template-key";
 import { checkAffectedPages } from "@squirrelscan/report";
 import { CORPUS, ORIGIN, mkPage } from "./helpers/template-corpus";
 
@@ -557,21 +564,209 @@ describe("a verdict is never copied across origins", () => {
     await run(store.close());
   });
 
-  test("fanoutClusterKey separates origins and survives an unparseable url", () => {
-    expect(fanoutClusterKey("abc123", "https://shop.test/a")).not.toBe(
-      fanoutClusterKey("abc123", "http://shop.test/a"),
+  // #275: pages that share the chrome key but differ in an input a declared rule
+  // reads. Under the chrome-only grouping key each pair collapsed into one group
+  // and the second page inherited the first one's verdict.
+  const sameChrome = (head: string, main = "<main><h1>Same</h1></main>") =>
+    `<!DOCTYPE html><html lang="en"><head><title>Same chrome</title><meta charset="utf-8">` +
+    `<link rel="stylesheet" href="/assets/site.css">${head}` +
+    `<style>:root{--brand:#101010}</style></head><body class="tpl-x">` +
+    `<nav><a href="/">Home</a></nav>${main}<footer>f</footer></body></html>`;
+  const SIG = "0123456789abcdef";
+  const VIEWPORT = `<meta name="viewport" content="width=device-width, initial-scale=1">`;
+  const counterexamples: Array<{ name: string; ruleId: string; a: string; b: string }> = [
+    {
+      name: "a missing viewport meta",
+      ruleId: "mobile/viewport",
+      a: sameChrome(VIEWPORT),
+      b: sameChrome(""),
+    },
+    {
+      name: "a viewport meta with different content",
+      ruleId: "mobile/viewport",
+      a: sameChrome(VIEWPORT),
+      b: sameChrome(`<meta name="viewport" content="width=1024">`),
+    },
+    {
+      name: "a meta refresh with a different target",
+      ruleId: "a11y/meta-refresh",
+      a: sameChrome(`${VIEWPORT}<meta http-equiv="refresh" content="0;url=/x">`),
+      b: sameChrome(`${VIEWPORT}<meta http-equiv="refresh" content="0;url=/y">`),
+    },
+    {
+      name: "a script that gains an integrity attribute",
+      ruleId: "security/sri",
+      a: sameChrome(`${VIEWPORT}<script src="https://cdn.other.test/a.js"></script>`),
+      b: sameChrome(`${VIEWPORT}<script src="https://cdn.other.test/a.js" integrity="sha384-abc" crossorigin="anonymous"></script>`),
+    },
+    {
+      name: "a cross-origin stylesheet that gains an integrity attribute",
+      ruleId: "security/sri",
+      a: sameChrome(`${VIEWPORT}<link rel="stylesheet" href="https://cdn.other.test/a.css">`),
+      b: sameChrome(`${VIEWPORT}<link rel="stylesheet" href="https://cdn.other.test/a.css" integrity="sha384-abc">`),
+    },
+    {
+      name: "a second main landmark",
+      ruleId: "a11y/landmark-one-main",
+      a: sameChrome(VIEWPORT),
+      b: sameChrome(VIEWPORT, "<main>one</main><main>two</main>"),
+    },
+    {
+      name: "a script path that differs on the same host",
+      ruleId: "security/sri",
+      a: sameChrome(`${VIEWPORT}<script src="https://cdn.other.test/assets/a.js"></script>`),
+      b: sameChrome(`${VIEWPORT}<script src="https://cdn.other.test/assets/b.js"></script>`),
+    },
+    // #614: the root attributes and icon links three declared rules read.
+    {
+      name: "an xml:lang on <html> that contradicts its lang",
+      ruleId: "a11y/html-xml-lang-mismatch",
+      a: sameChrome(VIEWPORT),
+      b: sameChrome(VIEWPORT).replace('<html lang="en">', '<html lang="en" xml:lang="fr">'),
+    },
+    {
+      name: "a different <html lang> under the same xml:lang",
+      ruleId: "a11y/html-xml-lang-mismatch",
+      a: sameChrome(VIEWPORT).replace('<html lang="en">', '<html lang="fr" xml:lang="fr">'),
+      b: sameChrome(VIEWPORT).replace('<html lang="en">', '<html lang="en" xml:lang="fr">'),
+    },
+    {
+      name: "aria-hidden on <html>",
+      ruleId: "a11y/aria-hidden-body",
+      a: sameChrome(VIEWPORT),
+      b: sameChrome(VIEWPORT).replace('<html lang="en">', '<html lang="en" aria-hidden="true">'),
+    },
+    {
+      name: "aria-hidden on <body>",
+      ruleId: "a11y/aria-hidden-body",
+      a: sameChrome(VIEWPORT),
+      b: sameChrome(VIEWPORT).replace('<body class="tpl-x">', '<body class="tpl-x" aria-hidden="true">'),
+    },
+    {
+      name: "a missing favicon link",
+      ruleId: "core/favicon",
+      a: sameChrome(`${VIEWPORT}<link rel="icon" href="/favicon.ico">`),
+      b: sameChrome(VIEWPORT),
+    },
+    {
+      name: "a favicon href in another format",
+      ruleId: "core/favicon",
+      a: sameChrome(`${VIEWPORT}<link rel="icon" href="/favicon.ico">`),
+      b: sameChrome(`${VIEWPORT}<link rel="icon" href="/favicon.svg">`),
+    },
+    {
+      name: "the same favicon links in another order",
+      ruleId: "core/favicon",
+      a: sameChrome(`${VIEWPORT}<link rel="icon" href="/favicon.ico"><link rel="icon" href="/favicon.svg">`),
+      b: sameChrome(`${VIEWPORT}<link rel="icon" href="/favicon.svg"><link rel="icon" href="/favicon.ico">`),
+    },
+  ];
+
+  for (const { name, ruleId, a, b } of counterexamples) {
+    test(`pages sharing a chrome key but differing in ${name} do not share a verdict`, async () => {
+      const urlA = "https://shop.test/a";
+      const urlB = "https://shop.test/b";
+      const store = new SQLiteStorage(":memory:");
+      await run(store.init());
+      await run(store.upsertPage(CRAWL, mkPage(urlA, a) as PageRecord));
+      await run(store.upsertPage(CRAWL, mkPage(urlB, b) as PageRecord));
+
+      const reference = await residentPageRules(store, createRunner(CONFIG));
+      const result = await run(
+        streamPageRules(store, CRAWL, createRunner(CONFIG), SITE_DATA, { templateFanout: true }),
+      );
+
+      // The premise: the rule really does see these two pages differently, and the
+      // old chrome-only key really would have grouped them.
+      const ref = (url: string) => reference.pageRuleResults.get(url)?.get(ruleId);
+      expect(ref(urlA)).not.toEqual(ref(urlB));
+      const chromeKey = (url: string, html: string) =>
+        templateFingerprintKey(fingerprintPage(parseHtmlForRules(html, url), url));
+      expect(chromeKey(urlA, a)).not.toBeNull();
+      expect(chromeKey(urlA, a)).toBe(chromeKey(urlB, b));
+
+      // Nothing was inherited, and each page carries the verdict of running on it.
+      expect(result.templateFanout.fannedPages).toBe(0);
+      for (const url of [urlA, urlB]) {
+        expect(result.pageRuleResults.get(url)?.get(ruleId)).toEqual(ref(url) as never);
+      }
+
+      await run(store.close());
+    });
+  }
+
+  test("fanoutInputSignature separates script paths, meta names and main counts", () => {
+    const sig = (html: string) => fanoutInputSignature(parseDocument(html));
+    const base = sig(sameChrome(VIEWPORT));
+    expect(sig(sameChrome(VIEWPORT))).toBe(base);
+    expect(sig(sameChrome(""))).not.toBe(base);
+    expect(sig(sameChrome(VIEWPORT, "<main>1</main><main>2</main>"))).not.toBe(base);
+    expect(sig(sameChrome(VIEWPORT, '<main>1</main><div role="main">2</div>'))).not.toBe(base);
+    expect(sig(sameChrome(`${VIEWPORT}<script src="/a.js"></script>`))).not.toBe(
+      sig(sameChrome(`${VIEWPORT}<script src="/b.js"></script>`)),
     );
-    expect(fanoutClusterKey("abc123", "https://shop.test/a")).toBe(
-      fanoutClusterKey("abc123", "https://shop.test/b?q=1"),
+    // Identical inputs on different pages must still group, or the key is
+    // vacuously tight and fan-out never happens.
+    expect(sig(sameChrome(VIEWPORT))).toBe(sig(sameChrome(VIEWPORT, "<main><p>other</p></main>")));
+    expect(fanoutClusterKey("abc123", "https://shop.test/a", base)).toBe(
+      fanoutClusterKey("abc123", "https://shop.test/b", base),
+    );
+    // Duplicates count, and `name` is not `property`.
+    expect(sig(sameChrome(`${VIEWPORT}${VIEWPORT}`))).not.toBe(base);
+    expect(sig(sameChrome(`${VIEWPORT}<script src="/a.js"></script><script src="/a.js"></script>`))).not.toBe(
+      sig(sameChrome(`${VIEWPORT}<script src="/a.js"></script>`)),
+    );
+    expect(sig(sameChrome(`${VIEWPORT}<meta name="x" content="1">`))).not.toBe(
+      sig(sameChrome(`${VIEWPORT}<meta property="x" content="1">`)),
+    );
+    expect(fanoutInputSignature(null)).toBeNull();
+    expect(fanoutClusterKey("abc123", "https://shop.test/a", null)).toBeNull();
+  });
+
+  // #614: the html lang / xml:lang, the html and body aria-hidden and the favicon
+  // links are read by declared template rules, so pages that differ only there
+  // must not share a fan-out group.
+  test("fanoutInputSignature separates the <html> and <body> attributes and icon links (#614)", () => {
+    const sig = (html: string) => fanoutInputSignature(parseDocument(html));
+    const base = sig(sameChrome(VIEWPORT));
+    expect(sig(sameChrome(VIEWPORT).replace('<html lang="en">', '<html lang="fr">'))).not.toBe(base);
+    expect(sig(sameChrome(VIEWPORT).replace('<html lang="en">', '<html lang="en" xml:lang="fr">'))).not.toBe(base);
+    expect(sig(sameChrome(VIEWPORT).replace('<html lang="en">', '<html lang="en" aria-hidden="true">'))).not.toBe(base);
+    expect(sig(sameChrome(VIEWPORT).replace('<body class="tpl-x">', '<body class="tpl-x" aria-hidden="true">'))).not.toBe(base);
+    const icon = `<link rel="icon" href="/favicon-a.ico">`;
+    expect(sig(sameChrome(`${VIEWPORT}${icon}`))).not.toBe(base);
+    expect(sig(sameChrome(`${VIEWPORT}${icon}`))).not.toBe(
+      sig(sameChrome(`${VIEWPORT}<link rel="icon" href="/favicon-b.ico">`)),
+    );
+    // A `|` in rel or href cannot forge another pair.
+    expect(sig(sameChrome(`${VIEWPORT}<link rel="icon|apple-touch-icon" href="/a.ico">`))).not.toBe(
+      sig(sameChrome(`${VIEWPORT}<link rel="icon" href="apple-touch-icon|/a.ico">`)),
+    );
+    // Positive control: a <body> or <html> attribute no declared rule reads leaves
+    // the signature alone, so the new inputs do not make the key over-sensitive.
+    const otherClass = sameChrome(VIEWPORT).replace('<body class="tpl-x">', '<body class="tpl-x home">');
+    const otherDir = sameChrome(VIEWPORT).replace('<html lang="en">', '<html lang="en" dir="ltr">');
+    expect(otherClass).not.toBe(sameChrome(VIEWPORT));
+    expect(otherDir).not.toBe(sameChrome(VIEWPORT));
+    expect(sig(otherClass)).toBe(base);
+    expect(sig(otherDir)).toBe(base);
+  });
+
+  test("fanoutClusterKey separates origins and survives an unparseable url", () => {
+    expect(fanoutClusterKey("abc123", "https://shop.test/a", SIG)).not.toBe(
+      fanoutClusterKey("abc123", "http://shop.test/a", SIG),
+    );
+    expect(fanoutClusterKey("abc123", "https://shop.test/a", SIG)).toBe(
+      fanoutClusterKey("abc123", "https://shop.test/b?q=1", SIG),
     );
     // No template key means no group, whatever the url.
-    expect(fanoutClusterKey(null, "https://shop.test/a")).toBeNull();
+    expect(fanoutClusterKey(null, "https://shop.test/a", SIG)).toBeNull();
     // A url that will not parse falls back to itself, so it can only ever group
     // with a byte-identical url.
-    expect(fanoutClusterKey("abc123", "not a url")).not.toBe(
-      fanoutClusterKey("abc123", "also not a url"),
+    expect(fanoutClusterKey("abc123", "not a url", SIG)).not.toBe(
+      fanoutClusterKey("abc123", "also not a url", SIG),
     );
-    expect(fanoutClusterKey("abc123", "not a url")).toBe(fanoutClusterKey("abc123", "not a url"));
+    expect(fanoutClusterKey("abc123", "not a url", SIG)).toBe(fanoutClusterKey("abc123", "not a url", SIG));
   });
 });
 
@@ -618,5 +813,26 @@ describe("SQUIRREL_TEMPLATE_FANOUT", () => {
     for (const off of ["0", "false", "FALSE", "off", "no", " 0 "]) {
       expect(templateFanoutEnabled({ SQUIRREL_TEMPLATE_FANOUT: off })).toBe(false);
     }
+  });
+});
+
+// A tripwire for CONTENT_READ_METAS, not a proof: a declared template rule that
+// selects a named meta with the literal `meta[name="…"]` form must have that
+// meta's content in the signature, or two pages differing only in that value
+// would share a verdict. A meta read through another selector form, through
+// `getAttribute`, or through a helper in another file is not caught here.
+describe("CONTENT_READ_METAS covers the metas declared rules select by name", () => {
+  test("every meta[name=...] in a template-scoped rule is listed", async () => {
+    const root = new URL("../../rules/src/", import.meta.url).pathname;
+    const missing: string[] = [];
+    for await (const file of new Bun.Glob("**/*.ts").scan({ cwd: root })) {
+      const src = await Bun.file(root + file).text();
+      if (!/verdictScope:\s*"template"/.test(src)) continue;
+      for (const m of src.matchAll(/meta\[name=["']([^"']+)["']\]/g)) {
+        const name = m[1]!.toLowerCase();
+        if (!CONTENT_READ_METAS.has(name)) missing.push(`${file}: ${name}`);
+      }
+    }
+    expect(missing).toEqual([]);
   });
 });

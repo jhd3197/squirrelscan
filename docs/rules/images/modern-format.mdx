@@ -20,6 +20,8 @@ The rule runs on every crawled page. It reads the `src` of every `img[src]` and 
 
 Modern means the URL contains `.webp` or `.avif`, or a `<source>` whose `type` contains `webp` or `avif`. Legacy means `.jpg`, `.jpeg`, `.png` or `.gif`. The match includes the leading dot, so `?format=webp` does not count and `?format=.webp` does. Legacy extensions are only counted on `<img src>`, never on a `<source srcset>`. An image served as WebP through content negotiation, with a `.jpg` URL, is counted as legacy. Severity info, weight 3.
 
+Elements inside `<noscript>` are skipped: a browser with scripting enabled reads `<noscript>` content as plain text, so nothing in it loads or renders. See [content inside noscript](/rules#content-inside-noscript).
+
 ## How to fix it
 
 ```html
@@ -63,8 +65,9 @@ disable = ["images/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["images/modern-format"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
@@ -82,7 +85,7 @@ Images findings ship in every audit next to the SEO, performance and agent exper
 
 ## Check your site
 
-Run `squirrel audit https://example.com` and open the Images section of the report. Each page is reported with its modern and legacy format counts. Local audits are free.
+Run `squirrel audit https://example.com` and open the Images section of the report. Each page is reported with its modern and legacy format counts. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">

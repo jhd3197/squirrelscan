@@ -43,7 +43,7 @@ adds it when run as root; otherwise `apk add libstdc++` first.
 
 ## 2. Run a local audit
 
-Local audits are free, need no account, and cost no credits. Run one now against
+Signed out, local audits need no account and cost no credits. Run one now against
 the project's site so there is something concrete to work from:
 
 ```bash
@@ -90,8 +90,9 @@ positive for this project, say so and explain why rather than silencing it.
 
 ## Notes
 
-- Local audits never cost credits. Cloud audits cost 50 credits plus 2 per
-  rendered page, and free accounts get 500 credits a month.
-- `squirrel audit --help` lists coverage modes, output formats, and crawl limits.
+- Audits run without an account never cost credits. Signed-in audits cost 50
+  credits plus 2 per audited page, plus 1 per external link the cloud verifies
+  for the audit (at most 1 per page), and free accounts get 500 credits a month.
+- `squirrel audit --help` lists the audit levels, output formats, and crawl limits.
 - If the site blocks the crawler, check `robots.txt` first: squirrelscan
   respects it, and a blocked root produces an audit with no pages.

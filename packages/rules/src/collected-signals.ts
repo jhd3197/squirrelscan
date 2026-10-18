@@ -17,14 +17,19 @@
 import type { IntegritySignal, PageSignalContext } from "./integrity/signals";
 import type { LeakedSecret } from "./security/leaked-secrets";
 import type { PageFingerprint } from "./integrity/fingerprint";
+import type { PageMisspellings } from "./content/common-misspellings";
 import type { ParsedPage } from "./types";
 
 import { logger, profileRules } from "./logger";
 import { detectPageSignals } from "./integrity/signals";
 import { extractPageByteSignal } from "./performance/total-byte-weight";
 import { fingerprintPage } from "./integrity/fingerprint";
-import { matchSubprocessorLink } from "./legal/subprocessor-disclosure";
+import { hasCommercialOfferLink, matchSubprocessorLink } from "./legal/subprocessor-disclosure";
 import { pageScriptSrcs } from "./adblock/blocked-links";
+import type { PageAnchorSignal } from "./links/page-anchors";
+import { buildPageAnchorSignal } from "./links/page-anchors";
+import { scanPageForMisspellings } from "./content/common-misspellings";
+import { RULE_TIME_BUDGET_MS, RuleTimeoutError, runWithinBudget } from "./rule-budget";
 import { scanPageForSecrets } from "./security/leaked-secrets";
 
 /**
@@ -41,6 +46,9 @@ export interface CollectedPageSignal {
   /** total-byte-weight: summed inline `<style>` / inline `<script>` text lengths. */
   inlineCssLen: number;
   inlineJsLen: number;
+  /** total-byte-weight: the stored HTML response size. Absent on a snapshot
+   *  cached before it was collected, which reads as 0 bytes. */
+  htmlBytes?: number;
   /** total-byte-weight estimate branch (used only for the first collected page). */
   externalCssCount: number;
   externalJsCount: number;
@@ -54,6 +62,24 @@ export interface CollectedPageSignal {
   /** subprocessor-disclosure: the first sub-processor/DPA link match on this page
    *  (`href || url`), or null — mirrors the legacy break-on-first-match. */
   subprocessorMatch: string | null;
+  /** content/common-misspellings: the page's English-text scan (absent on a
+   *  snapshot cached before it was collected, which reads as no findings). */
+  misspellings?: PageMisspellings;
+  /** subprocessor-disclosure: whether this page links to a commercial offer
+   *  (pricing, plans, enterprise, trust center, contact sales, book a demo). */
+  commercialOffer: boolean;
+  /**
+   * links/broken-anchors: the page's distinct ids and `<a name>` values, and its
+   * skip-link fragments (page-anchors.ts). Null when the page has no document.
+   * Absent on a record cached before the field existed, which reads as unjudged.
+   */
+  anchors?: PageAnchorSignal | null;
+  /**
+   * Rules whose page-time extractor ran past its time budget on this page and was
+   * abandoned (its field holds the empty value). The site pass records each as a
+   * rule error for this page. Absent when nothing timed out.
+   */
+  timedOut?: { budgetMs: number; ruleIds: string[] };
 }
 
 /** The collected per-page signals for one crawl, in page-stream (crawl) order. */
@@ -79,8 +105,15 @@ export function buildCollectedPageSignal(input: {
    * `undefined` (or omitting it) computes it here, as before.
    */
   fingerprint?: PageFingerprint | null;
+  /** Time budget (ms) per extractor; defaults to {@link RULE_TIME_BUDGET_MS}. */
+  budgetMs?: number;
+  /** The page's stored HTML response size in bytes, when the crawler recorded it. */
+  htmlBytes?: number | null;
+  /** The page's HTML came from a browser render (links/broken-anchors reads it). */
+  rendered?: boolean;
 }): CollectedPageSignal {
   const { url, finalUrl, parsed } = input;
+  const htmlBytes = input.htmlBytes ?? 0;
   const doc = parsed.document;
 
   if (!doc) {
@@ -89,6 +122,7 @@ export function buildCollectedPageSignal(input: {
       secrets: [],
       inlineCssLen: 0,
       inlineJsLen: 0,
+      htmlBytes,
       externalCssCount: 0,
       externalJsCount: 0,
       imageCount: 0,
@@ -96,6 +130,9 @@ export function buildCollectedPageSignal(input: {
       signals: [],
       scriptSrcs: [],
       subprocessorMatch: null,
+      commercialOffer: false,
+      anchors: null,
+      misspellings: { english: false, occurrences: [] },
     };
   }
 
@@ -110,33 +147,52 @@ export function buildCollectedPageSignal(input: {
   // scan stopped showing up anywhere (#1864). Time each extractor under
   // SQUIRREL_RULE_PROFILE and report it against the rule that owns it, so the
   // profile still accounts for the page's whole rules-phase cost.
-  const timed = profileRules
-    ? <T>(ruleId: string, fn: () => T): T => {
-        const started = performance.now();
-        const out = fn();
-        const elapsedMs = performance.now() - started;
-        logger.debug("rule", {
-          ruleId,
-          scope: "collect",
-          pageUrl: url,
-          checks: 0,
-          passed: 0,
-          failed: 0,
-          warned: 0,
-          durationMs: Math.round(elapsedMs),
-          durationUs: Math.round(elapsedMs * 1000),
-        });
-        return out;
-      }
-    : <T>(_ruleId: string, fn: () => T): T => fn();
+  //
+  // Each extractor is a rule's per-page work over untrusted content, so it runs
+  // under the same per-rule time budget the runner applies (rule-budget.ts). One
+  // that runs past it yields its empty value and is listed in `timedOut`.
+  const budgetMs = input.budgetMs ?? RULE_TIME_BUDGET_MS;
+  const timedOutRuleIds: string[] = [];
+  const timed = <T>(ruleId: string, fallback: T, fn: () => T): T => {
+    const started = profileRules ? performance.now() : 0;
+    let out: T;
+    try {
+      out = runWithinBudget(fn, budgetMs);
+    } catch (e) {
+      if (!(e instanceof RuleTimeoutError)) throw e;
+      logger.warn("rule timed out", { ruleId, scope: "collect", pageUrl: url, budgetMs });
+      if (!timedOutRuleIds.includes(ruleId)) timedOutRuleIds.push(ruleId);
+      out = fallback;
+    }
+    if (profileRules) {
+      const elapsedMs = performance.now() - started;
+      logger.debug("rule", {
+        ruleId,
+        scope: "collect",
+        pageUrl: url,
+        checks: 0,
+        passed: 0,
+        failed: 0,
+        warned: 0,
+        durationMs: Math.round(elapsedMs),
+        durationUs: Math.round(elapsedMs * 1000),
+      });
+    }
+    return out;
+  };
 
-  const byteSignal = timed("perf/total-byte-weight", () => extractPageByteSignal(doc));
+  const byteSignal = timed(
+    "perf/total-byte-weight",
+    { inlineCssLen: 0, inlineJsLen: 0, externalCssCount: 0, externalJsCount: 0, imageCount: 0 },
+    () => extractPageByteSignal(doc)
+  );
 
-  return {
+  const signal: CollectedPageSignal = {
     url,
-    secrets: timed("security/leaked-secrets", () => scanPageForSecrets(doc, url)),
+    secrets: timed("security/leaked-secrets", [], () => scanPageForSecrets(doc, url)),
     inlineCssLen: byteSignal.inlineCssLen,
     inlineJsLen: byteSignal.inlineJsLen,
+    htmlBytes,
     externalCssCount: byteSignal.externalCssCount,
     externalJsCount: byteSignal.externalJsCount,
     imageCount: byteSignal.imageCount,
@@ -145,11 +201,22 @@ export function buildCollectedPageSignal(input: {
     fingerprint:
       input.fingerprint !== undefined
         ? input.fingerprint
-        : timed("integrity/template-discontinuity", () => fingerprintPage(parsed, url)),
-    signals: timed("integrity/orphan-page", () => [...detectPageSignals(signalCtx)]),
-    scriptSrcs: timed("adblock/blocked-links", () => pageScriptSrcs(doc)),
-    subprocessorMatch: timed("legal/subprocessor-disclosure", () =>
+        : timed("integrity/template-discontinuity", null, () => fingerprintPage(parsed, url)),
+    signals: timed("integrity/orphan-page", [], () => [...detectPageSignals(signalCtx)]),
+    scriptSrcs: timed("adblock/blocked-links", [], () => pageScriptSrcs(doc)),
+    subprocessorMatch: timed("legal/subprocessor-disclosure", null, () =>
       matchSubprocessorLink(doc, url)
     ),
+    commercialOffer: timed("legal/subprocessor-disclosure", false, () =>
+      hasCommercialOfferLink(doc)
+    ),
+    anchors: timed("links/broken-anchors", null, () =>
+      buildPageAnchorSignal({ parsed, rendered: input.rendered === true })
+    ),
+    misspellings: timed("content/common-misspellings", { english: false, occurrences: [] }, () =>
+      scanPageForMisspellings(doc)
+    ),
   };
+  if (timedOutRuleIds.length > 0) signal.timedOut = { budgetMs, ruleIds: timedOutRuleIds };
+  return signal;
 }

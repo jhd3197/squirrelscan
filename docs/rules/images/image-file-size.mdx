@@ -74,14 +74,15 @@ disable = ["images/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["images/image-file-size"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
 - [images/modern-format](/rules/images/modern-format): the format change that usually fixes the size.
 - [images/srcset](/rules/images/srcset): serving a smaller file to smaller screens.
-- [images/responsive-size](/rules/images/responsive-size): thumbnail-sized images with no srcset or picture markup.
+- [images/responsive-size](/rules/images/responsive-size): thumbnail-sized images whose files are heavier than their displayed size needs.
 - [perf/total-byte-weight](/rules/perf/total-byte-weight): how much of the page total these images are.
 
 Images findings ship in every audit next to the SEO, performance and agent experience rules. See [Core Web Vitals](https://squirrelscan.com/learn/core-web-vitals) for how an agent works through a report.
@@ -93,7 +94,7 @@ Images findings ship in every audit next to the SEO, performance and agent exper
 
 ## Check your site
 
-Run `squirrel audit https://example.com` and open the Images section of the report. Every oversized image is listed with its size and the pages it appears on. Local audits are free.
+Run `squirrel audit https://example.com` and open the Images section of the report. Every oversized image is listed with its size and the pages it appears on. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">

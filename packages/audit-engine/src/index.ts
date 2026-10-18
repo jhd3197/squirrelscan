@@ -35,6 +35,7 @@ export type {
   PreFetchedAssets,
   ResourceCheckOverrides,
   ExternalLinkCheckProgress,
+  ExternalLinkCheckLimits,
   ExternalLinkOccurrences,
   SiteAssetOccurrences,
   BuildV1ReportOptions,
@@ -48,6 +49,7 @@ export {
   calculateHealthScore,
   deriveAuditStatus,
   deriveAuditStatusFromPages,
+  withoutUnobservedScores,
   getScoreGrade,
   getScoreColor,
   formatHealthScore,
@@ -180,6 +182,20 @@ export type { DetectedTechnology, TechCategory } from "@squirrelscan/tech-detect
 
 // Publish-prep meta shared by the CLI publish controller and runCloudAudit (#656)
 export { computeLockedRules, deriveHomepageSummary } from "./publish-meta";
+// The one capper both publish producers build their body with (#2656). Also
+// available Worker-clean via the `./publish-cap` entry.
+export {
+  buildCheckTallies,
+  capReportForPublish,
+  PublishedReportTooLargeError,
+} from "./publish-cap";
+export type {
+  CappableReport,
+  CappableRuleMeta,
+  CappedReport,
+  CappedRuleMeta,
+  CapReportOptions,
+} from "./publish-cap";
 
 // Re-export checker types + impl for consumers (CLI re-exports checkResourceSizes)
 export { checkResourceSizes, normalizeEncoding, varyForbidsReuse } from "./resource-checker";
@@ -204,6 +220,7 @@ export { templateFingerprintKey, templateVerdictKey } from "./template-key";
 export {
   createTemplateFanout,
   fanoutClusterKey,
+  fanoutInputSignature,
   templateFanoutEnabled,
   DEFAULT_MAX_CLUSTERS,
 } from "./template-fanout";
@@ -211,6 +228,9 @@ export type { TemplateFanout, TemplateFanoutStats } from "./template-fanout";
 
 // Streaming rules engine (#1021, PR-E) — batched page-rule pass with DOM-drop.
 export { streamPageRules, STREAM_PAGE_BATCH } from "./streaming";
+// Per-page result sink (#2343) — the seam that lets a caller spill page findings
+// as they are produced instead of holding them until the report.
+export type { PageResultSink, PageRuleEntries } from "./streaming";
 // Per-page rule-result cache (#1990).
 export {
   bindRuleCache,

@@ -2,6 +2,8 @@
 
 import type { Rule, RuleContext, RuleResult, CheckResult } from "../types";
 
+import { documentUrl } from "../shared/redirect-evidence";
+
 export const hreflangRule: Rule = {
   meta: {
     id: "i18n/hreflang",
@@ -35,6 +37,11 @@ export const hreflangRule: Rule = {
       return { checks };
     }
 
+    // pub#827: a URL the crawl followed through an HTTP redirect is stored
+    // with its target's response, so the self reference names the URL the
+    // redirect ended on, never the one that redirected.
+    const selfUrl = documentUrl(ctx.page);
+
     // Check for x-default
     let hasXDefault = false;
     let hasSelfReference = false;
@@ -52,8 +59,8 @@ export const hreflangRule: Rule = {
         // Check if this is self-referencing
         if (href) {
           try {
-            const linkUrl = new URL(href, ctx.page.url);
-            const pageUrl = new URL(ctx.page.url);
+            const linkUrl = new URL(href, selfUrl);
+            const pageUrl = new URL(selfUrl);
             if (linkUrl.href === pageUrl.href) {
               hasSelfReference = true;
             }

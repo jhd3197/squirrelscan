@@ -4,7 +4,14 @@
 
 import { clampItemString } from "@squirrelscan/core-contracts/clamp";
 import { REPORT_LIMITS } from "@squirrelscan/core-contracts/limits";
-import { coerceSchemelessUrl, getAttrCI, shouldSkipUrl } from "@squirrelscan/utils";
+import {
+  coerceSchemelessUrl,
+  decodeCloudflareEmail,
+  getAttrCI,
+  isCloudflareEmailProtectionUrl,
+  querySelectorAllOutsideNoscript,
+  shouldSkipUrl,
+} from "@squirrelscan/utils";
 import type { Document, Element } from "linkedom";
 
 import { parseHTML } from "./dom";
@@ -13,6 +20,7 @@ import type {
   ContactLinkData,
   ContentAnalysis,
   HeadingData,
+  HreflangAlternate,
   HeadingHierarchy,
   ImageData,
   LinkData,
@@ -23,12 +31,16 @@ import type {
   TwitterData,
 } from "@squirrelscan/core-contracts";
 
+import { runClassifier, type ParsePageOptions } from "./classifier-hook";
 import { isInSiteChrome } from "./extractors/chrome";
+import { makeLinkSectionResolver, type LinkPlacer } from "./extractors/link-section";
+import { isHiddenFromMarkup } from "./hidden-markup";
 
 import type { AuthorInfo } from "./schema";
 import type { PageType } from "./page-type";
 import type { SchemaCollection } from "./schema/collection";
 import type { Soft404Confirmation, Soft404Signal } from "./soft404";
+import { hasErrorShellMarker } from "./soft404";
 
 // Full ParsedPage with DOM reference (extends core-contracts version)
 export interface ParsedPage extends BaseParsedPage {
@@ -43,6 +55,11 @@ export interface ParsedPage extends BaseParsedPage {
   // Verdict of the end-of-crawl confirmation re-fetch (#1177); absent until the
   // audit-engine confirm pass runs (e.g. runner-only paths / storage reads).
   soft404Confirmation?: Soft404Confirmation;
+  // Framework error-shell marker on the document root (`hasErrorShellMarker`),
+  // captured at parse time so soft-404 candidate selection still sees it after
+  // the DOM is released (#235). Absent on a parse stored before it existed,
+  // which reads as the old DOM-only behaviour.
+  errorShell?: boolean;
 }
 
 // Crawl-time ParsedPage keyed by normalizedUrl, so an audit reuses the DOM (#267)
@@ -60,6 +77,48 @@ export function extractMeta(doc: Document): MetaData {
     canonical: doc.querySelector('link[rel="canonical"]')?.getAttribute("href") ?? null,
     robots: doc.querySelector('meta[name="robots"]')?.getAttribute("content") ?? null,
   };
+}
+
+/** Most hreflang alternates kept per page (#489). Large sets list ~60 locales. */
+export const HREFLANG_ALTERNATES_MAX = 100;
+/** Longest href kept; a longer one is dropped rather than truncated. */
+const HREFLANG_HREF_MAX_CHARS = 2048;
+/** Longest hreflang value kept (a BCP 47 tag is well under this). */
+const HREFLANG_VALUE_MAX_CHARS = 35;
+
+/**
+ * `<link rel="alternate" hreflang>` annotations, for the duplicate title and
+ * description rules (#489). The value is lowercased and the href resolved
+ * against the page URL; entries with an empty value, an unresolvable href or an
+ * oversize field are dropped, an exact (value, href) repeat is kept once, and
+ * the list stops at {@link HREFLANG_ALTERNATES_MAX} in document order, so a page
+ * cannot grow the stored record without bound. Markup only: Link headers and
+ * sitemap annotations are not read here.
+ */
+export function extractHreflangAlternates(doc: Document, pageUrl: string): HreflangAlternate[] {
+  const out: HreflangAlternate[] = [];
+  const seen = new Set<string>();
+  for (const node of doc.querySelectorAll("link[hreflang]")) {
+    const el = node as Element;
+    const rel = (el.getAttribute("rel") ?? "").toLowerCase().split(/\s+/);
+    if (!rel.includes("alternate")) continue;
+    const hreflang = (el.getAttribute("hreflang") ?? "").trim().toLowerCase();
+    const rawHref = (el.getAttribute("href") ?? "").trim();
+    if (!hreflang || !rawHref || hreflang.length > HREFLANG_VALUE_MAX_CHARS) continue;
+    let href: string;
+    try {
+      href = new URL(rawHref, pageUrl).toString();
+    } catch {
+      continue;
+    }
+    if (href.length > HREFLANG_HREF_MAX_CHARS) continue;
+    const key = `${hreflang} ${href}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ hreflang, href });
+    if (out.length >= HREFLANG_ALTERNATES_MAX) break;
+  }
+  return out;
 }
 
 // Extract H1 tags from parsed document
@@ -106,11 +165,13 @@ export function extractTwitter(doc: Document): TwitterData {
   };
 }
 
-// Extract links from parsed document
-export function extractLinks(doc: Document, baseUrl: string): LinkData[] {
+// Extract links from parsed document. `placeLink` is the page classifier's placer when the caller
+// ran it: it fills in `section` where the markup says nothing (see ./extractors/link-section.ts).
+export function extractLinks(doc: Document, baseUrl: string, placeLink?: LinkPlacer): LinkData[] {
   const anchors = doc.querySelectorAll("a[href]");
   const links: LinkData[] = [];
   const baseUrlObj = new URL(baseUrl);
+  const sectionOf = makeLinkSectionResolver(placeLink);
 
   const shouldSkip = (href: string): boolean => {
     return shouldSkipUrl(href);
@@ -124,6 +185,8 @@ export function extractLinks(doc: Document, baseUrl: string): LinkData[] {
     try {
       const normalizedHref = coerceSchemelessUrl(href.trim());
       const url = new URL(normalizedHref, baseUrl).toString();
+      // pub#811: an obfuscated email address, carried in `contactLinks`.
+      if (isCloudflareEmailProtectionUrl(url)) continue;
       const text = (anchor as Element).textContent?.trim() ?? "";
       const isInternal = new URL(url).hostname === baseUrlObj.hostname;
       // Whether the anchor sat in sitewide chrome (#109). This extractor is the
@@ -133,14 +196,15 @@ export function extractLinks(doc: Document, baseUrl: string): LinkData[] {
       // matters. Cheap: an ancestor tagName walk, no attribute reads.
       const isChrome = isInSiteChrome(anchor as Element);
 
-      links.push({ url, text, isInternal, isChrome });
+      links.push({ url, text, isInternal, isChrome, ...sectionOf(anchor as Element) });
     } catch {
-      // Skip invalid URLs
+      // Skip invalid URLs. Still placed: `links/invalid-links` says where the bad link sits.
       links.push({
         url: href.trim(),
         text: (anchor as Element).textContent?.trim() ?? "",
         isInternal: false,
         error: "Invalid URL format",
+        ...sectionOf(anchor as Element),
       });
     }
   }
@@ -150,7 +214,7 @@ export function extractLinks(doc: Document, baseUrl: string): LinkData[] {
 
 // Cap on carried contact anchors — a footer repeating one number does not need
 // an unbounded array on every parsed page.
-const MAX_CONTACT_LINKS = 32;
+export const MAX_CONTACT_LINKS = 32;
 
 /**
  * `tel:` / `mailto:` anchors, which `extractLinks` deliberately drops: they are
@@ -158,34 +222,86 @@ const MAX_CONTACT_LINKS = 32;
  * declared contact details though, so site rules that compare contact data across
  * pages (local/nap-consistency) need them somewhere, and re-walking the DOM is
  * not an option for a site rule — by then only the ParsedPage survives.
+ *
+ * pub#811: so are Cloudflare email-protection links, the `mailto:` links (and
+ * addresses in the text) Cloudflare's email obfuscation rewrote. Each is
+ * carried as the `mailto:` it stands for, flagged `obfuscated`.
  */
-export function extractContactLinks(doc: Document): ContactLinkData[] {
+export function extractContactLinks(doc: Document, placeLink?: LinkPlacer): ContactLinkData[] {
   const contacts: ContactLinkData[] = [];
+  // Obfuscated addresses get a cap of their own, so a footer of them cannot
+  // push out the `tel:` links local/nap-consistency compares.
+  let plain = 0;
+  let obfuscated = 0;
+  const sectionOf = makeLinkSectionResolver(placeLink);
+  // Where the anchor sat (#2307), for `links/tel-mailto` findings. Left off when the answer is
+  // `unknown`: an anchor outside every landmark carries nothing worth storing.
+  const placedOf = (anchor: Element) => {
+    const placed = sectionOf(anchor);
+    return placed.section !== "unknown" ? placed : {};
+  };
 
-  for (const anchor of doc.querySelectorAll('a[href^="tel:" i], a[href^="mailto:" i]')) {
-    if (contacts.length >= MAX_CONTACT_LINKS) break;
+  for (const anchor of doc.querySelectorAll(
+    'a[href^="tel:" i], a[href^="mailto:" i], a[href*="/cdn-cgi/l/email-protection" i]',
+  )) {
+    if (plain >= MAX_CONTACT_LINKS && obfuscated >= MAX_CONTACT_LINKS) break;
     const href = (anchor as Element).getAttribute("href");
     if (!href) continue;
 
     const trimmed = href.trim();
+    if (isCloudflareEmailProtectionUrl(trimmed)) {
+      if (obfuscated >= MAX_CONTACT_LINKS) continue;
+      obfuscated++;
+      contacts.push({ ...cloudflareEmailContact(anchor as Element, trimmed), ...placedOf(anchor as Element) });
+      continue;
+    }
+    if (plain >= MAX_CONTACT_LINKS) continue;
     const colon = trimmed.indexOf(":");
     const scheme = trimmed.slice(0, colon).toLowerCase();
     if (scheme !== "tel" && scheme !== "mailto") continue;
 
+    plain++;
     contacts.push({
       scheme,
       // `?subject=…` / `;phone-context=…` are routing params, not the address.
       value: trimmed.slice(colon + 1).split(/[?;]/)[0] ?? "",
       text: (anchor as Element).textContent?.trim() ?? "",
+      ...placedOf(anchor as Element),
     });
   }
 
   return contacts;
 }
 
+/**
+ * A Cloudflare email-protection anchor as the `mailto:` it stands for. The
+ * payload is the link's `#<hex>` (a rewritten `mailto:` link) or a
+ * `data-cfemail` on the anchor or inside it (a rewritten address in the text).
+ */
+function cloudflareEmailContact(anchor: Element, href: string): ContactLinkData {
+  const hash = href.indexOf("#");
+  const payload =
+    (hash >= 0 ? href.slice(hash + 1) : "") ||
+    anchor.getAttribute("data-cfemail") ||
+    anchor.querySelector("[data-cfemail]")?.getAttribute("data-cfemail") ||
+    "";
+  const decoded = decodeCloudflareEmail(payload.trim());
+  return {
+    scheme: "mailto",
+    // The same params as a plain `mailto:` are stripped (`?subject=…`).
+    value: decoded?.includes("@") ? (decoded.split(/[?;]/)[0] ?? "") : "",
+    text: anchor.textContent?.trim() ?? "",
+    obfuscated: "cloudflare",
+  };
+}
+
 // Extract images from parsed document
 export function extractImages(doc: Document, baseUrl: string): ImageData[] {
-  const imgs = doc.querySelectorAll("img");
+  // A <noscript> fallback image (tracking pixel, lazy-load fallback) never
+  // loads in a browser with scripting on, so it is not one of the page's
+  // images (#434). extractLinks still reads <noscript> anchors: link discovery
+  // is a crawl question, not a rendering one.
+  const imgs = querySelectorAllOutsideNoscript(doc, "img");
   const images: ImageData[] = [];
 
   for (const img of imgs) {
@@ -275,7 +391,9 @@ export function extractHeadings(doc: Document): HeadingHierarchy {
         (el as Element).textContent?.trim() ?? "",
         REPORT_LIMITS.maxMediumString,
       );
-      const heading = { level, text, order: order++ };
+      const heading: HeadingHierarchy["headings"][number] = { level, text, order: order++ };
+      // A placeholder the reader never sees is not an empty heading (#547).
+      if (!text && isHiddenFromMarkup(el as Element)) heading.hidden = true;
       headings.push(heading);
 
       if (level === 1) h1Texts.push(text);
@@ -367,9 +485,13 @@ function simpleHash(str: string): string {
 }
 
 // Parse all data from HTML - parses ONCE, reuses document for all extractors
-export function parsePage(html: string, url: string): ParsedPage {
+export function parsePage(html: string, url: string, options?: ParsePageOptions): ParsedPage {
   // Single DOM parse - this document is reused by all extractors and available to rules
   const { document: doc } = parseHTML(html);
+
+  // The page classifier, when the caller supplied one (#2307): it reads the DOM once, before
+  // anything else touches it, and its placer fills in link sections the markup leaves unknown.
+  const classified = runClassifier(options?.classify, doc, url, html);
 
   // Parse schemas (new rich collection)
   const schemas = parseSchemas(doc);
@@ -398,11 +520,12 @@ export function parsePage(html: string, url: string): ParsedPage {
     h1: extractH1(doc),
     og: extractOG(doc),
     twitter: extractTwitter(doc),
-    links: extractLinks(doc, url),
-    contactLinks: extractContactLinks(doc),
+    links: extractLinks(doc, url, classified?.placeLink),
+    contactLinks: extractContactLinks(doc, classified?.placeLink),
     images: extractImages(doc, url),
     headings: extractHeadings(doc),
     content: extractContent(doc, html),
+    errorShell: hasErrorShellMarker(doc),
 
     // New schema data
     schemas,
@@ -413,6 +536,11 @@ export function parsePage(html: string, url: string): ParsedPage {
     visibleAuthor: visibleMeta.visibleAuthor,
     visibleDatePublished: visibleMeta.visibleDatePublished,
     visibleDateModified: visibleMeta.visibleDateModified,
+
+    hreflangAlternates: extractHreflangAlternates(doc, url),
+
+    // Present only when the classifier ran, so a parse without one is byte-identical to before.
+    ...(classified ? { classification: classified.classification } : {}),
 
     // Legacy (deprecated)
     schema,

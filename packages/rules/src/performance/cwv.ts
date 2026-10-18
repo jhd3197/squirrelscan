@@ -1,12 +1,25 @@
 // Core Web Vitals static hints checker
 // Analyzes HTML for performance indicators without runtime measurement
-import type { Document } from "linkedom";
+import type { Document, Element } from "linkedom";
 
 import { parseHTML } from "@squirrelscan/parser/dom";
 
-import type { CheckResult, CWVHints } from "@squirrelscan/core-contracts";
+import type { CWVHints } from "@squirrelscan/core-contracts";
 
-import { getHostname } from "@squirrelscan/utils";
+import {
+  collectImagePreloadKeys,
+  findLcpCandidates,
+  isImagePreloaded,
+} from "../shared/lcp-candidate";
+
+import {
+  getHostname,
+  querySelectorAllOutsideNoscript,
+  stripNoscriptMarkup,
+} from "@squirrelscan/utils";
+
+// perf/lcp-hints counts at most this many eligible LCP candidates.
+const MAX_LCP_CANDIDATES = 3;
 
 // Known CDN domains that should have preconnect
 const COMMON_CDNS = [
@@ -55,6 +68,60 @@ const THIRD_PARTY_DOMAINS = [
   "datadoghq.com",
 ];
 
+// JavaScript MIME type essences (WHATWG MIME Sniffing). A `type` matching one of
+// these, or an absent/empty `type`, makes a classic script.
+const JS_MIME_TYPES = new Set([
+  "application/ecmascript",
+  "application/javascript",
+  "application/x-ecmascript",
+  "application/x-javascript",
+  "text/ecmascript",
+  "text/javascript",
+  "text/javascript1.0",
+  "text/javascript1.1",
+  "text/javascript1.2",
+  "text/javascript1.3",
+  "text/javascript1.4",
+  "text/javascript1.5",
+  "text/jscript",
+  "text/livescript",
+  "text/x-ecmascript",
+  "text/x-javascript",
+]);
+
+export type ScriptLoading = "blocking" | "async" | "defer" | "inert";
+
+// How a browser loads an external <script src>, following the HTML Standard's
+// "prepare the script element" steps. Module scripts defer by default (`async`
+// makes them async; `defer` does nothing). `nomodule` classic scripts and
+// scripts with any other type (text/plain consent gates, text/partytown,
+// data blocks) are never run by a modern browser, so they block nothing (#424).
+export function scriptLoading(script: Element): ScriptLoading {
+  const typeAttr = script.getAttribute("type");
+  const languageAttr = script.getAttribute("language");
+  let typeString: string;
+  if (typeAttr === "" || (typeAttr === null && !languageAttr)) {
+    typeString = "text/javascript";
+  } else if (typeAttr !== null) {
+    // Only `type` is stripped, and only of ASCII whitespace; `language` is not.
+    typeString = typeAttr.replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, "");
+  } else {
+    typeString = `text/${languageAttr}`;
+  }
+  typeString = typeString.toLowerCase();
+
+  if (JS_MIME_TYPES.has(typeString)) {
+    if (script.hasAttribute("nomodule")) return "inert";
+    if (script.hasAttribute("async")) return "async";
+    if (script.hasAttribute("defer")) return "defer";
+    return "blocking";
+  }
+  if (typeString === "module") {
+    return script.hasAttribute("async") ? "async" : "defer";
+  }
+  return "inert";
+}
+
 function emptyCWVHints(): CWVHints {
   return {
     largeImagesWithoutPreload: [],
@@ -88,26 +155,29 @@ function analyzeCWVHints(
 
   const hints: CWVHints = emptyCWVHints();
 
+  // Every resource below skips <noscript> content: a browser with scripting on
+  // never loads what sits in it (#434).
+
   // Collect resource hints
-  const preloadLinks = doc.querySelectorAll('link[rel="preload"]');
+  const preloadLinks = querySelectorAllOutsideNoscript(doc, 'link[rel="preload"]');
   for (const link of preloadLinks) {
     const href = link.getAttribute("href");
     if (href) hints.preloadTags.push(href);
   }
 
-  const prefetchLinks = doc.querySelectorAll('link[rel="prefetch"]');
+  const prefetchLinks = querySelectorAllOutsideNoscript(doc, 'link[rel="prefetch"]');
   for (const link of prefetchLinks) {
     const href = link.getAttribute("href");
     if (href) hints.prefetchTags.push(href);
   }
 
-  const preconnectLinks = doc.querySelectorAll('link[rel="preconnect"]');
+  const preconnectLinks = querySelectorAllOutsideNoscript(doc, 'link[rel="preconnect"]');
   for (const link of preconnectLinks) {
     const href = link.getAttribute("href");
     if (href) hints.preconnectTags.push(href);
   }
 
-  const dnsPrefetchLinks = doc.querySelectorAll('link[rel="dns-prefetch"]');
+  const dnsPrefetchLinks = querySelectorAllOutsideNoscript(doc, 'link[rel="dns-prefetch"]');
   for (const link of dnsPrefetchLinks) {
     const href = link.getAttribute("href");
     if (href) hints.dnsPrefetchTags.push(href);
@@ -117,7 +187,8 @@ function analyzeCWVHints(
   const headElement = doc.head;
   if (headElement) {
     // Render-blocking stylesheets
-    const stylesheets = headElement.querySelectorAll(
+    const stylesheets = querySelectorAllOutsideNoscript(
+      headElement,
       'link[rel="stylesheet"]:not([media="print"])'
     );
     for (const link of stylesheets) {
@@ -127,33 +198,30 @@ function analyzeCWVHints(
       }
     }
 
-    // Render-blocking scripts (no async/defer)
-    const scripts = headElement.querySelectorAll("script[src]");
+    // Render-blocking scripts (classic, no async/defer)
+    const scripts = querySelectorAllOutsideNoscript(headElement, "script[src]");
     for (const script of scripts) {
       const src = script.getAttribute("src");
-      if (
-        src &&
-        !script.hasAttribute("async") &&
-        !script.hasAttribute("defer")
-      ) {
+      if (src && scriptLoading(script) === "blocking") {
         hints.renderBlockingResources.push(src);
       }
     }
   }
 
   // Analyze all scripts
-  const allScripts = doc.querySelectorAll("script[src]");
+  const allScripts = querySelectorAllOutsideNoscript(doc, "script[src]");
   hints.totalScripts = allScripts.length;
 
   for (const script of allScripts) {
     const src = script.getAttribute("src");
     if (!src) continue;
 
-    if (script.hasAttribute("async")) {
+    const loading = scriptLoading(script);
+    if (loading === "async") {
       hints.asyncScripts++;
-    } else if (script.hasAttribute("defer")) {
+    } else if (loading === "defer") {
       hints.deferScripts++;
-    } else {
+    } else if (loading === "blocking") {
       hints.blockingScripts++;
     }
 
@@ -180,7 +248,7 @@ function analyzeCWVHints(
   }
 
   // Check for fonts without font-display: swap
-  const fontFaces = html.match(/@font-face\s*\{[^}]+\}/g) || [];
+  const fontFaces = stripNoscriptMarkup(html).match(/@font-face\s*\{[^}]+\}/g) || [];
   for (const fontFace of fontFaces) {
     if (!fontFace.includes("font-display")) {
       // Extract font family name
@@ -193,7 +261,8 @@ function analyzeCWVHints(
   const externalDomains = new Set<string>();
 
   // Collect all external domains from resources
-  const allResources = doc.querySelectorAll(
+  const allResources = querySelectorAllOutsideNoscript(
+    doc,
     "script[src], link[href], img[src]"
   );
   for (const resource of allResources) {
@@ -222,7 +291,7 @@ function analyzeCWVHints(
   }
 
   // Check images without dimensions (CLS)
-  const images = doc.querySelectorAll("img");
+  const images = querySelectorAllOutsideNoscript(doc, "img");
   for (const img of images) {
     const src = img.getAttribute("src");
     const width = img.getAttribute("width");
@@ -241,7 +310,7 @@ function analyzeCWVHints(
   }
 
   // Check iframes without dimensions (CLS)
-  const iframes = doc.querySelectorAll("iframe");
+  const iframes = querySelectorAllOutsideNoscript(doc, "iframe");
   for (const iframe of iframes) {
     const src = iframe.getAttribute("src");
     const width = iframe.getAttribute("width");
@@ -252,31 +321,14 @@ function analyzeCWVHints(
     }
   }
 
-  // Check for large images that might be LCP candidates without preload
-  const largeImages = doc.querySelectorAll(
-    'img:not([loading="lazy"]), img[fetchpriority="high"]'
-  );
-  const preloadedImages = new Set(
-    hints.preloadTags.filter(
-      (url) =>
-        url.endsWith(".jpg") ||
-        url.endsWith(".jpeg") ||
-        url.endsWith(".png") ||
-        url.endsWith(".webp") ||
-        url.endsWith(".avif")
-    )
-  );
-
-  // First few images are likely LCP candidates
-  let imageIndex = 0;
-  for (const img of largeImages) {
-    if (imageIndex >= 3) break; // Only check first 3
-
-    const src = img.getAttribute("src");
-    if (src && !preloadedImages.has(src) && !src.startsWith("data:")) {
-      hints.largeImagesWithoutPreload.push(src);
+  // Likely-LCP images without a matching preload. Candidates come from the shared
+  // finder perf/lcp-fetchpriority uses; the first few eligible images count.
+  const preloadKeys = collectImagePreloadKeys(doc, pageUrl);
+  for (const img of findLcpCandidates(doc, MAX_LCP_CANDIDATES)) {
+    if (!isImagePreloaded(img, preloadKeys, pageUrl)) {
+      // Candidates always have a src (findLcpCandidates skips images without one).
+      hints.largeImagesWithoutPreload.push(img.getAttribute("src") as string);
     }
-    imageIndex++;
   }
 
   return hints;
@@ -341,103 +393,4 @@ export function getCWVHints(
   const hints = freezeHints(analyzeCWVHints(doc, html, pageUrl));
   cwvHintsCache.set(doc, hints);
   return hints;
-}
-
-export function validateCWVHints(hints: CWVHints): CheckResult[] {
-  const checks: CheckResult[] = [];
-
-  // LCP: Large images without preload — report the count, not an image dump
-  // (keep in sync with lcp-hints.ts; squirrelscan/squirrelscan#16)
-  if (hints.largeImagesWithoutPreload.length > 0) {
-    const n = hints.largeImagesWithoutPreload.length;
-    checks.push({
-      name: "cwv-lcp-preload",
-      status: "warn",
-      message: `${n} likely-LCP image${n === 1 ? "" : "s"} loaded without preload`,
-      value: n,
-    });
-  }
-
-  // LCP: Render-blocking resources
-  if (hints.renderBlockingResources.length > 3) {
-    checks.push({
-      name: "cwv-render-blocking",
-      status: "warn",
-      message: `${hints.renderBlockingResources.length} render-blocking resources`,
-      items: hints.renderBlockingResources.map((url) => ({ id: url })),
-    });
-  }
-
-  // LCP: Fonts without font-display
-  if (hints.fontsWithoutSwap.length > 0) {
-    checks.push({
-      name: "cwv-font-display",
-      status: "warn",
-      message: `${hints.fontsWithoutSwap.length} font(s) without font-display: swap`,
-      items: hints.fontsWithoutSwap.map((url) => ({ id: url })),
-    });
-  }
-
-  // LCP: Missing preconnect
-  if (hints.missingPreconnect.length > 0) {
-    checks.push({
-      name: "cwv-preconnect",
-      status: "warn",
-      message: `Missing preconnect for ${hints.missingPreconnect.length} CDN(s)`,
-      items: hints.missingPreconnect.map((url) => ({ id: url })),
-    });
-  }
-
-  // CLS: Images without dimensions
-  if (hints.imagesWithoutDimensions.length > 0) {
-    const severity = hints.imagesWithoutDimensions.length > 5 ? "fail" : "warn";
-    checks.push({
-      name: "cwv-cls-images",
-      status: severity,
-      message: `${hints.imagesWithoutDimensions.length} image(s) without width/height (CLS risk)`,
-      items: hints.imagesWithoutDimensions.map((url) => ({ id: url })),
-    });
-  }
-
-  // CLS: Iframes without dimensions
-  if (hints.iframesWithoutDimensions.length > 0) {
-    checks.push({
-      name: "cwv-cls-iframes",
-      status: "warn",
-      message: `${hints.iframesWithoutDimensions.length} iframe(s) without dimensions`,
-      items: hints.iframesWithoutDimensions.map((url) => ({ id: url })),
-    });
-  }
-
-  // INP: Third-party scripts
-  if (hints.thirdPartyScripts.length > 5) {
-    checks.push({
-      name: "cwv-third-party",
-      status: "warn",
-      message: `${hints.thirdPartyScripts.length} third-party scripts (may impact INP)`,
-      items: hints.thirdPartyScripts.map((url) => ({ id: url })),
-    });
-  }
-
-  // Script loading analysis
-  if (hints.blockingScripts > 3) {
-    checks.push({
-      name: "cwv-blocking-scripts",
-      status: "warn",
-      message: `${hints.blockingScripts} blocking scripts (consider async/defer)`,
-      value: `${hints.asyncScripts} async, ${hints.deferScripts} defer, ${hints.blockingScripts} blocking`,
-    });
-  }
-
-  // Resource hints usage
-  if (hints.preloadTags.length > 0 || hints.preconnectTags.length > 0) {
-    checks.push({
-      name: "cwv-resource-hints",
-      status: "pass",
-      message: "Resource hints in use",
-      value: `${hints.preloadTags.length} preload, ${hints.preconnectTags.length} preconnect`,
-    });
-  }
-
-  return checks;
 }

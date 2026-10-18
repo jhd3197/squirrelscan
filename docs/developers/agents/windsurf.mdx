@@ -26,7 +26,7 @@ Run this in Windsurf's integrated terminal.
   </Tab>
 </Tabs>
 
-Local audits are free, need no account, and run entirely on your machine. Verify with `squirrel --version`.
+Local audits run entirely on your machine. Signed out, they need no account and cost nothing; signed-in audits spend credits. Verify with `squirrel --version`.
 
 ## 2. Add the MCP server
 
@@ -88,7 +88,7 @@ Scope large sites so runs stay fast and cheap:
 Audit only /blog/* on example.com, cap it at 20 pages, and list the SEO regressions.
 ```
 
-<Tip>Windsurf does not implement the [Agent Skills](https://agentskills.io) standard, so `npx skills add` has no effect here, unlike Cursor or Claude Code. The MCP tools and the CLI are the two supported paths.</Tip>
+<Tip>Windsurf does not implement the [Agent Skills](https://agentskills.io) standard, so `squirrel skills install` has no effect here, unlike Cursor or Claude Code. The MCP tools and the CLI are the two supported paths.</Tip>
 
 ## 4. The fix loop
 
@@ -102,7 +102,7 @@ Re-auditing matters: a fix that looks right in the diff can still fail the rule,
 
 ## What squirrelscan checks, and what it does not
 
-The audit covers 260+ rules, rolling up into four scores: **SEO**, **Performance**, **Security**, and **Agents** (how well AI crawlers and agents can consume the site).
+The audit covers 300+ rules, rolling up into four scores: **SEO**, **Performance**, **Security**, and **Agents** (how well AI crawlers and agents can consume the site).
 
 Two limits worth knowing before you point Cascade at a site:
 

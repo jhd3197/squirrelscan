@@ -11,12 +11,12 @@ A legitimate integration always targets the provider's own host, `accounts.googl
 
 ## What squirrel checks
 
-The rule runs on every crawled page and emits at most one check named `brand-impersonation`. It fires only when all of the following hold on the same page: the page has a credential affordance, meaning an `input[type="password"]` or sign-in copy in the title or body text; the text matches a brand's lexicon; the text also matches one of that brand's action cues; and a credential control whose own label names that brand points at a host that is neither the brand's legitimate host nor the site's own registrable domain.
+The rule runs on every crawled page and emits at most one check named `brand-impersonation`. It fires only when all of the following hold on the same page: the page has a credential affordance, meaning an `input[type="password"]`, sign-in copy in the title or body text, or a link whose own label says `sign in`, `log in` or `login` (a link labelled only `verify` or `continue with` is not enough by itself); the text matches a brand's lexicon; the text also matches one of that brand's action cues; and a credential control whose own label names that brand points at a host that is neither the brand's legitimate host nor the site's own registrable domain.
 
 - Info when this is the only integrity signal on the page. Message: `Possible Calendly brand impersonation (single signal — review)`.
 - Fail when at least two distinct integrity signals fire on the page. Message: `Likely phishing kit impersonating Calendly (3 corroborating integrity signals)`.
 
-Six brands are covered: Google, Microsoft, Calendly, DocuSign, ClickFunnels and Kajabi, each with its own lexicon, action cues and legitimate hosts. The credential surface is deliberately narrow: form actions on forms that contain a password field, and links whose own text matches `sign in`, `log in`, `login`, `continue with` or `verify`. A footer link to an unrelated third party is not read as a credential destination. Sibling subdomains count as the site's own surface, resolved through the Public Suffix List, so a link from `www.acme.com` to `app.acme.com` is spared.
+Six brands are covered: Google, Microsoft, Calendly, DocuSign, ClickFunnels and Kajabi, each with its own lexicon, action cues and legitimate hosts. The credential surface is deliberately narrow: form actions on forms that contain a password field, and links whose own text matches `sign in`, `log in`, `login`, `continue with` or `verify`. A footer link to an unrelated third party is not read as a credential destination. Body text is read with a space at every element boundary as well as without, so `<h1>Welcome</h1><a>Sign in with Google</a>` is seen as sign-in copy whether or not the markup has whitespace between its elements. Body text and each link's label are read with invisible characters (a soft hyphen, zero-width spaces) removed and every run of whitespace as one space, so a newline, `&nbsp;`, a `<br>` or a zero-width space inside `Sign in with Google` does not hide it. Sibling subdomains count as the site's own surface, resolved through the Public Suffix List, so a link from `www.acme.com` to `app.acme.com` is spared.
 
 The four page-level integrity rules share one detector module and each computes the full signal set for its own page. Escalation to fail requires two distinct signals from `brand-impersonation`, `obfuscated-script`, `fake-auth-overlay` and `seo-doorway`.
 
@@ -59,8 +59,9 @@ disable = ["integrity/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["integrity/brand-impersonation"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
@@ -78,7 +79,7 @@ Site Integrity findings ship in every audit next to the SEO, performance and age
 
 ## Check your site
 
-Run `squirrel audit https://example.com` and open the Site Integrity section of the report. Each impersonation is listed by page with the brand and the off-brand host it targets. Local audits are free.
+Run `squirrel audit https://example.com` and open the Site Integrity section of the report. Each impersonation is listed by page with the brand and the off-brand host it targets. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">

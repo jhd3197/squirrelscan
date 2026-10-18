@@ -20,6 +20,8 @@ The rule runs on every crawled page. It counts every `img[src]` with and without
 
 Severity info, weight 3. The responsive count adds the `srcset` images and the `<picture>` elements together, so an `<img srcset>` inside a `<picture>` contributes to both halves of that sum.
 
+Elements inside `<noscript>` are skipped: a browser with scripting enabled reads `<noscript>` content as plain text, so nothing in it loads or renders. See [content inside noscript](/rules#content-inside-noscript).
+
 ## How to fix it
 
 ```html
@@ -64,13 +66,14 @@ disable = ["images/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["images/srcset"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
 - [images/picture-element](/rules/images/picture-element): the picture markup this rule also counts.
-- [images/responsive-size](/rules/images/responsive-size): small images with no responsive variants.
+- [images/responsive-size](/rules/images/responsive-size): small images whose files are heavier than their displayed size needs.
 - [images/image-file-size](/rules/images/image-file-size): the file weight srcset is there to reduce.
 - [images/modern-format](/rules/images/modern-format): the other half of the same optimisation.
 
@@ -83,7 +86,7 @@ Images findings ship in every audit next to the SEO, performance and agent exper
 
 ## Check your site
 
-Run `squirrel audit https://example.com` and open the Images section of the report. Each page is reported with its responsive and fixed-size image counts. Local audits are free.
+Run `squirrel audit https://example.com` and open the Images section of the report. Each page is reported with its responsive and fixed-size image counts. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">

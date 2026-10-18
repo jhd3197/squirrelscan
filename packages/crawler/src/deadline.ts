@@ -2,7 +2,10 @@
 // budget that bounds a whole sequence of them (squirrelscan/repo#1733).
 
 import { PROBE_NOT_ATTEMPTED_ERROR } from "@squirrelscan/core-contracts/storage";
+import { fetchUndecoded } from "@squirrelscan/utils/response-body";
 import { safeRedirectFetch } from "@squirrelscan/utils/safe-fetch";
+
+import type { RefusalLog } from "./refusals";
 
 /**
  * Run a request under a deadline that stays armed until its body has been read.
@@ -16,6 +19,13 @@ import { safeRedirectFetch } from "@squirrelscan/utils/safe-fetch";
  *
  * `use` must finish with the response (read or cancel its body) before it
  * returns — the deadline is disarmed as soon as it does.
+ *
+ * The request is then aborted (#766). Cancelling a body does not close Bun's
+ * connection: it goes on downloading whatever the origin sends until the
+ * request's signal aborts, and with the deadline disarmed nothing else would
+ * abort it, so a capped read of an endless body held the socket open, and kept
+ * receiving, for as long as the origin kept sending. Aborting a request whose
+ * body was read to the end is a no-op; the connection stays pooled.
  */
 export async function withRequestDeadline<T>(
   timeoutMs: number,
@@ -28,6 +38,7 @@ export async function withRequestDeadline<T>(
     return await use(await perform(controller.signal));
   } finally {
     clearTimeout(timeout);
+    controller.abort();
   }
 }
 
@@ -36,6 +47,10 @@ export async function withRequestDeadline<T>(
  * the crawl preamble (robots, llms, markdown, well-known, agent-access, rsl,
  * sitemaps) uses. Manual redirects apply the per-hop scheme allowlist and strip
  * secret customHeaders when the origin changes (#1395).
+ *
+ * Every hop is fetched undecoded, so a Content-Encoding bomb on any of them is
+ * never inflated by the runtime; `readBodyCapped` decodes the final body
+ * within its cap (#2717).
  */
 export function safeFetchWithDeadline<T>(
   url: string,
@@ -45,10 +60,27 @@ export function safeFetchWithDeadline<T>(
 ): Promise<T> {
   return withRequestDeadline(
     timeoutMs,
-    (signal) => safeRedirectFetch(url, { ...options, signal }).then((result) => result.response),
+    (signal) =>
+      safeRedirectFetch(url, { ...options, signal }, fetchUndecoded).then(
+        (result) => result.response,
+      ),
     use,
   );
 }
+
+/**
+ * Admission for one discovery probe request (#409): resolves once `send` may
+ * run, runs it, and releases whatever it held when `send` settles. The crawl
+ * passes its per-host scheduler here, so the probes queue behind
+ * `per_host_concurrency` and `per_host_delay_ms` like every page fetch does.
+ *
+ * `send` must do its own budget check: time spent queued here is preamble time
+ * too, so a request that waited past the budget has to be skipped, not sent.
+ */
+export type ProbeGate = <T>(url: string, send: () => Promise<T>) => Promise<T>;
+
+/** No throttle: `send` runs at once. The default for callers outside a crawl. */
+export const ungated: ProbeGate = (_url, send) => send();
 
 /**
  * A wall-clock budget shared by every request in one crawl phase.
@@ -68,6 +100,12 @@ export function safeFetchWithDeadline<T>(
 export interface PhaseBudget {
   /** Epoch ms past which no further request in the phase may start. */
   readonly deadlineAt: number;
+  /**
+   * Where the phase's probes note requests the site refused. Carried on
+   * the budget because it already reaches every root probe; absent outside a
+   * crawl, where a refusal is still treated as unanswered but not recorded.
+   */
+  readonly refusals?: RefusalLog;
 }
 
 /**
@@ -78,8 +116,12 @@ export interface PhaseBudget {
  */
 export const BUDGET_EXHAUSTED_ERROR = PROBE_NOT_ATTEMPTED_ERROR;
 
-export function createPhaseBudget(totalMs: number, startedAt: number = Date.now()): PhaseBudget {
-  return { deadlineAt: startedAt + Math.max(0, totalMs) };
+export function createPhaseBudget(
+  totalMs: number,
+  startedAt: number = Date.now(),
+  refusals?: RefusalLog,
+): PhaseBudget {
+  return { deadlineAt: startedAt + Math.max(0, totalMs), ...(refusals ? { refusals } : {}) };
 }
 
 /** Milliseconds left on the budget, floored at 0. `Infinity` when unbudgeted. */

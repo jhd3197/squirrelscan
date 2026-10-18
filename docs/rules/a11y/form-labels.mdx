@@ -14,8 +14,11 @@ Where a visible label does not fit the design, `aria-label` or `aria-labelledby`
 One check, `form-labels`, at severity error. It covers every `<input>` except types `hidden`, `submit`, `button`, `reset` and `image`, plus every `<textarea>` and `<select>`.
 
 - Fail when a control has none of the following: an ancestor `<label>`; a `<label for="...">` whose value matches the control's `id`; an `aria-label`; an `aria-labelledby`; a `title`. Report message: `N form input(s) without labels`. Each control is listed by its `name`, falling back to its `id` and then to its type.
-- Pass with `All form inputs have labels`.
+- `form-labels-unconfirmed` warns with `N form input(s) without labels may be hidden by a style (unconfirmed)` for unlabeled controls a style may hide in a way squirrel cannot settle.
+- Pass with `All form inputs have labels`, or `All form inputs in the accessibility tree have labels` with `hiddenWithoutLabel` when unlabeled controls were skipped as hidden. The pass carries `inputsChecked`.
 - Info with `No form inputs found`.
+
+A control out of the accessibility tree has nothing to announce, so it is not reported: one with the `hidden` attribute (except `hidden="until-found"`), `aria-hidden="true"`, `display: none` on itself or an ancestor or `visibility: hidden` on itself or an ancestor, set inline or by a `<style>` rule squirrel can decide (such as `.closed { display: none }`), or inside a closed `<dialog>` or an unopened `popover`. It still needs a label before it can be shown. Hiding squirrel cannot settle is reported as unconfirmed instead: an inline style it cannot read exactly, a `<style>` rule it cannot decide, and, on a page that also loads an external stylesheet, hiding from a `<style>` rule or visibility inherited from an ancestor. External stylesheets are not read, so a control hidden only by the site's external CSS, such as a closed modal, is still reported. See [What squirrel can see](/rules/a11y/button-name#what-squirrel-can-see) for the details.
 
 A `title` attribute satisfies this check. It shows only on hover, so it is a weaker fix than a real label, but it does produce an accessible name.
 
@@ -59,8 +62,9 @@ disable = ["a11y/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["a11y/form-labels"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
@@ -79,7 +83,7 @@ Accessibility findings ship in every audit next to the SEO, performance and agen
 
 ## Check your site
 
-Run `squirrel audit https://example.com` and open the Accessibility section of the report. Every unlabeled control is listed by its name attribute. Local audits are free.
+Run `squirrel audit https://example.com` and open the Accessibility section of the report. Every unlabeled control is listed by its name attribute. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">

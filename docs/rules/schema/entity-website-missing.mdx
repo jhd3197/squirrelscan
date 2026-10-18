@@ -13,7 +13,7 @@ This is an informational finding rather than an error. A site without it is behi
 
 ## What squirrel checks
 
-The rule runs once per crawl, reads the [entity map](/entity-map) rather than the pages, and emits a single check named `entity-website-missing`.
+The rule runs once per crawl, reads the [entity map](/guides/entity-map) rather than the pages, and emits a single check named `entity-website-missing`.
 
 - Skipped with the message `No entity map was built for this audit` and the reason `entity-map-unavailable` when the run produced no map. This is not the same as a site with no structured data, and the rule refuses to conflate them: passing here would assert it had checked something it never looked at.
 - Reports at info with the message `This site declares no JSON-LD entities on any crawled page` when the map exists and is empty.
@@ -46,7 +46,7 @@ Declare the `WebSite` once, with an `@id`, and reference it from every page node
 }
 ```
 
-Every major SEO plugin emits this shape by default. If yours does not, the `@graph` above is the whole fix. See [fixing structured data identity](/entity-map/fixing).
+Every major SEO plugin emits this shape by default. If yours does not, the `@graph` above is the whole fix. See [fixing structured data identity](/guides/entity-map/fixing).
 
 | | |
 |---|---|
@@ -77,8 +77,9 @@ disable = ["schema/*"]
 ```toml squirrel.toml
 [rules]
 enable = ["schema/entity-website-missing"]
-disable = ["*"]
 ```
+
+`enable` replaces the default `["*"]`, so this is the only rule selected. Leave `disable` out: a rule that matches any `disable` pattern is skipped even when `enable` names it. Only an `enabled` setting under a rule's own `[rule_options]` table overrides both lists.
 
 ## Related rules
 
@@ -97,7 +98,7 @@ Entity findings are site-wide and ship in every audit, next to the per-page stru
 
 ## Check your site
 
-Run `squirrel audit https://example.com`, then `squirrel entities` to see the graph the finding came from. Local audits are free.
+Run `squirrel audit https://example.com`, then `squirrel entities` to see the graph the finding came from. Signed-out local audits need no account and cost nothing. Signed-in audits spend credits.
 
 <CardGroup cols={2}>
   <Card title="Install squirrel" icon="terminal" href="/quickstart">
