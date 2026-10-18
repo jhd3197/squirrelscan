@@ -341,7 +341,8 @@ export function generateConsoleReport(
           // the items the audit left out of the list to those past the preview;
           // a fully covered rule's groups account for every item.
           const listedItems = uncoveredItems(check.items, coverage);
-          const notListed = coverage.mode === "full" ? 0 : itemsNotListed(check);
+          const notListed =
+            coverage.mode === "full" ? 0 : itemsNotListed(check);
           if (listedItems.length > 0) {
             const maxItems = 5;
             const itemsToShow = listedItems.slice(0, maxItems);
