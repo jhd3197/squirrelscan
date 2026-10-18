@@ -609,6 +609,9 @@ export function renderLlm(report: AuditReport, options?: LlmRenderOptions): stri
               ? `${indent(2)}Items (${sampledItems.length}/${itemsTotal}):`
               : `${indent(2)}Items (${itemsTotal}):`,
           );
+        } else if (itemsTotal > 0) {
+          // The site-wide lines took the whole budget: say what is left out, never drop it.
+          lines.push(`${indent(2)}Items (0/${itemsTotal}): none listed`);
         }
   
         for (const item of sampledItems) {

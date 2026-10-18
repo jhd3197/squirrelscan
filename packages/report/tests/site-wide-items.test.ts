@@ -85,6 +85,17 @@ describe("rendering", () => {
     }
   });
 
+  test("llm says how many items it leaves out when site-wide lines used the whole budget", () => {
+    // 5 site-wide lines fill the 5-item budget; the ordinary item has no slot left.
+    const items = [
+      ...Array.from({ length: 5 }, (_, i) => item(`shared-${i}`, 41)),
+      item("only-here", 2),
+    ];
+    const out = renderLlm(report(items, 45));
+    expect(out).toContain("Items (0/1): none listed");
+    expect(out).not.toContain("only-here");
+  });
+
   test("a near-miss names the pages it misses", () => {
     const out = renderText(report([item("#aaa on #bbb", 43)], 45));
     expect(out).toContain("Site-wide (43 of 45 pages): #aaa on #bbb (except: /p43, /p44)");

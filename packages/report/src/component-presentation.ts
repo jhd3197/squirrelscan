@@ -113,7 +113,16 @@ export function uncoveredItems(
     }
     const remaining = item.sourcePages.filter((page) => uncovered.has(page));
     if (remaining.length === 0) continue;
-    out.push({ ...item, sourcePages: remaining });
+    // `pageCount` (pages the item is on, listed or not) loses the pages the groups took, or the
+    // rows would count them again as "more pages" the report left out.
+    const dropped = new Set(item.sourcePages).size - new Set(remaining).size;
+    out.push({
+      ...item,
+      sourcePages: remaining,
+      ...(typeof item.pageCount === "number"
+        ? { pageCount: Math.max(0, item.pageCount - dropped) }
+        : {}),
+    });
   }
   return out;
 }

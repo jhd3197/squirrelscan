@@ -8,7 +8,7 @@ import { renderLlm } from "../src/output/llm";
 import { renderMarkdown } from "../src/output/markdown";
 import { renderText } from "../src/output/text";
 import { groupIssuesByCategory } from "../src/grouping";
-import { fixGroupLine, ruleFixCoverage } from "../src/component-presentation";
+import { fixGroupLine, ruleFixCoverage, uncoveredItems } from "../src/component-presentation";
 
 function occurrence(pageUrl: string, overrides: Partial<ComponentOccurrence> = {}): ComponentOccurrence {
   return {
@@ -244,5 +244,26 @@ describe("no groups: byte-identical to the pre-feature rendering", () => {
 
   test("markdown", () => {
     expect(renderMarkdown(withEvidence)).toBe(renderMarkdown(withoutEvidence));
+  });
+});
+
+describe("uncoveredItems keeps an item's page count in step with its narrowed pages", () => {
+  const pages = ["https://example.test/a", "https://example.test/b", "https://example.test/c"];
+
+  test("pages the groups took leave the item's pageCount too", () => {
+    // 3 listed pages out of 5 the item is on; one listed page is covered by a group.
+    const out = uncoveredItems(
+      [{ id: "x", sourcePages: pages, pageCount: 5 }],
+      { mode: "partial", groups: [], uncoveredPages: [pages[1]!, pages[2]!] },
+    );
+    expect(out).toEqual([{ id: "x", sourcePages: [pages[1], pages[2]], pageCount: 4 }]);
+  });
+
+  test("an item with no pageCount does not gain one", () => {
+    const out = uncoveredItems(
+      [{ id: "x", sourcePages: pages }],
+      { mode: "partial", groups: [], uncoveredPages: [pages[2]!] },
+    );
+    expect(out).toEqual([{ id: "x", sourcePages: [pages[2]] }]);
   });
 });
