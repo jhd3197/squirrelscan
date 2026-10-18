@@ -453,7 +453,7 @@ function fold(element: DomNode, depth: number, options: Context): Folded {
       [
         "kind",
         name === "input"
-          ? (element.getAttribute?.("type") ?? "text").toLowerCase().slice(0, 12)
+          ? (element.getAttribute?.("type") || "text").toLowerCase().slice(0, 12)
           : name,
       ],
     ];
@@ -823,7 +823,7 @@ export function skeletonFeatures(
         break;
     }
     const kind = node.attrs.find(([k]) => k === "kind")?.[1];
-    if (typeof kind === "string") {
+    if (typeof kind === "string" && kind !== "") {
       const key =
         `kind${kind[0]!.toUpperCase()}${kind.slice(1)}` as (typeof SKELETON_FEATURES)[number];
       if (key in f) f[key] += times;

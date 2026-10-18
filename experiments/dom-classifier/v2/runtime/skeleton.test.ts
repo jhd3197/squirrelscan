@@ -114,6 +114,34 @@ describe("skeleton", () => {
     expect(out).toContain('kind="comments"');
   });
 
+  test("an empty form-control type scores like a missing one and never throws (#2976)", () => {
+    const withType = (control: string) =>
+      page(`<main><h1>Join</h1><form>${control}<button>Go</button></form></main>`);
+    const empty = doc(withType('<input type="">'));
+    const missing = doc(withType("<input>"));
+    expect(() => skeletonFeatures(buildSkeleton(empty))).not.toThrow();
+    expect(skeleton(empty)).toBe(skeleton(missing));
+    expect(skeleton(empty)).not.toContain('kind=""');
+    expect(skeletonFeatures(buildSkeleton(empty))).toEqual(
+      skeletonFeatures(buildSkeleton(missing)),
+    );
+    // The same fallback holds for an empty type next to a typed control.
+    expect(() =>
+      skeletonFeatures(buildSkeleton(doc(withType('<input type=""><input type="email">')))),
+    ).not.toThrow();
+  });
+
+  test("the kind feature lookup ignores an empty kind instead of indexing into it (#2976)", () => {
+    const f = skeletonFeatures({
+      tag: "main",
+      attrs: [],
+      kids: [{ tag: "field", attrs: [["kind", ""]], kids: [], n: 1 }],
+      n: 1,
+    });
+    expect(f.field).toBe(1);
+    expect(f.nodes).toBe(2);
+  });
+
   test("XML output is balanced and compact is one node per line", () => {
     const html = page(
       '<header><nav><ul><li><a href="/">Home</a></li></ul></nav></header><main><article><h1>T</h1><p>x</p></article></main><footer><p>c</p></footer>',
