@@ -59,6 +59,15 @@ describe("threshold edges", () => {
     expect(siteWideItem({ id: "x" }, 100)).toBeUndefined();
   });
 
+  test("a link that carries its own per-page sources is never site-wide", () => {
+    // pub#837/#846: its rows, or one region line, already say where it sits.
+    const link: CheckItem = {
+      ...item("x", 100),
+      sources: [{ page: pageUrl(0), links: 1, sections: { footer: 1 } }],
+    };
+    expect(siteWideItem(link, 100)).toBeUndefined();
+  });
+
   test("duplicate sourcePages do not inflate the count", () => {
     const duplicated: CheckItem = { id: "x", sourcePages: [pageUrl(0), pageUrl(0), pageUrl(1)] };
     expect(siteWideItem(duplicated, 3)).toBeUndefined();

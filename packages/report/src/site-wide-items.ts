@@ -93,6 +93,10 @@ export function siteWideItem(
 ): SiteWideItem | undefined {
   const sourcePages = item.sourcePages;
   if (!sourcePages || total < SITE_WIDE_MIN_PAGES) return undefined;
+  // A link that says how it sits on each page (pub#837) is presented by its own rows, or by one
+  // region line when it sits in a shared region (pub#846). Collapsing it as well would drop the
+  // sections those say, so it is never site-wide here.
+  if ((item.sources?.length ?? 0) > 0) return undefined;
   const pages = new Set(sourcePages);
   if (pages.size < SITE_WIDE_MIN_PAGES) return undefined;
   if (pages.size < total * SITE_WIDE_MIN_PAGE_RATIO) return undefined;
