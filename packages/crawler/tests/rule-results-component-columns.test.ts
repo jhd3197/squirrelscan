@@ -11,7 +11,7 @@
 // 2. An OLDER binary opening a NEWER store. The migration runner is gated on
 //    `currentVersion < SCHEMA_VERSION`, so a store stamped ABOVE the binary's
 //    version skips migrations entirely rather than refusing or throwing — the
-//    same branch an old CLI takes against a v30 store. Pinned here as behaviour,
+//    same branch an old CLI takes against a newer store. Pinned here as behaviour,
 //    not changed.
 
 import { describe, expect, test } from "bun:test";
@@ -123,6 +123,54 @@ describe("rule_results component-evidence columns", () => {
         EVIDENCE,
       );
       await run(reopened.close?.() ?? Effect.void);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a store at version 34, the last one without the evidence columns, migrates to the current version", async () => {
+    const { dir, file } = tempDbPath();
+    try {
+      const seed = new SQLiteStorage(file);
+      await run(seed.init());
+      await run(seed.close?.() ?? Effect.void);
+
+      // Versions 30 to 34 belong to other columns; the evidence columns are
+      // 35 and 36, so a store stamped 34 has none of the four.
+      const raw = new Database(file);
+      for (const column of [
+        "component_occurrences",
+        "component_evidence",
+        "site_resource_occurrences",
+        "site_resource_evidence",
+      ]) {
+        raw.exec(`ALTER TABLE rule_results DROP COLUMN ${column}`);
+      }
+      raw.exec("DELETE FROM schema_version");
+      raw.prepare("INSERT INTO schema_version (version) VALUES (?)").run(34);
+      raw.close();
+
+      const reopened = new SQLiteStorage(file);
+      await run(reopened.init());
+      await run(
+        reopened.saveRuleResults("crawl-1", "https://e.test/a", "content/stale-copyright", [check()]),
+      );
+      const grouped = await run(reopened.getRuleResultsGrouped("crawl-1"));
+      expect(grouped.byRuleId.get("content/stale-copyright")![0]!.componentOccurrences).toEqual(
+        EVIDENCE,
+      );
+      await run(reopened.close?.() ?? Effect.void);
+
+      const raw2 = new Database(file);
+      expect(
+        (raw2.prepare("SELECT version FROM schema_version").get() as { version: number }).version,
+      ).toBe(SCHEMA_VERSION);
+      const columns = (
+        raw2.prepare("PRAGMA table_info(rule_results)").all() as Array<{ name: string }>
+      ).map((column) => column.name);
+      expect(columns).toContain("site_resource_occurrences");
+      expect(columns).toContain("site_resource_evidence");
+      raw2.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
