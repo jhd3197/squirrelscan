@@ -1,0 +1,34 @@
+[project]
+name = "dom-classifier-eval"
+version = "0.0.0"
+description = "Page-type head eval at a fixed precision (#2977). Experiment code: not published."
+requires-python = ">=3.12"
+dependencies = ["numpy>=2.0"]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.8", "basedpyright>=1.20"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["F", "E", "W", "I", "C", "B", "UP"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+
+[tool.basedpyright]
+include = ["head_eval.py", "test_head_eval.py"]
+pythonVersion = "3.12"
+reportMissingTypeStubs = false
+# numpy stubs return Any from astype, comparisons and shape, and argparse/json hand back Any:
+# narrowing happens in the as_* helpers and the Args class instead.
+reportAny = false
+reportUnusedCallResult = false
+reportImplicitStringConcatenation = false
+# Args is an argparse.Namespace that parse_args fills in.
+reportUninitializedInstanceVariable = false

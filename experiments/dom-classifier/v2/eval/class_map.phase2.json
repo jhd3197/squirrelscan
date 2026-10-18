@@ -1,0 +1,57 @@
+{
+  "classes": ["editorial", "listing", "product_detail", "about", "contact", "legal", "docs", "event", "other"],
+  "other_class": "other",
+  "truth": {
+    "map": {
+      "blog_post": "editorial",
+      "article": "editorial",
+      "product_listing": "listing",
+      "listing_index": "listing"
+    },
+    "default": "other"
+  },
+  "heads": {
+    "bundled": {
+      "map": {
+        "article": "editorial",
+        "blog_post": "editorial",
+        "product_listing": "listing",
+        "listing_index": "listing",
+        "pricing": "other",
+        "homepage": null
+      },
+      "default": null,
+      "cannot_answer": ["event"],
+      "shipped_bars": {
+        "homepage": 0.3,
+        "product_detail": 0.94,
+        "product_listing": 0.98,
+        "article": 0.95,
+        "blog_post": 0.74,
+        "about": 0.77,
+        "contact": 0.68,
+        "docs": 0.87,
+        "legal": 0.56,
+        "pricing": 0.93,
+        "listing_index": 0.97,
+        "other": 0.91
+      }
+    },
+    "skeleton": {
+      "map": {},
+      "default": null,
+      "cannot_answer": [],
+      "shipped_bars": {
+        "about": 0.85,
+        "contact": 0.5,
+        "docs": 1.01,
+        "editorial": 0.8,
+        "event": 1.01,
+        "legal": 0.9,
+        "listing": 0.95,
+        "product_detail": 0.85,
+        "other": 0.75
+      }
+    }
+  }
+}
