@@ -114,6 +114,8 @@ export interface HtmlRenderOptions {
    * or the caller supplies one, as before; a local audit carries neither.
    */
   offline?: boolean;
+  /** List the rules that passed after the issues (`--include-passed`). */
+  includePassed?: boolean;
 }
 
 /**

@@ -34,6 +34,7 @@ squirrel report [id] [options]
 | `--publish` | `-p` | Publish report to reports.squirrelscan.com | `false` |
 | `--visibility` | | Visibility: `public`, `unlisted`, `private` | `public` |
 | `--summary` | | Print only the score, category breakdown, and issue counts — no per-issue detail. Console format only | `false` |
+| `--include-passed` | | Also list the rules that passed, with how many pages each passed on. See [List what passed](#list-what-passed) | `false` |
 
 ## Publishing
 
@@ -181,6 +182,18 @@ Show multiple categories:
 ```bash
 squirrel report --category core,links,images
 ```
+
+### List what passed
+
+A report lists issues and counts the checks that passed. Add `--include-passed` to also list the rules that passed:
+
+```bash
+squirrel report --include-passed
+```
+
+A rule is listed when it passed on at least one page and has no warnings or errors. Each rule shows how many pages it passed on, or `site-wide` for a rule that checks the website once. It works with every `--format`. In `json` the list is `passedRules`.
+
+A report loaded with `--input` holds no passing checks, so it lists none.
 
 ### Diff reports
 

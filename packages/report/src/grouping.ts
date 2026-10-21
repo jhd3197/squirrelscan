@@ -551,3 +551,88 @@ export function flattenIssuesBySeverity(categories: GroupedCategory[]): FlatIssu
     return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   });
 }
+
+/** A rule that ran and found nothing to report, for `--include-passed`. */
+export interface PassedRule {
+  id: string;
+  name: string;
+  /** Category code, e.g. "core". */
+  categoryCode: string;
+  /** Category display name, e.g. "Core SEO". */
+  categoryName: string;
+  /**
+   * Pages the rule passed on. 0 for a site-scope rule, which checks the site
+   * once rather than each page.
+   */
+  pages: number;
+}
+
+/**
+ * The rules that passed: at least one passing check and no failing or warning
+ * one. {@link groupIssuesByCategory} drops passes, so without this a report
+ * says how many checks passed but never which.
+ *
+ * Info and skipped checks neither qualify nor disqualify a rule. A capped
+ * published report and a JSON report read back with `--input` hold no pass
+ * rows, so they list nothing.
+ *
+ * Ordered like {@link flattenIssuesBySeverity} without the severity key:
+ * category priority, category code, rule weight, rule id.
+ */
+export function listPassedRules(
+  ruleResults: Record<
+    string,
+    {
+      meta: { name: string; category: string; weight: number };
+      checks: ReadonlyArray<{ status: string; pageUrl?: string; pages?: string[] }>;
+    }
+  >
+): PassedRule[] {
+  const passed: Array<PassedRule & { weight: number }> = [];
+  for (const [ruleId, result] of Object.entries(ruleResults)) {
+    const pages = new Set<string>();
+    let hasPass = false;
+    let hasIssue = false;
+    for (const check of result.checks) {
+      if (check.status === "fail" || check.status === "warn") {
+        hasIssue = true;
+        break;
+      }
+      if (check.status !== "pass") continue;
+      hasPass = true;
+      if (check.pageUrl) pages.add(check.pageUrl);
+      for (const page of check.pages ?? []) pages.add(page);
+    }
+    if (!hasPass || hasIssue) continue;
+
+    const category = normalizeCategoryCode(result.meta.category);
+    const categoryCode = isValidCategory(category) ? category : OTHER_CATEGORY;
+    passed.push({
+      id: ruleId,
+      name: result.meta.name,
+      categoryCode,
+      categoryName: getCategoryName(categoryCode),
+      pages: pages.size,
+      weight: result.meta.weight,
+    });
+  }
+
+  return passed
+    .sort((a, b) => {
+      const priDiff = getCategoryPriority(b.categoryCode) - getCategoryPriority(a.categoryCode);
+      if (priDiff !== 0) return priDiff;
+      if (a.categoryCode !== b.categoryCode) {
+        return a.categoryCode < b.categoryCode ? -1 : 1;
+      }
+      const weightDiff = b.weight - a.weight;
+      if (weightDiff !== 0) return weightDiff;
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    })
+    .map(({ weight: _, ...rule }) => rule);
+}
+
+/** Where a passed rule held: "12 pages", "1 page", or "site-wide". */
+export function passedRuleScope(rule: PassedRule): string {
+  if (rule.pages === 0) return "site-wide";
+  return `${rule.pages} page${rule.pages === 1 ? "" : "s"}`;
+}

@@ -232,6 +232,11 @@ export const report = defineCommand({
       description:
         "Print only the score, category breakdown, and issue counts, with no per-issue detail (console format only)",
     },
+    includePassed: {
+      type: "boolean",
+      description:
+        "Also list the rules that passed, with how many pages each passed on",
+    },
   },
   async run({ args }) {
     // Loud warning for an unreadable/corrupt session (EACCES, corrupt JSON,
@@ -256,6 +261,23 @@ export const report = defineCommand({
     if (args.summary && (args.diff || args.regressionSince || args.list)) {
       console.error(
         "--summary is not supported with --diff, --regression-since, or --list"
+      );
+      return safeExit(1);
+    }
+
+    // Same reasoning as --summary above: neither path renders a report.
+    if (args.includePassed && args.publish) {
+      console.error(
+        "--include-passed has no effect when combined with --publish"
+      );
+      return safeExit(1);
+    }
+    if (
+      args.includePassed &&
+      (args.diff || args.regressionSince || args.list)
+    ) {
+      console.error(
+        "--include-passed is not supported with --diff, --regression-since, or --list"
       );
       return safeExit(1);
     }
@@ -534,27 +556,31 @@ export const report = defineCommand({
     // Generate output
     // console, text, json, markdown, llm: stdout by default (pipeable)
     // html: file by default (needs browser)
+    const includePassed = args.includePassed ?? false;
     if (formatResult.data === "console") {
-      generateConsoleReport(reportData, { summaryOnly: args.summary });
+      generateConsoleReport(reportData, {
+        summaryOnly: args.summary,
+        includePassed,
+      });
     } else if (formatResult.data === "text") {
-      generateTextReport(reportData, args.output);
+      generateTextReport(reportData, args.output, undefined, includePassed);
     } else if (formatResult.data === "json") {
       // stdout by default, file if -o provided
-      generateJsonReport(reportData, args.output);
+      generateJsonReport(reportData, args.output, includePassed);
     } else if (formatResult.data === "markdown") {
       // stdout by default, file if -o provided
-      generateMarkdownReport(reportData, args.output);
+      generateMarkdownReport(reportData, args.output, undefined, includePassed);
     } else if (formatResult.data === "xml") {
       // stdout by default, file if -o provided
-      generateXmlReport(reportData, args.output);
+      generateXmlReport(reportData, args.output, undefined, includePassed);
     } else if (formatResult.data === "llm") {
       // stdout by default, file if -o provided
-      generateLlmReport(reportData, args.output);
+      generateLlmReport(reportData, args.output, includePassed);
     } else if (formatResult.data === "html") {
       // file by default - HTML needs a browser
       const hostname = new URL(reportData.baseUrl).hostname;
       const outputPath = args.output ?? `${hostname}-report.html`;
-      generateHtmlReport(reportData, outputPath);
+      generateHtmlReport(reportData, outputPath, undefined, includePassed);
     } else if (formatResult.data === "pdf") {
       console.error("PDF format not yet implemented");
       return safeExit(1);
