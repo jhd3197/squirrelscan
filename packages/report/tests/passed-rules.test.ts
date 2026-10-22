@@ -75,6 +75,18 @@ describe("listPassedRules", () => {
     expect(passedRuleScope({ ...byId["core/canonical"], pages: 1 })).toBe("1 page");
   });
 
+  test("site-wide comes from the rule's scope, not from missing pageUrls", () => {
+    const rules = listPassedRules({
+      "core/no-urls": rule("core/no-urls", "core", [pass(), pass()]),
+      "crawl/robots-txt": RULES["crawl/robots-txt"],
+    });
+    const byId = Object.fromEntries(rules.map((r) => [r.id, r]));
+    expect(byId["core/no-urls"].scope).toBe("page");
+    expect(passedRuleScope(byId["core/no-urls"])).toBe("pages not recorded");
+    expect(byId["crawl/robots-txt"].scope).toBe("site");
+    expect(passedRuleScope(byId["crawl/robots-txt"])).toBe("site-wide");
+  });
+
   test("names the category and orders by weight within it", () => {
     const rules = listPassedRules({
       "core/light": rule("core/light", "core", [pass("https://example.com/")], 2),
@@ -123,6 +135,7 @@ describe("renderers", () => {
       ruleId: "core/canonical",
       name: "Name of core/canonical",
       category: "Core SEO",
+      scope: "page",
       pages: 2,
     });
     expect(json.passedRules).toHaveLength(2);
@@ -131,11 +144,13 @@ describe("renderers", () => {
 
   test("llm and xml", () => {
     expect(renderLlm(r, { includePassed: true })).toContain(
-      '<rule id="core/canonical" name="Name of core/canonical" category="Core SEO" pages="2"/>',
+      '<rule id="core/canonical" name="Name of core/canonical" category="Core SEO" scope="page" pages="2"/>',
     );
     const xml = renderXml(r, { includePassed: true });
     expect(xml).toContain('<passed count="2">');
-    expect(xml).toContain('<rule id="crawl/robots-txt" category="Crawlability" pages="0">');
+    expect(xml).toContain(
+      '<rule id="crawl/robots-txt" category="Crawlability" scope="site" pages="0">',
+    );
   });
 
   test("html", () => {

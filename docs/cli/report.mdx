@@ -191,7 +191,7 @@ A report lists issues and counts the checks that passed. Add `--include-passed` 
 squirrel report --include-passed
 ```
 
-A rule is listed when it passed on at least one page and has no warnings or errors. Each rule shows how many pages it passed on, or `site-wide` for a rule that checks the website once. It works with every `--format`. In `json` the list is `passedRules`.
+A rule is listed when it has at least one passing check and no warnings or errors. Each rule shows how many pages it passed on, or `site-wide` for a rule that checks the website once. A page rule whose passes carry no page shows `pages not recorded`. It works with every `--format`. In `json` the list is `passedRules`, and each entry has `ruleId`, `name`, `category`, `scope` (`page` or `site`) and `pages`.
 
 A report loaded with `--input` holds no passing checks, so it lists none.
 

@@ -560,9 +560,11 @@ export interface PassedRule {
   categoryCode: string;
   /** Category display name, e.g. "Core SEO". */
   categoryName: string;
+  /** The rule's declared scope: a site rule checks the site once. */
+  scope: "page" | "site";
   /**
-   * Pages the rule passed on. 0 for a site-scope rule, which checks the site
-   * once rather than each page.
+   * Distinct pages with a passing check. Usually 0 for a site-scope rule, and
+   * 0 for a page-scope rule whose pass rows carry no page.
    */
   pages: number;
 }
@@ -583,7 +585,7 @@ export function listPassedRules(
   ruleResults: Record<
     string,
     {
-      meta: { name: string; category: string; weight: number };
+      meta: { name: string; category: string; weight: number; scope?: string };
       checks: ReadonlyArray<{ status: string; pageUrl?: string; pages?: string[] }>;
     }
   >
@@ -612,6 +614,9 @@ export function listPassedRules(
       name: result.meta.name,
       categoryCode,
       categoryName: getCategoryName(categoryCode),
+      // Read from the rule, never inferred from missing pageUrls: a page rule
+      // whose pass rows carry no page is not site-wide.
+      scope: result.meta.scope === "site" ? "site" : "page",
       pages: pages.size,
       weight: result.meta.weight,
     });
@@ -631,8 +636,12 @@ export function listPassedRules(
     .map(({ weight: _, ...rule }) => rule);
 }
 
-/** Where a passed rule held: "12 pages", "1 page", or "site-wide". */
+/**
+ * Where a passed rule held: "site-wide", "12 pages", "1 page", or "pages not
+ * recorded" for a page rule whose pass rows carry no page.
+ */
 export function passedRuleScope(rule: PassedRule): string {
-  if (rule.pages === 0) return "site-wide";
+  if (rule.scope === "site") return "site-wide";
+  if (rule.pages === 0) return "pages not recorded";
   return `${rule.pages} page${rule.pages === 1 ? "" : "s"}`;
 }

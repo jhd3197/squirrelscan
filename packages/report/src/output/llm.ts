@@ -528,7 +528,7 @@ export function renderLlm(report: AuditReport, options?: LlmRenderOptions): stri
     lines.push(`<passed count="${passedRules.length}">`);
     for (const rule of passedRules) {
       lines.push(
-        `${indent(1)}<rule id="${escapeXml(rule.id)}" name="${escapeXml(rule.name)}" category="${escapeXml(rule.categoryName)}" pages="${rule.pages}"/>`,
+        `${indent(1)}<rule id="${escapeXml(rule.id)}" name="${escapeXml(rule.name)}" category="${escapeXml(rule.categoryName)}" scope="${rule.scope}" pages="${rule.pages}"/>`,
       );
     }
     lines.push("</passed>");

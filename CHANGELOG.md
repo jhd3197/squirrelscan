@@ -17,6 +17,10 @@ How it works:
 
 ## [Unreleased]
 
+### Added
+
+- `squirrel audit` and `squirrel report` take `--include-passed` (#1037), which lists the rules that passed after the issues, in every format: each rule with at least one passing check and no warning or error, with the pages it passed on, or `site-wide` for a site rule. JSON gets a `passedRules` array (`ruleId`, `name`, `category`, `scope`, `pages`). Without the flag every format renders exactly as before. See [report](https://docs.squirrelscan.com/cli/report#list-what-passed).
+
 ### Changed
 
 - **Group score rings read by score, not by group.** On the HTML report the SEO, Performance, Security and Agents rings, numbers and grades are colored red to green by score, like the health score, so a 45 F looks like one. The group's own color stays on its card's top border and label. Every score ring on the page uses a darker tone of the same red, amber and green bands, so the numbers pass WCAG AA contrast on the white cards.

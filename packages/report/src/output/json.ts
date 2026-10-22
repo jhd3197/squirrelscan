@@ -167,10 +167,17 @@ interface SlimJsonReport {
   skippedChecks?: SkippedCheck[];
   /**
    * Rules that passed: at least one passing check and no failing or warning
-   * one. `pages` is 0 for a site-scope rule. Present only with
+   * one. `scope` is the rule's own; `pages` counts distinct pages with a pass,
+   * and is 0 when the pass rows carry none. Present only with
    * `--include-passed`, and only when non-empty.
    */
-  passedRules?: Array<{ ruleId: string; name: string; category: string; pages: number }>;
+  passedRules?: Array<{
+    ruleId: string;
+    name: string;
+    category: string;
+    scope: "page" | "site";
+    pages: number;
+  }>;
   /**
    * Rules that do not apply to this audit's host (pub#629): the transport and
    * delivery rules, skipped because the host is local or private-network. Not
@@ -401,6 +408,7 @@ function buildSlimReport(
             ruleId: r.id,
             name: r.name,
             category: r.categoryName,
+            scope: r.scope,
             pages: r.pages,
           })),
         }

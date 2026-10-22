@@ -261,7 +261,7 @@ export function renderXml(report: AuditReport, options?: XmlRenderOptions): stri
     lines.push(`${indent(1)}<passed count="${passedRules.length}">`);
     for (const rule of passedRules) {
       lines.push(
-        `${indent(2)}<rule id="${escapeXml(rule.id)}" category="${escapeXml(rule.categoryName)}" pages="${rule.pages}">`,
+        `${indent(2)}<rule id="${escapeXml(rule.id)}" category="${escapeXml(rule.categoryName)}" scope="${rule.scope}" pages="${rule.pages}">`,
       );
       lines.push(`${indent(3)}<name>${escapeXml(rule.name)}</name>`);
       lines.push(`${indent(2)}</rule>`);
