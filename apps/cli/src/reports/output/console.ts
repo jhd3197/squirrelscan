@@ -362,7 +362,8 @@ export function generateConsoleReport(
     : [];
   if (passedRules.length > 0) {
     log("");
-    log(fmt.bold(`PASSED ${fmt.dim(`(${passedRules.length} rules)`)}`));
+    const ruleCount = `${passedRules.length} rule${passedRules.length === 1 ? "" : "s"}`;
+    log(fmt.bold(`PASSED ${fmt.dim(`(${ruleCount})`)}`));
     let lastCategory: string | undefined;
     for (const rule of passedRules) {
       if (rule.categoryCode !== lastCategory) {

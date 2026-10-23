@@ -275,7 +275,7 @@ describe("generateConsoleReport", () => {
 
     test("lists rules with no issues, with their page count", () => {
       const out = capture(reportWithPasses(), { includePassed: true });
-      expect(out).toContain("PASSED (1 rules)");
+      expect(out).toContain("PASSED (1 rule)");
       expect(out).toContain("core/canonical core/canonical (2 pages)");
       // A rule with a warning is an issue, not a pass.
       const passed = out.slice(out.indexOf("PASSED"));

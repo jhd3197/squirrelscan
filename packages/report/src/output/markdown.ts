@@ -564,7 +564,7 @@ export function renderMarkdown(report: AuditReport, options?: MarkdownRenderOpti
   if (passedRules.length > 0) {
     lines.push("## Passed");
     lines.push("");
-    lines.push(`*${passedRules.length} rule(s) with no issues*`);
+    lines.push(`*${passedRules.length} rule${passedRules.length === 1 ? "" : "s"} with no issues*`);
     lines.push("");
     lines.push("| Rule | Category | Checked |");
     lines.push("|------|----------|---------|");

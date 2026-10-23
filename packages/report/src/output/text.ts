@@ -385,7 +385,7 @@ export function renderText(report: AuditReport, options?: TextRenderOptions): st
 
   const passedRules = options?.includePassed ? listPassedRules(report.ruleResults) : [];
   if (passedRules.length > 0) {
-    write(`PASSED (${passedRules.length} rules)`);
+    write(`PASSED (${passedRules.length} rule${passedRules.length === 1 ? "" : "s"})`);
     write("-".repeat(40));
     let lastCategory: string | undefined;
     for (const rule of passedRules) {
