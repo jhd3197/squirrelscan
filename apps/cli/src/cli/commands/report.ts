@@ -556,7 +556,15 @@ export const report = defineCommand({
     // Generate output
     // console, text, json, markdown, llm: stdout by default (pipeable)
     // html: file by default (needs browser)
-    const includePassed = args.includePassed ?? false;
+    // A JSON report keeps only its issues, so one read with --input has no
+    // passing checks to list (#1037). Said on stderr so a `-f json` pipe stays
+    // clean, and never listed even when the file happens to hold pass rows.
+    if (args.includePassed && args.input) {
+      console.error(
+        "--include-passed lists no rules for a report read with --input: a JSON report keeps only its issues"
+      );
+    }
+    const includePassed = (args.includePassed ?? false) && !args.input;
     if (formatResult.data === "console") {
       generateConsoleReport(reportData, {
         summaryOnly: args.summary,
