@@ -111,7 +111,8 @@ describe("renderers", () => {
     expect(renderLlm(r, { includePassed: false })).toBe(renderLlm(r));
     expect(renderXml(r, { includePassed: false })).toBe(renderXml(r));
     expect(renderHtml(r, { includePassed: false })).toBe(renderHtml(r));
-    expect(renderHtml(r)).not.toContain("passed-section");
+    expect(renderHtml(r)).not.toContain('id="passed"');
+    expect(renderHtml(r)).not.toContain('href="#passed"');
   });
 
   test("markdown", () => {
@@ -153,11 +154,47 @@ describe("renderers", () => {
     );
   });
 
-  test("html", () => {
+  test("html: one closed section after the findings, a row per rule", () => {
     const html = renderHtml(r, { includePassed: true });
-    expect(html).toContain('class="passed-section"');
-    expect(html).toContain("Name of core/canonical");
-    expect(html).toContain("2 rules with no issues.");
+    const at = html.indexOf('<section id="passed">');
+    const section = html.slice(at, html.indexOf("</section>", at));
+    expect(at).toBeGreaterThan(html.indexOf('<section id="findings">'));
+    expect(html).toContain('href="#passed"');
+    expect(section).toContain("2 rules passed with no issues");
+    expect(section).toContain('data-passed-rule="core/canonical"');
+    expect(section).toContain("Name of core/canonical");
+    expect(section).toContain("2 pages");
+    expect(section).toContain("site-wide");
+    expect(section).not.toContain("content/word-count");
+    // Closed until the reader opens it.
+    expect(section).not.toContain('open=""');
+  });
+
+  test("html: a page rule whose passes carry no page is not site-wide", () => {
+    const html = renderHtml(report({ "core/no-urls": rule("core/no-urls", "core", [pass()]) }), {
+      includePassed: true,
+    });
+    const section = html.slice(html.indexOf('<section id="passed">'));
+    expect(section).toContain("pages not recorded");
+    expect(section).not.toContain("site-wide");
+  });
+
+  test("html: rule text is escaped, nothing remote is loaded, the stylesheet is unchanged", () => {
+    const hostile = rule("core/x", "core", [pass("https://example.com/")]);
+    hostile.meta.name = '<img src="https://evil.test/x.png" onerror="alert(1)">';
+    const plain = report({ "core/x": hostile });
+    const html = renderHtml(plain, { includePassed: true });
+    expect(html).not.toContain('<img src="https://evil.test');
+    expect(html).toContain("&lt;img src=");
+    const remote = (s: string) => ["<img", "<link", "<script src"].map((t) => s.split(t).length);
+    expect(remote(html)).toEqual(remote(renderHtml(plain)));
+    const styles = (s: string) => s.slice(s.indexOf("<style"), s.indexOf("</head>"));
+    expect(styles(html)).toBe(styles(renderHtml(plain)));
+  });
+
+  test("html: a failed run lists no passed rules", () => {
+    const failed = { ...r, status: "failed" as const };
+    expect(renderHtml(failed, { includePassed: true })).not.toContain('id="passed"');
   });
 
   test("nothing passed: no section, even when asked", () => {
@@ -165,6 +202,6 @@ describe("renderers", () => {
     expect(renderMarkdown(none, { includePassed: true })).not.toContain("## Passed");
     expect(renderText(none, { includePassed: true })).not.toContain("PASSED");
     expect(JSON.parse(renderJson(none, { includePassed: true })).passedRules).toBeUndefined();
-    expect(renderHtml(none, { includePassed: true })).not.toContain("passed-section");
+    expect(renderHtml(none, { includePassed: true })).not.toContain('id="passed"');
   });
 });
