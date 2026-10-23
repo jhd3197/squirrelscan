@@ -693,7 +693,7 @@ A consumer that closes a finding when a rule stops reporting it should leave the
 
 The text, Markdown and HTML reports print the same `Not checked:` line under the score, and the LLM and XML reports have a `<not-checked>` element with one `<rule>` per entry. A consumer that closes a finding when a rule stops reporting it should leave findings for these rules open.
 
-**Passed rules:** `passedRules` appears only with [`--include-passed`](/cli/report#list-what-passed), and only when at least one rule passed. Each entry is a rule with at least one passing check and no warning or error. `scope` is the rule's own (`page` or `site`). `pages` counts the distinct pages with a passing check: 0 for a site rule, and 0 for a page rule whose passing checks carry no page, which the other formats show as `pages not recorded`.
+**Passed rules:** `passedRules` appears only with [`--include-passed`](/cli/report#list-what-passed), and only when at least one rule passed. Each entry is a rule with at least one passing check and no warning or error. `scope` is the rule's own (`page` or `site`). `pages` counts the distinct pages with a passing check. It is usually 0 for a site rule, and 0 for a page rule whose passing checks carry no page, which the other formats show as `pages not recorded`. A failed or blocked audit lists none.
 
 **Use for:**
 - Automated analysis

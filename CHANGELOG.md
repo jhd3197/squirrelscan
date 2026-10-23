@@ -19,7 +19,7 @@ How it works:
 
 ### Added
 
-- `squirrel audit` and `squirrel report` take `--include-passed` (#1037), which lists the rules that passed after the issues, in every format: each rule with at least one passing check and no warning or error, with the pages it passed on, `site-wide` for a site rule, or `pages not recorded` for a page rule whose passes name no page. On the HTML report it is one closed line under the findings. JSON gets a `passedRules` array (`ruleId`, `name`, `category`, `scope`, `pages`). A report read with `--input` lists none. Without the flag every format renders exactly as before. See [report](https://docs.squirrelscan.com/cli/report#list-what-passed).
+- `squirrel audit` and `squirrel report` take `--include-passed` (#1037), which lists the rules that passed after the issues, in every format: each rule with at least one passing check and no warning or error, with how many pages it passed on, `site-wide` for a site rule, or `pages not recorded` for a page rule whose passes name no page. On the HTML report it is one closed line under the findings. JSON gets a `passedRules` array (`ruleId`, `name`, `category`, `scope`, `pages`). A report read with `--input` lists none. Without the flag every format renders exactly as before. See [report](https://docs.squirrelscan.com/cli/report#list-what-passed).
 
 ### Changed
 
