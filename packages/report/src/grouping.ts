@@ -637,6 +637,19 @@ export function listPassedRules(
 }
 
 /**
+ * The passed rules a report lists with `--include-passed`: none without the
+ * flag, and none for a failed or blocked run, whose few passes (site checks run
+ * against the seed) say nothing about the site.
+ */
+export function reportPassedRules(
+  report: { status?: string; ruleResults: Parameters<typeof listPassedRules>[0] },
+  includePassed: boolean | undefined
+): PassedRule[] {
+  if (!includePassed || report.status === "failed" || report.status === "blocked") return [];
+  return listPassedRules(report.ruleResults);
+}
+
+/**
  * Where a passed rule held: "site-wide", "12 pages", "1 page", or "pages not
  * recorded" for a page rule whose pass rows carry no page.
  */

@@ -4,7 +4,7 @@ import type { ReportBranding } from "@squirrelscan/core-contracts";
 import type { AuditReport } from "../types";
 import { getScoreGrade } from "../scoring";
 import { getGroupName } from "../categories";
-import { groupIssuesByCategory, flattenIssuesBySeverity, listPassedRules } from "../grouping";
+import { groupIssuesByCategory, flattenIssuesBySeverity, reportPassedRules } from "../grouping";
 import { affectedPages, itemsNotListed } from "../affected-pages";
 import { domainAgeYears } from "../site-metadata";
 import { editorSummaryView } from "../editor-summary";
@@ -256,7 +256,7 @@ export function renderXml(report: AuditReport, options?: XmlRenderOptions): stri
     lines.push(`${indent(1)}<issues/>`);
   }
 
-  const passedRules = options?.includePassed ? listPassedRules(report.ruleResults) : [];
+  const passedRules = reportPassedRules(report, options?.includePassed);
   if (passedRules.length > 0) {
     lines.push(`${indent(1)}<passed count="${passedRules.length}">`);
     for (const rule of passedRules) {

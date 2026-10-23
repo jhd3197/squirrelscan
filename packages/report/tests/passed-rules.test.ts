@@ -192,9 +192,15 @@ describe("renderers", () => {
     expect(styles(html)).toBe(styles(renderHtml(plain)));
   });
 
-  test("html: a failed run lists no passed rules", () => {
-    const failed = { ...r, status: "failed" as const };
-    expect(renderHtml(failed, { includePassed: true })).not.toContain('id="passed"');
+  test.each(["failed", "blocked"] as const)("a %s run lists no passed rules in any format", (status) => {
+    const run = { ...r, status };
+    const on = { includePassed: true };
+    expect(renderHtml(run, on)).not.toContain('id="passed"');
+    expect(renderMarkdown(run, on)).not.toContain("## Passed");
+    expect(renderText(run, on)).not.toContain("PASSED");
+    expect(JSON.parse(renderJson(run, on)).passedRules).toBeUndefined();
+    expect(renderLlm(run, on)).not.toContain("<passed");
+    expect(renderXml(run, on)).not.toContain("<passed");
   });
 
   test("nothing passed: no section, even when asked", () => {
@@ -203,5 +209,6 @@ describe("renderers", () => {
     expect(renderText(none, { includePassed: true })).not.toContain("PASSED");
     expect(JSON.parse(renderJson(none, { includePassed: true })).passedRules).toBeUndefined();
     expect(renderHtml(none, { includePassed: true })).not.toContain('id="passed"');
+    expect(renderHtml(none, { includePassed: true })).not.toContain('href="#passed"');
   });
 });

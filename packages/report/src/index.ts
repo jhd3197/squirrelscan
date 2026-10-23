@@ -46,6 +46,7 @@ export {
   flattenIssuesBySeverity,
   listPassedRules,
   passedRuleScope,
+  reportPassedRules,
 } from "./grouping";
 // Merged check messages (#2231). Exported so the cloud API groups the same
 // findings from its own store and reaches the same text.

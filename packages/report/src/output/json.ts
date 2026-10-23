@@ -10,7 +10,7 @@ import type { AuditReport, AuditStatus, CheckItem, EntityMap } from "../types";
 import { reportFailureReasonCode } from "../failure-notice";
 import { getScoreGrade } from "../scoring";
 import { getGroupName } from "../categories";
-import { groupIssuesByCategory, flattenIssuesBySeverity, listPassedRules } from "../grouping";
+import { groupIssuesByCategory, flattenIssuesBySeverity, reportPassedRules } from "../grouping";
 import { affectedPages } from "../affected-pages";
 import { techIconUrl } from "../technologies";
 import { domainAgeYears, siteProfileRows } from "../site-metadata";
@@ -265,7 +265,7 @@ function buildSlimReport(
   includePassed: boolean
 ): SlimJsonReport {
   const categoryIssues = groupIssuesByCategory(report.ruleResults, report.checkTallies);
-  const passedRules = includePassed ? listPassedRules(report.ruleResults) : [];
+  const passedRules = reportPassedRules(report, includePassed);
   const es = editorSummaryView(report.editorSummary, report);
   const refusedSeedRedirect = seedRedirect(report);
   const skippedChecks = collectSkippedChecks(report.ruleResults);

@@ -15,8 +15,8 @@ import {
   groupTechnologies,
   itemsNotListed,
   itemsNotListedLine,
-  listPassedRules,
   passedRuleScope,
+  reportPassedRules,
   techChangeSummary,
   ENTITY_CONSOLE_LIMIT,
   ENTITY_EMPTY_MESSAGE,
@@ -357,9 +357,7 @@ export function generateConsoleReport(
     log(fmt.green("✓ No issues found"));
   }
 
-  const passedRules = opts.includePassed
-    ? listPassedRules(report.ruleResults)
-    : [];
+  const passedRules = reportPassedRules(report, opts.includePassed);
   if (passedRules.length > 0) {
     log("");
     const ruleCount = `${passedRules.length} rule${passedRules.length === 1 ? "" : "s"}`;

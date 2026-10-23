@@ -61,8 +61,8 @@ import { getAuditFailureNotice, reportFailureReasonCode } from "../failure-notic
 import {
   flattenIssuesBySeverity,
   groupIssuesByCategory,
-  listPassedRules,
   passedRuleScope,
+  reportPassedRules,
   type FlatIssue,
   type GroupedCheck,
   type PassedRule,
@@ -1344,7 +1344,7 @@ function ReportPage({
   );
   const es = editorSummaryView(report.editorSummary, report);
   const priorities = es?.priorities ?? [];
-  const passedRules = includePassed && !failedRun ? listPassedRules(report.ruleResults) : [];
+  const passedRules = reportPassedRules(report, includePassed);
   const known: Known = new Map(issues.map((i) => [i.id, i.group]));
   const techName = new Map((report.technologies?.items ?? []).map((t) => [t.id, t.name]));
   const techIcon = new Map(

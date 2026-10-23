@@ -10,8 +10,8 @@ import { REPORT_SOURCE_PAGES_PREVIEW, REPORT_PAGES_HARD_CAP } from "../constants
 import {
   groupIssuesByCategory,
   flattenIssuesBySeverity,
-  listPassedRules,
   passedRuleScope,
+  reportPassedRules,
 } from "../grouping";
 import { entityMarkdownSection } from "../entities";
 import { groupTechnologies, techChangeSummary, techIconUrl } from "../technologies";
@@ -560,7 +560,7 @@ export function renderMarkdown(report: AuditReport, options?: MarkdownRenderOpti
     lines.push("");
   }
 
-  const passedRules = options?.includePassed ? listPassedRules(report.ruleResults) : [];
+  const passedRules = reportPassedRules(report, options?.includePassed);
   if (passedRules.length > 0) {
     lines.push("## Passed");
     lines.push("");

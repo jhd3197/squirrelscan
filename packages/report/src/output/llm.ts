@@ -3,7 +3,7 @@
 import type { AuditReport, CheckItem } from "../types";
 import { getScoreGrade } from "../scoring";
 import { getGroupName } from "../categories";
-import { groupIssuesByCategory, flattenIssuesBySeverity, listPassedRules } from "../grouping";
+import { groupIssuesByCategory, flattenIssuesBySeverity, reportPassedRules } from "../grouping";
 import { ruleAffectedPages, ruleAffectedRollup, ruleCarriedPageCount } from "../affected-pages";
 import { getDocsUrl } from "../docs";
 import { domainAgeYears } from "../site-metadata";
@@ -523,7 +523,7 @@ export function renderLlm(report: AuditReport, options?: LlmRenderOptions): stri
     lines.push("<issues/>");
   }
 
-  const passedRules = options?.includePassed ? listPassedRules(report.ruleResults) : [];
+  const passedRules = reportPassedRules(report, options?.includePassed);
   if (passedRules.length > 0) {
     lines.push(`<passed count="${passedRules.length}">`);
     for (const rule of passedRules) {

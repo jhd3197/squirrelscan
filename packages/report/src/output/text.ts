@@ -10,8 +10,8 @@ import { REPORT_TEXT_WRAP_WIDTH } from "../constants";
 import {
   groupIssuesByCategory,
   flattenIssuesBySeverity,
-  listPassedRules,
   passedRuleScope,
+  reportPassedRules,
 } from "../grouping";
 import { affectedPages, itemsNotListed, itemsNotListedLine } from "../affected-pages";
 import {
@@ -383,7 +383,7 @@ export function renderText(report: AuditReport, options?: TextRenderOptions): st
     write("");
   }
 
-  const passedRules = options?.includePassed ? listPassedRules(report.ruleResults) : [];
+  const passedRules = reportPassedRules(report, options?.includePassed);
   if (passedRules.length > 0) {
     write(`PASSED (${passedRules.length} rule${passedRules.length === 1 ? "" : "s"})`);
     write("-".repeat(40));
